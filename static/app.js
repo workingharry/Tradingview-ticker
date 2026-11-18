@@ -819,6 +819,114 @@ function updateQuote(symbol, quoteData) {
 
   if (symbol === activeSymbol) {
     updateSymbolMetrics(symbol, quoteData, latestBarData);
+    if (quoteData && quoteData.price) {
+      updateActiveCandleWithPrice(quoteData.price, quoteData.volume, quoteData.time);
+    }
+  }
+}
+
+function updateActiveCandleWithPrice(price, volume, tickTime) {
+  if (!candleSeries || isHistoryLoading || !price || isNaN(price) || price <= 0) return;
+  if (!currentRawBars || currentRawBars.length === 0) return;
+
+  var lastIdx = currentRawBars.length - 1;
+  var curBar = currentRawBars[lastIdx];
+  if (!curBar || typeof curBar.time !== "number") return;
+
+  var updatedOpen = curBar.open;
+  var updatedHigh = Math.max(curBar.high, price);
+  var updatedLow = Math.min(curBar.low, price);
+  var updatedClose = price;
+  var updatedVolume = (volume !== undefined && volume !== null && !isNaN(volume)) ? volume : (curBar.volume || 0);
+
+  var liveBar = {
+    time: curBar.time,
+    open: updatedOpen,
+    high: updatedHigh,
+    low: updatedLow,
+    close: updatedClose,
+    volume: updatedVolume
+  };
+
+  currentRawBars[lastIdx] = liveBar;
+  latestBarData = liveBar;
+  lastBarTime = curBar.time;
+  lastBarObj = Object.assign({}, liveBar);
+
+  if (isAppNapSuspended || (typeof document !== "undefined" && document.hidden)) {
+    hasPendingChartUpdate = true;
+    return;
+  }
+
+  try {
+    if (currentCandleStyle === "hollow") {
+      var prevClose = (currentRawBars.length > 1) ? currentRawBars[currentRawBars.length - 2].close : updatedOpen;
+      var isBullishClose = updatedClose >= prevClose;
+      var strokeColor = isBullishClose ? "#26a69a" : "#ef5350";
+      var isHollowBody = updatedClose >= updatedOpen;
+      candleSeries.update({
+        time: curBar.time,
+        open: updatedOpen,
+        high: updatedHigh,
+        low: updatedLow,
+        close: updatedClose,
+        color: isHollowBody ? "transparent" : strokeColor,
+        borderColor: strokeColor,
+        wickColor: strokeColor
+      });
+    } else {
+      candleSeries.update({
+        time: curBar.time,
+        open: updatedOpen,
+        high: updatedHigh,
+        low: updatedLow,
+        close: updatedClose
+      });
+    }
+
+    if (volumeSeries && updatedVolume !== undefined) {
+      volumeSeries.update({
+        time: curBar.time,
+        value: updatedVolume,
+        color: updatedClose >= updatedOpen ? "rgba(38, 166, 154, 0.45)" : "rgba(239, 83, 80, 0.45)"
+      });
+    }
+
+    if (window.Indicators && currentRawBars.length > 0) {
+      if (ema10Series && indicatorConfig.ema10) {
+        var e10 = window.Indicators.calcEMA(currentRawBars, 10);
+        if (e10.length > 0) ema10Series.update(e10[e10.length - 1]);
+      }
+      if (ema21Series && indicatorConfig.ema21) {
+        var e21 = window.Indicators.calcEMA(currentRawBars, 21);
+        if (e21.length > 0) ema21Series.update(e21[e21.length - 1]);
+      }
+      if (ema30Series && indicatorConfig.ema30) {
+        var e30 = window.Indicators.calcEMA(currentRawBars, 30);
+        if (e30.length > 0) ema30Series.update(e30[e30.length - 1]);
+      }
+      if (vwapSeries && indicatorConfig.vwap && window.Indicators.calcVWAP) {
+        var vw = window.Indicators.calcVWAP(currentRawBars);
+        if (vw.length > 0) vwapSeries.update(vw[vw.length - 1]);
+      }
+      if (sma50Series && indicatorConfig.sma50) {
+        var s50 = window.Indicators.calcSMA(currentRawBars, 50);
+        if (s50.length > 0) sma50Series.update(s50[s50.length - 1]);
+      }
+      if (sma200Series && indicatorConfig.sma200) {
+        var s200 = window.Indicators.calcSMA(currentRawBars, 200);
+        if (s200.length > 0) sma200Series.update(s200[s200.length - 1]);
+      }
+      if (volSmaSeries && indicatorConfig.volSma) {
+        var vs = window.Indicators.calcVolumeSMA(currentRawBars, 50);
+        if (vs.length > 0) volSmaSeries.update(vs[vs.length - 1]);
+      }
+    }
+
+    updateCrosshairLegend(liveBar);
+    updateDeepvueHud(currentRawBars);
+  } catch (chartErr) {
+    console.debug("Quote-to-candle update skipped:", chartErr);
   }
 }
 
@@ -1483,6 +1591,19 @@ function switchChartEngine(engineMode) {
   }
 }
 
+function toTradingViewRealtimeSymbol(symbol) {
+  if (!symbol) return "BATS:NVDA";
+  var s = String(symbol).trim().toUpperCase();
+  if (s.indexOf("BATS:") === 0 || s.indexOf("CBOE:") === 0) return s;
+  if (s.indexOf("BINANCE:") === 0 || s.indexOf("COINBASE:") === 0 || s.indexOf("BYBIT:") === 0 || s.indexOf("OKX:") === 0) {
+    return s;
+  }
+  // For US Equities & ETFs (NASDAQ, NYSE, AMEX, ARCA or plain ticker)
+  // Cboe BZX Exchange (BATS) provides official real-time (0-delay) streaming on TradingView widgets
+  var ticker = s.indexOf(":") !== -1 ? s.split(":").pop() : s;
+  return "BATS:" + ticker;
+}
+
 function initTradingViewWidget(symbol) {
   var tvWidgetContainer = document.getElementById("tvWidgetContainer");
   if (!tvWidgetContainer) return;
@@ -1492,10 +1613,7 @@ function initTradingViewWidget(symbol) {
   if (legendSymbolEl) legendSymbolEl.textContent = pairName;
   if (omniboxDisplay) omniboxDisplay.textContent = pairName + " • " + (getSymbolItem(symbol) ? getSymbolItem(symbol).name : symbol);
 
-  var tvSymbol = symbol;
-  if (symbol.indexOf(":") === -1) {
-    tvSymbol = "NASDAQ:" + symbol;
-  }
+  var tvSymbol = toTradingViewRealtimeSymbol(symbol);
 
   var tvInterval = activeTimeframe === "1W" ? "W" : (activeTimeframe === "1D" ? "D" : activeTimeframe.replace("m", ""));
 
@@ -1797,6 +1915,23 @@ function loadHistory(symbol, tf, isBackfill) {
         }
 
         currentRawBars = uniqueBars;
+        if (uniqueBars.length > 0) {
+          var lastRawBar = uniqueBars[uniqueBars.length - 1];
+          lastBarTime = lastRawBar.time;
+          lastBarObj = {
+            time: lastRawBar.time,
+            open: lastRawBar.open,
+            high: lastRawBar.high,
+            low: lastRawBar.low,
+            close: lastRawBar.close,
+            volume: lastRawBar.volume || 0
+          };
+          latestBarData = Object.assign({}, lastBarObj);
+        } else {
+          lastBarTime = null;
+          lastBarObj = null;
+          latestBarData = null;
+        }
         renderChartData(uniqueBars);
         if (typeof setPriceScaleMode === "function") {
           setPriceScaleMode(currentPriceScaleMode);
@@ -1988,14 +2123,30 @@ function handleLiveBar(symbol, bar) {
   if (isNaN(open) || isNaN(high) || isNaN(low) || isNaN(close) || close <= 0) return;
 
   var tfSec = TF_SECONDS[activeTimeframe] || 60;
+  var lastRawBar = (currentRawBars.length > 0) ? currentRawBars[currentRawBars.length - 1] : null;
+
   if (activeTimeframe !== "1m" && tfSec > 60) {
     var bucketTime = barTime - (barTime % tfSec);
-    if (lastBarTime !== null && bucketTime < lastBarTime) return;
+    if (lastRawBar) {
+      var lastBarBucket = lastRawBar.time - (lastRawBar.time % tfSec);
+      if (bucketTime === lastBarBucket || Math.abs(barTime - lastRawBar.time) < tfSec) {
+        bucketTime = lastRawBar.time;
+      }
+    }
+    if (lastRawBar && bucketTime < lastRawBar.time) {
+      bucketTime = lastRawBar.time;
+    }
+
     if (lastBarObj && bucketTime === lastBarObj.time) {
       open = lastBarObj.open;
       high = Math.max(lastBarObj.high, high, close);
       low = Math.min(lastBarObj.low, low, close);
-      volume = Math.max(lastBarObj.volume, volume);
+      volume = Math.max(lastBarObj.volume || 0, volume);
+    } else if (lastRawBar && bucketTime === lastRawBar.time) {
+      open = lastRawBar.open;
+      high = Math.max(lastRawBar.high, high, close);
+      low = Math.min(lastRawBar.low, low, close);
+      volume = Math.max(lastRawBar.volume || 0, volume);
     } else {
       open = close;
       high = close;
@@ -2003,6 +2154,9 @@ function handleLiveBar(symbol, bar) {
     }
     barTime = bucketTime;
   } else {
+    if (lastRawBar && barTime < lastRawBar.time) {
+      return;
+    }
     if (lastBarTime !== null && barTime < lastBarTime) {
       return;
     }
