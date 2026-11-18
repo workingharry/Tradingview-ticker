@@ -12,7 +12,6 @@ from ticker import ticker
 def handleTicker(ticker_name, data):
     # data contains information such as volume, price, change, etc.
     print(f"Ticker update! {ticker_name}: {data}")
-    pass
 
 # Initialize the ticker object for a specific ticker
 tick = ticker("BINANCE:BTCUSDT")

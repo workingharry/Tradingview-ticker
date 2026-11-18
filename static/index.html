@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TradingView Real-Time Terminal</title>
+  <!-- Google Fonts: Inter & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <!-- TradingView Lightweight Charts CDN -->
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+  <!-- Pure Mathematical Indicator Engine -->
+  <script src="indicators.js"></script>
+</head>
+<body>
+  <div class="terminal-container">
+    <!-- Top Header -->
+    <header class="top-nav" role="banner">
+      <div class="brand">
+        <div class="logo-mark">⚡</div>
+        <div class="brand-text">
+          <span class="brand-name">TV TERMINAL</span>
+          <span class="brand-sub">Deepvue Pro Engine</span>
+        </div>
+      </div>
+
+      <!-- Quick Omnibox Search Button -->
+      <button class="omnibox-btn" id="openSearchBtn" title="Search symbols (Cmd+K)">
+        <span class="search-icon">🔍</span>
+        <span class="search-text" id="omniboxDisplay">NVDA • NVIDIA Corp.</span>
+        <kbd class="search-shortcut">⌘K</kbd>
+      </button>
+
+      <!-- Language Switcher Pill -->
+      <button class="lang-toggle-btn" id="langToggleBtn" title="繁簡英語言切換">
+        <span class="lang-globe">🌐</span>
+        <span class="lang-text" id="langLabel">繁中</span>
+      </button>
+
+      <!-- Engine Mode Selector -->
+      <div class="engine-selector-box" id="engineSelectorBox">
+        <span class="engine-tag" id="engineTagLabel">引擎:</span>
+        <select class="engine-dropdown" id="engineSelect" title="切換圖表渲染引擎">
+          <option value="A" selected>Deepvue Pro (高可用雙源)</option>
+          <option value="C">TradingView 官方組件</option>
+        </select>
+      </div>
+
+      <!-- Gemini Copilot Chat Toggle Button -->
+      <button class="chat-toggle-btn" id="openChatBtn" title="開啟 Gemini AI 市場助理 (⌘J)">
+        <span class="chat-icon">💬</span>
+        <span class="chat-text">AI Copilot</span>
+        <kbd class="chat-shortcut">⌘J</kbd>
+      </button>
+
+      <!-- Multi-Chart Split Layout Toggle -->
+      <div class="split-layout-selector" id="splitLayoutSelector" title="切換分屏顯示模式">
+        <button class="split-btn active" data-layout="1x1" title="單圖 (1x1)">1x1</button>
+        <button class="split-btn" data-layout="1x2" title="雙圖 (1x2)">1x2</button>
+        <button class="split-btn" data-layout="2x2" title="四圖 (2x2)">2x2</button>
+        <button class="split-btn mtf-sync-btn" id="mtfSyncBtn" title="多週期共振同步 (1D, 1W, 1H, 15m)">🔗 MTF</button>
+      </div>
+
+      <!-- Ticker Tape -->
+      <div class="ticker-tape-container">
+        <div class="ticker-tape" id="tickerTape" role="region" aria-label="Live Market Quotes">
+          <!-- Populated dynamically and updated in-place via JavaScript -->
+        </div>
+      </div>
+
+      <!-- System Status -->
+      <div class="system-status">
+        <div class="status-badge" id="statusBadge" aria-live="polite">
+          <span class="status-dot"></span>
+          <span class="status-label" id="statusText">CONNECTING</span>
+        </div>
+        <div class="metric-pill">
+          <span class="metric-title">TICKS:</span>
+          <span class="metric-val" id="tickCounter">0</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main class="workspace" role="main">
+      <!-- Deepvue / TradingView Toolbar Bar -->
+      <div class="chart-controls">
+        <!-- Timeframe Selector -->
+        <div class="timeframe-selector" id="timeframeSelector" role="tablist" aria-label="Timeframe Selection">
+          <button class="tf-btn" data-tf="1m">1m</button>
+          <button class="tf-btn" data-tf="5m">5m</button>
+          <button class="tf-btn" data-tf="15m">15m</button>
+          <button class="tf-btn" data-tf="1h">1h</button>
+          <button class="tf-btn active" data-tf="1D">1D</button>
+          <button class="tf-btn" data-tf="1W">1W</button>
+        </div>
+
+        <!-- Candlestick Style Selector (Solid vs Hollow) -->
+        <button class="candle-style-btn" id="candleStyleBtn" title="切換實心/實空心蠟燭 (Solid/Hollow Candles)">🕯️ 實心</button>
+
+        <!-- Indicator Menu Trigger -->
+        <button class="tool-btn" id="indicatorsBtn" title="Indicators and Overlays">
+          <span class="tool-icon">ƒx</span>
+          <span>Indicators</span>
+        </button>
+
+        <!-- Fundamentals & AI Analysis Trigger -->
+        <button class="tool-btn" id="fundamentalsBtn" title="Fundamental Analysis & AI Diagnosis">
+          <span class="tool-icon">📊</span>
+          <span id="fundamentalsBtnLabel">財報分析</span>
+        </button>
+
+        <!-- AI Agent Lens Decision Engine Trigger -->
+        <button class="tool-btn" id="aiLensBtn" title="AI Agent Lens (Non-Repainting Decision Engine)">
+          <span class="tool-icon">🤖</span>
+          <span id="aiLensBtnLabel">AI Lens</span>
+        </button>
+
+        <!-- Institutional Stock Screener (RS + ATR + CANSLIM Engine) -->
+        <button class="tool-btn" id="screenerBtn" title="Stock Screener (Alt+S)">
+          <span class="tool-icon">🎯</span>
+          <span id="screenerBtnLabel">智能選股</span>
+        </button>
+
+        <!-- Relative Strength (RS) Benchmark Status Badge -->
+        <div class="rs-benchmark-bar" id="rsBenchmarkBar">
+          <span class="rs-label">RS:</span>
+          <span class="rs-active-badge" id="rsActiveBadge" title="RS Benchmark Reference (Click to configure in Indicators)">Ref: SPY</span>
+        </div>
+
+        <!-- Active Symbol Metrics HUD -->
+        <div class="symbol-metrics" id="symbolMetrics">
+          <div class="asset-title-block">
+            <span class="asset-exchange" id="activeExchange">BINANCE</span>
+            <span class="asset-name" id="activeName">Bitcoin</span>
+          </div>
+          <div class="current-price" id="activePrice">--</div>
+          <div class="metric-box">
+            <span class="metric-tag">24h Change</span>
+            <span class="metric-num" id="activeChange">--</span>
+          </div>
+          <div class="metric-box">
+            <span class="metric-tag">24h High</span>
+            <span class="metric-num up" id="activeHigh">--</span>
+          </div>
+          <div class="metric-box">
+            <span class="metric-tag">24h Low</span>
+            <span class="metric-num down" id="activeLow">--</span>
+          </div>
+          <div class="metric-box">
+            <span class="metric-tag">24h Vol</span>
+            <span class="metric-num" id="activeVolume">--</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Equity Live Notice Banner -->
+      <div class="equity-banner" id="equityBanner" style="display: none;">
+        <span class="banner-icon">ℹ️</span>
+        <span class="banner-text">Equity Symbol: Bars accumulate in real time from server launch (market hours only).</span>
+      </div>
+
+      <!-- Chart & Watchlist Split Workspace -->
+      <div class="chart-main-area">
+
+        <!-- Left Vertical Drawing Toolbar -->
+        <aside class="drawing-toolbar" id="drawingToolbar" aria-label="Drawing Tools">
+          <button class="draw-tool-btn active" data-tool="cursor" title="游標 (Cursor / Crosshair)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l7 18 3-7 7-3L3 3z"/></svg>
+          </button>
+          <button class="draw-tool-btn" data-tool="trendline" title="趨勢線 (Trendline)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="20" x2="20" y2="4"/><circle cx="4" cy="20" r="2" fill="currentColor"/><circle cx="20" cy="4" r="2" fill="currentColor"/></svg>
+          </button>
+          <button class="draw-tool-btn" data-tool="hline" title="水平支撐壓力線 (Horizontal Line)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"/><circle cx="6" cy="12" r="2" fill="currentColor"/><circle cx="18" cy="12" r="2" fill="currentColor"/></svg>
+          </button>
+          <button class="draw-tool-btn" data-tool="risk-reward" title="多空盈虧比區間工具 (Risk / Reward Box)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="8" rx="1" fill="rgba(34,197,94,0.3)" stroke="#22c55e"/><rect x="3" y="13" width="18" height="8" rx="1" fill="rgba(239,68,68,0.3)" stroke="#ef4444"/><line x1="2" y1="12" x2="22" y2="12" stroke="#3b82f6" stroke-dasharray="2,2"/></svg>
+          </button>
+          <button class="draw-tool-btn" data-tool="avwap" title="錨定 VWAP (Anchored VWAP)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><circle cx="9" cy="11" r="3" fill="#eab308"/></svg>
+          </button>
+          <button class="draw-tool-btn" data-tool="ruler" title="測量標尺 (Ruler: 週期與漲跌幅)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 17l15-15 5 5-15 15z"/><path d="M6 7l2 2m-1 3l2 2m-1 3l2 2"/></svg>
+          </button>
+          <div class="draw-tool-divider"></div>
+          <button class="draw-tool-btn draw-tool-clear" id="btnClearDrawings" title="清除所有標註 (Clear Drawings)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </button>
+        </aside>
+
+        <!-- Chart Display Area -->
+        <div class="chart-wrapper">
+          <!-- Interactive OHLC Crosshair Legend -->
+          <div class="chart-legend" id="chartLegend">
+            <span class="legend-symbol" id="legendSymbol">BTCUSDT</span>
+            <span class="legend-interval" id="legendInterval">1D</span>
+            <span class="legend-item">O <span class="val" id="legendOpen">--</span></span>
+            <span class="legend-item">H <span class="val" id="legendHigh">--</span></span>
+            <span class="legend-item">L <span class="val" id="legendLow">--</span></span>
+            <span class="legend-item">C <span class="val" id="legendClose">--</span></span>
+            <span class="legend-item">Vol <span class="val" id="legendVol">--</span></span>
+            <!-- Live Indicator Readouts -->
+            <span class="legend-indicator ind-ema10" id="legEma10" style="display:none;">EMA10 <span class="val">--</span></span>
+            <span class="legend-indicator ind-ema21" id="legEma21" style="display:none;">EMA21 <span class="val">--</span></span>
+            <span class="legend-indicator ind-ema30" id="legEma30" style="display:none;">EMA30 <span class="val">--</span></span>
+            <span class="legend-indicator ind-sma50" id="legSma50" style="display:none;">SMA50 <span class="val">--</span></span>
+            <span class="legend-indicator ind-sma200" id="legSma200" style="display:none;">SMA200 <span class="val">--</span></span>
+            <span class="legend-indicator ind-vwap" id="legVwap" style="display:none;">VWAP <span class="val">--</span></span>
+            <span class="legend-indicator ind-avwap" id="legAvwap">
+              <span class="leg-title" id="legAvwapTitle">AVWAP Swing Low 252 5 2 50 hlc3 1</span>
+              <span class="val" id="legAvwapVal">--</span>
+              <span class="sub-val" id="legAvwapBands"></span>
+              <button class="legend-gear-btn" id="btnAvwapSettings" title="AVWAP 參數設定">⚙️</button>
+            </span>
+            <span class="legend-indicator ind-rs" id="legRs" style="display:none;">RS <span class="val">--</span></span>
+          </div>
+
+          <!-- Deepvue Technical HUD -->
+          <div class="deepvue-hud" id="deepvueHud">
+            <div class="hud-item"><span class="hud-label" id="hud52wLabel">52W High</span> <span class="hud-val" id="hud52wVal">--</span></div>
+            <div class="hud-item"><span class="hud-label" id="hudVol50Label">Vol/50D</span> <span class="hud-val" id="hudVol50Val">--</span></div>
+            <div class="hud-item"><span class="hud-label" id="hudAdrLabel">ADR%</span> <span class="hud-val" id="hudAdrVal">--</span></div>
+          </div>
+
+          <div id="chartContainer" class="chart-canvas split-chart-container">
+            <div class="price-pane">
+              <div id="chart"></div>
+              <canvas id="drawingCanvas" class="drawing-overlay-canvas"></canvas>
+              <!-- AVWAP Right-Bottom Info Table (4 rows x 2 cols) -->
+              <div class="avwap-info-table" id="avwapInfoTable" style="display: none;">
+                <div class="avwap-table-row">
+                  <span class="avwap-table-label">Anchor:</span>
+                  <span class="avwap-table-value" id="avwapTblAnchor">--</span>
+                </div>
+                <div class="avwap-table-row">
+                  <span class="avwap-table-label">VWAP:</span>
+                  <span class="avwap-table-value" id="avwapTblVwap">--</span>
+                </div>
+                <div class="avwap-table-row">
+                  <span class="avwap-table-label">Price vs VWAP:</span>
+                  <span class="avwap-table-value" id="avwapTblDiff">--</span>
+                </div>
+                <div class="avwap-table-row">
+                  <span class="avwap-table-label">Position:</span>
+                  <span class="avwap-table-value" id="avwapTblPos">--</span>
+                </div>
+              </div>
+            </div>
+            <!-- AVWAP Sub-pane (for Sub-pane display mode) -->
+            <div id="avwapPane" class="avwap-pane rs-pane" style="display: none;">
+              <div class="rs-pane-header">
+                <span class="rs-pane-title" id="avwapPaneTitle">AVWAP Sub-pane</span>
+                <div class="rs-hud-group" id="avwapPaneHud">
+                  <span class="rs-metric-badge" id="avwapPaneBadge">AVWAP: --</span>
+                </div>
+              </div>
+              <div id="avwapChart" class="rs-chart-canvas"></div>
+            </div>
+            <div id="rsPane" class="rs-pane">
+              <div class="rs-pane-header">
+                <span class="rs-pane-title" id="rsPaneTitle">RS Line vs SPY</span>
+                <div class="rs-pane-mode-selector" id="rsPaneModeSelector">
+                  <button class="rs-mode-btn active" id="btnModeMansfield" data-mode="mansfield" title="TradingView ATR Toolkit / Mansfield RS (以 0 為中軸)">Mansfield RS (0軸)</button>
+                  <button class="rs-mode-btn" id="btnModeDeepvue" data-mode="deepvue" title="Deepvue 原始強度比率線 + 21 EMA">Deepvue RS</button>
+                </div>
+                <div class="rs-hud-group" id="rsHudGroup">
+                  <span class="rs-metric-badge" id="rsAtrPctBadge">ATR%: --</span>
+                  <span class="rs-metric-badge" id="rsSuggestedBadge">建議: -- 股</span>
+                  <span class="rs-rating-badge" id="rsRatingBadge">RS Rating: --</span>
+                </div>
+              </div>
+              <div id="rsChart" class="rs-chart-canvas"></div>
+            </div>
+          </div>
+          <div id="tvWidgetContainer" class="chart-canvas tv-widget-canvas" style="display: none;"></div>
+          <div id="splitChartGrid" class="split-grid-container" style="display: none;">
+            <div class="split-pane-item" id="splitPane2">
+              <div class="split-pane-header"><span class="split-pane-title" id="splitTitle2">AMEX:SPY • S&P 500 ETF</span></div>
+              <div id="splitChart2" class="split-chart-sub"></div>
+            </div>
+            <div class="split-pane-item" id="splitPane3">
+              <div class="split-pane-header"><span class="split-pane-title" id="splitTitle3">NASDAQ:QQQ • Invesco QQQ</span></div>
+              <div id="splitChart3" class="split-chart-sub"></div>
+            </div>
+            <div class="split-pane-item" id="splitPane4">
+              <div class="split-pane-header"><span class="split-pane-title" id="splitTitle4">NASDAQ:FAST • Fastenal Co.</span></div>
+              <div id="splitChart4" class="split-chart-sub"></div>
+            </div>
+          </div>
+          <div class="chart-watermark" id="chartWatermark">BTCUSDT • 1D</div>
+
+          <!-- Bottom Date Range Selector -->
+          <div class="date-range-bar" id="dateRangeBar">
+            <div class="range-pills">
+              <button class="range-btn" data-range="1D">1D</button>
+              <button class="range-btn" data-range="5D">5D</button>
+              <button class="range-btn" data-range="1M">1M</button>
+              <button class="range-btn" data-range="3M">3M</button>
+              <button class="range-btn" data-range="6M">6M</button>
+              <button class="range-btn" data-range="YTD">YTD</button>
+              <button class="range-btn active" data-range="1Y">1Y</button>
+              <button class="range-btn" data-range="ALL">ALL</button>
+            </div>
+            <div class="chart-scale-mode">
+              <span class="scale-item active" id="scaleAuto" title="自適應價格軸 (Auto-Scale)">AUTO</span>
+              <span class="scale-item" id="scaleLog">LOG</span>
+              <span class="scale-item" id="scalePercent">%</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Watchlist Sidebar -->
+        <aside class="watchlist-sidebar" id="watchlistSidebar" aria-label="Watchlist">
+          <div class="sidebar-header">
+            <span class="sidebar-title">WATCHLIST</span>
+            <button class="add-symbol-btn" id="addSymbolBtn" title="Add Symbol">+</button>
+          </div>
+          <div class="watchlist-items" id="watchlistItems">
+            <!-- Populated dynamically with live quotes -->
+          </div>
+        </aside>
+      </div>
+    </main>
+  </div>
+
+  <!-- Omnibox Search Modal -->
+  <div class="modal-overlay" id="searchModal" style="display: none;">
+    <div class="modal-dialog">
+      <div class="search-box">
+        <span class="search-box-icon">🔍</span>
+        <input type="text" id="searchInput" placeholder="Search symbol, stock, crypto or ETF (e.g. AAPL, NVDA, SPY)..." autocomplete="off" />
+        <button class="modal-close" id="closeSearchModal">✕</button>
+      </div>
+      <div class="search-tabs">
+        <button class="search-tab active" data-filter="all">All</button>
+        <button class="search-tab" data-filter="stock">Stocks</button>
+        <button class="search-tab" data-filter="etf">ETFs</button>
+        <button class="search-tab" data-filter="crypto">Crypto</button>
+      </div>
+      <div class="search-results-list" id="searchResultsList">
+        <!-- Rendered results -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Indicators Modal -->
+  <div class="modal-overlay" id="indicatorModal" style="display: none;">
+    <div class="modal-dialog indicator-dialog">
+      <div class="modal-header">
+        <span class="modal-title">Indicators & Overlays</span>
+        <button class="modal-close" id="closeIndicatorModal">✕</button>
+      </div>
+      <div class="indicator-settings-body">
+        <div class="ind-section-title">Minervini / Deepvue Trend Overlays</div>
+        
+        <label class="ind-toggle-row">
+          <input type="checkbox" id="chkEma10" checked />
+          <span class="color-dot dot-cyan"></span>
+          <span class="ind-name">10 EMA (Fast Momentum)</span>
+        </label>
+
+        <label class="ind-toggle-row">
+          <input type="checkbox" id="chkEma21" checked />
+          <span class="color-dot dot-purple"></span>
+          <span class="ind-name">21 EMA (Pullback Support)</span>
+        </label>
+
+        <label class="ind-toggle-row">
+          <input type="checkbox" id="chkEma30" checked />
+          <span class="color-dot dot-amber"></span>
+          <span class="ind-name">30 EMA (Swing Trend Line)</span>
+        </label>
+
+        <label class="ind-toggle-row">
+          <input type="checkbox" id="chkSma50" checked />
+          <span class="color-dot dot-amber"></span>
+          <span class="ind-name">50 SMA (Institutional Line)</span>
+        </label>
+
+        <label class="ind-toggle-row">
+          <input type="checkbox" id="chkSma200" checked />
+          <span class="color-dot dot-red"></span>
+          <span class="ind-name">200 SMA (Stage 2 Long-Term Trend)</span>
+        </label>
+
+        <label class="ind-toggle-row">
+          <input type="checkbox" id="chkVwap" />
+          <span class="color-dot dot-pink"></span>
+          <span class="ind-name">VWAP (Volume-Weighted Average Price)</span>
+        </label>
+
+        <label class="ind-toggle-row">
+          <input type="checkbox" id="chkAtr" />
+          <span class="color-dot dot-teal"></span>
+          <span class="ind-name">ATR (14-Period Average True Range)</span>
+        </label>
+
+        <label class="ind-toggle-row">
+          <input type="checkbox" id="chkVolSma" checked />
+          <span class="color-dot dot-gray"></span>
+          <span class="ind-name">50-Period Volume Moving Average</span>
+        </label>
+
+        <label class="ind-toggle-row">
+          <input type="checkbox" id="chkBollinger" />
+          <span class="color-dot dot-blue"></span>
+          <span class="ind-name">Bollinger Bands (20, 2)</span>
+        </label>
+
+        <div class="ind-section-title" style="margin-top: 16px;">Pine Script & Custom Indicators</div>
+        <label class="ind-toggle-row" style="display: flex; align-items: center; justify-content: space-between;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <input type="checkbox" id="chkAvwap" checked />
+            <span class="color-dot dot-teal"></span>
+            <span class="ind-name">Anchored VWAP (AVWAP - Pine v5)</span>
+          </div>
+          <button class="btn-xs btn-outline" id="btnOpenAvwapFromIndModal" title="AVWAP 參數設定" style="margin-left: auto;">⚙️ 設定</button>
+        </label>
+        <div class="rs-config-box" style="margin-bottom: 12px; font-size: 11px; line-height: 1.5; color: var(--text-dim);">
+          <div style="margin-bottom: 4px;">🌲 <strong>TradingView 官方引擎 (方案 C)</strong>：點擊圖表上方 <strong>fx 指標按鈕</strong>，即可直接搜尋並載入 TradingView 官方與社群萬種 Pine Script 自訂指標。</div>
+          <div>⚡ <strong>Deepvue 旗艦引擎 (方案 A/B)</strong>：內建 10/21/30 EMA、50/200 SMA、VWAP、ATR、RS 等純數學無延遲渲染。</div>
+        </div>
+
+        <div class="ind-section-title" style="margin-top: 16px;">Deepvue Relative Strength (RS) Line</div>
+        <label class="ind-toggle-row">
+          <input type="checkbox" id="chkRsLine" checked />
+          <span class="color-dot dot-deepvue-blue"></span>
+          <span class="ind-name">Relative Strength Line</span>
+        </label>
+        <div class="rs-config-box">
+          <span class="rs-config-label">Benchmark Reference Ticker:</span>
+          <div class="rs-tag-pills" style="margin-bottom: 8px;">
+            <button class="rs-pill active" data-bench="SPY">SPY</button>
+            <button class="rs-pill" data-bench="QQQ">QQQ</button>
+            <button class="rs-pill" data-bench="IWM">IWM</button>
+            <button class="rs-pill" data-bench="DIA">DIA</button>
+          </div>
+          <div class="rs-input-group">
+            <input type="text" id="rsBenchmarkCustomInput" placeholder="e.g. SPY, QQQ, IWM, DIA, BTCUSDT" value="SPY" />
+            <button class="btn-primary" id="applyRsBenchmarkBtn">Set Tag</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="closeIndicatorModalBottom">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Anchored VWAP (AVWAP) TradingView-Style Settings Modal -->
+  <div class="modal-overlay" id="avwapSettingsModal" style="display: none;">
+    <div class="modal-dialog avwap-settings-dialog">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span class="modal-title" id="avwapSettingsTitle">Anchored VWAP (AVWAP)</span>
+          <span class="avwap-version-tag">Pine Script v5</span>
+        </div>
+        <button class="modal-close" id="closeAvwapSettingsModal">✕</button>
+      </div>
+
+      <!-- Tab Navigation -->
+      <div class="avwap-tabs-header">
+        <button class="avwap-tab-btn active" data-tab="inputs" id="tabBtnInputs">輸入 (Inputs)</button>
+        <button class="avwap-tab-btn" data-tab="style" id="tabBtnStyle">樣式 (Style)</button>
+        <button class="avwap-tab-btn" data-tab="visibility" id="tabBtnVisibility">可見性 (Visibility)</button>
+      </div>
+
+      <!-- Tab 1: Inputs -->
+      <div class="avwap-tab-content active" id="tabContentInputs">
+        <!-- Pine Script Quick Paste & Parse Section -->
+        <div class="avwap-pine-box">
+          <div class="avwap-pine-header">
+            <span>🌲 貼上 Pine Script 代碼自動解析 (Auto-Parse input.*)</span>
+            <button class="btn-xs btn-primary" id="btnParsePineScript">解析代碼</button>
+          </div>
+          <textarea id="avwapPineInputArea" class="avwap-pine-textarea" rows="2" placeholder="// 貼上包含 input.string, input.int, input.float 等 Pine Script v5 代碼..."></textarea>
+        </div>
+
+        <div class="avwap-form-grid">
+          <!-- 1. Anchor (Dropdown) -->
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapInputAnchor">Anchor</label>
+            <div class="avwap-field-ctrl">
+              <select id="avwapInputAnchor" class="avwap-select">
+                <option value="Swing Low">Swing Low</option>
+                <option value="Swing High">Swing High</option>
+                <option value="Highest Volume">Highest Volume</option>
+                <option value="Gap-Up">Gap-Up</option>
+                <option value="Manual Date">Manual Date</option>
+                <option value="Session (intraday)">Session (intraday)</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- 2. Auto-anchor lookback (bars) -->
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapInputLookback">Auto-anchor lookback (bars)</label>
+            <div class="avwap-field-ctrl">
+              <input type="number" id="avwapInputLookback" class="avwap-input-num" min="5" max="1000" value="252" />
+            </div>
+          </div>
+
+          <!-- 3. Gap-Up: min gap % -->
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapInputGapPct">Gap-Up: min gap % (open vs prior close)</label>
+            <div class="avwap-field-ctrl">
+              <input type="number" id="avwapInputGapPct" class="avwap-input-num" step="0.5" min="0.1" value="5" />
+            </div>
+          </div>
+
+          <!-- 4. Gap-Up: min Volume / prior Volume MA -->
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapInputGapVol">Gap-Up: min Volume / prior Volume MA</label>
+            <div class="avwap-field-ctrl">
+              <input type="number" id="avwapInputGapVol" class="avwap-input-num" step="0.1" min="0.5" value="2" />
+            </div>
+          </div>
+
+          <!-- 5. Volume MA Length (for Gap-Up) -->
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapInputVolMaLen">Volume MA Length (for Gap-Up)</label>
+            <div class="avwap-field-ctrl">
+              <input type="number" id="avwapInputVolMaLen" class="avwap-input-num" min="1" max="500" value="50" />
+            </div>
+          </div>
+
+          <!-- 6. Manual anchor date & time -->
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapInputDate">Manual anchor date</label>
+            <div class="avwap-field-ctrl avwap-datetime-group">
+              <input type="date" id="avwapInputDate" class="avwap-input-date" value="2026-01-02" />
+              <input type="time" id="avwapInputTime" class="avwap-input-time" value="00:00" />
+            </div>
+          </div>
+
+          <!-- 7. Source (Dropdown) -->
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapInputSource">Source</label>
+            <div class="avwap-field-ctrl">
+              <select id="avwapInputSource" class="avwap-select">
+                <option value="hlc3">hlc3 ((H + L + C) / 3)</option>
+                <option value="close">close</option>
+                <option value="open">open</option>
+                <option value="high">high</option>
+                <option value="low">low</option>
+                <option value="hl2">hl2 ((H + L) / 2)</option>
+                <option value="ohlc4">ohlc4 ((O + H + L + C) / 4)</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- 8. Show std-dev bands (Checkbox) -->
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapInputShowBands">Show std-dev bands</label>
+            <div class="avwap-field-ctrl">
+              <input type="checkbox" id="avwapInputShowBands" class="avwap-checkbox" checked />
+            </div>
+          </div>
+
+          <!-- 9. Band multiplier (x vol-weighted stdev) -->
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapInputBandMult">Band multiplier (x vol-weighted stdev)</label>
+            <div class="avwap-field-ctrl">
+              <input type="number" id="avwapInputBandMult" class="avwap-input-num" step="0.1" min="0.1" max="10" value="1" />
+            </div>
+          </div>
+
+          <!-- 10. Mark anchor bar (Checkbox) -->
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapInputMarkAnchor">Mark anchor bar</label>
+            <div class="avwap-field-ctrl">
+              <input type="checkbox" id="avwapInputMarkAnchor" class="avwap-checkbox" checked />
+            </div>
+          </div>
+
+          <!-- 11. Show info table (Checkbox) -->
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapInputShowTable">Show info table</label>
+            <div class="avwap-field-ctrl">
+              <input type="checkbox" id="avwapInputShowTable" class="avwap-checkbox" checked />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 2: Style -->
+      <div class="avwap-tab-content" id="tabContentStyle" style="display: none;">
+        <div class="avwap-form-grid">
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapColorAbove">站上均價顏色 (Above VWAP)</label>
+            <div class="avwap-field-ctrl">
+              <input type="color" id="avwapColorAbove" class="avwap-color-picker" value="#26a69a" />
+              <span class="avwap-color-val" id="valColorAbove">#26a69a (Teal)</span>
+            </div>
+          </div>
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapColorBelow">跌破均價顏色 (Below VWAP)</label>
+            <div class="avwap-field-ctrl">
+              <input type="color" id="avwapColorBelow" class="avwap-color-picker" value="#ef5350" />
+              <span class="avwap-color-val" id="valColorBelow">#ef5350 (Red)</span>
+            </div>
+          </div>
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapColorBand">標準差通道線顏色 (Bands)</label>
+            <div class="avwap-field-ctrl">
+              <input type="color" id="avwapColorBand" class="avwap-color-picker" value="#787b86" />
+              <span class="avwap-color-val" id="valColorBand">#787b86</span>
+            </div>
+          </div>
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapShowBandFill">通道帶狀填色 (Band Fill)</label>
+            <div class="avwap-field-ctrl">
+              <input type="checkbox" id="avwapShowBandFill" class="avwap-checkbox" checked />
+              <span class="avwap-field-desc">半透明灰色填色 (Translucent Gray Fill)</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 3: Visibility -->
+      <div class="avwap-tab-content" id="tabContentVisibility" style="display: none;">
+        <div class="avwap-form-grid">
+          <div class="avwap-field-row">
+            <label class="avwap-field-label" for="avwapDisplayMode">顯示位置 (Display Position)</label>
+            <div class="avwap-field-ctrl">
+              <select id="avwapDisplayMode" class="avwap-select">
+                <option value="overlay">主圖疊加 (Overlay on Main Chart)</option>
+                <option value="pane">獨立副圖 (Sub-pane)</option>
+              </select>
+            </div>
+          </div>
+          <div class="avwap-field-row">
+            <label class="avwap-field-label">時間週期可見性 (Timeframes)</label>
+            <div class="avwap-field-ctrl avwap-timeframe-checks">
+              <label><input type="checkbox" checked disabled /> 秒 (Seconds)</label>
+              <label><input type="checkbox" checked disabled /> 分鐘 (Minutes)</label>
+              <label><input type="checkbox" checked disabled /> 小時 (Hours)</label>
+              <label><input type="checkbox" checked disabled /> 天 (Days)</label>
+              <label><input type="checkbox" checked disabled /> 週 (Weeks)</label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Footer Buttons -->
+      <div class="modal-footer avwap-modal-footer">
+        <div class="avwap-footer-left">
+          <button class="btn-secondary" id="btnAvwapResetDefaults">預設值 (Defaults) ⌄</button>
+        </div>
+        <div class="avwap-footer-right">
+          <button class="btn-secondary" id="btnAvwapCancel">取消 (Cancel)</button>
+          <button class="btn-primary" id="btnAvwapOk">確認 (OK)</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Fundamental Analysis & AI Diagnosis Modal -->
+  <div class="modal-overlay" id="fundamentalsModal" style="display: none;">
+    <div class="modal-dialog fundamentals-dialog">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span class="modal-title" id="fundamentalsTitle">基本面診斷與 AI 財報分析</span>
+          <span class="fundamentals-symbol-tag" id="fundamentalsSymbolTag">--</span>
+        </div>
+        <button class="modal-close" id="closeFundamentalsModal">✕</button>
+      </div>
+      <div class="fundamentals-body">
+        <div class="fundamentals-toolbar">
+          <span class="fundamentals-status" id="fundamentalsStatus">讀取中...</span>
+          <button class="btn-secondary" id="refreshFundamentalsBtn">🔄 刷新分析</button>
+        </div>
+        <div class="metrics-grid" id="fundamentalsMetricsGrid">
+          <div class="metric-card">
+            <span class="metric-card-title">52 週最高價</span>
+            <span class="metric-card-val" id="fund52wHigh">--</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-card-title">52 週最低價</span>
+            <span class="metric-card-val" id="fund52wLow">--</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-card-title">距 52 週新高</span>
+            <span class="metric-card-val" id="fundPctFromHigh">--</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-card-title">本益比 (PE)</span>
+            <span class="metric-card-val" id="fundPE">--</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-card-title">每股盈餘 (EPS)</span>
+            <span class="metric-card-val" id="fundEPS">--</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-card-title">營收 YoY 成長率</span>
+            <span class="metric-card-val" id="fundRevGrowth">--</span>
+          </div>
+        </div>
+        <div class="ai-analysis-container">
+          <div class="ai-analysis-header">
+            <span class="ai-header-title">🤖 AI 投資長分析診斷 (Gemini Pro)</span>
+            <span class="ai-model-tag" id="fundamentalsModelTag">--</span>
+          </div>
+          <div class="ai-analysis-content" id="fundamentalsAiContent">
+            <!-- Structured AI diagnosis content -->
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI Agent Lens (Non-Repainting Decision Engine) Modal -->
+  <div class="modal-overlay" id="aiLensModal" style="display: none;">
+    <div class="modal-dialog ai-lens-dialog">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span class="modal-icon">🤖</span>
+          <span class="modal-title" id="aiLensModalTitle">AI Agent Lens 決策引擎 (Non-Repainting)</span>
+          <span class="fundamentals-symbol-tag" id="aiLensSymbolBadge">--</span>
+        </div>
+        <button class="modal-close" id="closeAiLensModal">✕</button>
+      </div>
+      <div class="ai-lens-body">
+        <div class="ai-lens-toolbar">
+          <span class="fundamentals-status" id="aiLensStatus">讀取中...</span>
+          <button class="btn-secondary" id="refreshAiLensBtn">🔄 強制重新診斷</button>
+        </div>
+
+        <div class="ai-lens-top-bar">
+          <div class="lens-card">
+            <span class="card-label">AI 決策傾向</span>
+            <span id="aiLensBias" class="bias-badge bias-wait">WAIT</span>
+          </div>
+          <div class="lens-card">
+            <span class="card-label">信心評分</span>
+            <div class="confidence-meter-wrap">
+              <span id="aiLensConfidence" class="confidence-val">--</span>
+              <div class="confidence-bar-bg"><div id="aiLensConfidenceFill" class="confidence-bar-fill" style="width: 0%"></div></div>
+            </div>
+          </div>
+          <div class="lens-card">
+            <span class="card-label">趨勢架構 (Regime)</span>
+            <span id="aiLensRegime" class="regime-val">--</span>
+          </div>
+          <div class="lens-card">
+            <span class="card-label">確認K線時間 (無重繪)</span>
+            <span id="aiLensBarTime" class="time-val">--</span>
+          </div>
+        </div>
+
+        <div class="ai-lens-metrics-strip">
+          <div class="metric-pill">EMA 10/21: <b id="aiLensEma">--</b></div>
+          <div class="metric-pill">SMA 50/200: <b id="aiLensSma">--</b></div>
+          <div class="metric-pill">20-Period ADR%: <b id="aiLensAdr">--</b></div>
+          <div class="metric-pill">50-Vol Ratio: <b id="aiLensVolRatio">--</b></div>
+          <div class="metric-pill">52W High Dist: <b id="aiLensHighDist">--</b></div>
+          <div class="metric-pill">RS Rating: <b id="aiLensRsRating">--</b></div>
+        </div>
+
+        <div class="ai-lens-section">
+          <div class="section-title">📌 型態架構診斷</div>
+          <div id="aiLensSetup" class="section-content setup-text">--</div>
+        </div>
+
+        <div class="ai-lens-cards-row">
+          <div class="alert-box invalidation-card">
+            <div class="box-title">🛑 關鍵失效條件 (風控生命線)</div>
+            <div id="aiLensInvalidation" class="box-content">--</div>
+          </div>
+          <div class="alert-box failure-mode-card">
+            <div class="box-title">⚠️ 主要失敗模式歸因</div>
+            <div id="aiLensFailureMode" class="box-content">--</div>
+          </div>
+        </div>
+
+        <div class="ai-lens-section">
+          <div class="section-title">📊 基本面動能綜述</div>
+          <div id="aiLensFundamentals" class="section-content">--</div>
+        </div>
+
+        <div class="ai-lens-section">
+          <div class="section-title">🧭 交易員操作指南 (Human-in-the-Loop)</div>
+          <div id="aiLensHumanNote" class="section-content human-note-text">--</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <span id="aiLensModelNotice" class="ai-model-tag">Model: gemini-3.5-flash</span>
+        <button class="btn-secondary" id="closeAiLensFooterBtn">關閉</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Gemini Market Copilot Chat Modal -->
+  <div class="modal-backdrop" id="chatModal" style="display: none;">
+    <div class="modal-dialog chat-modal-dialog">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span class="modal-icon">💬</span>
+          <h2 class="modal-title">Gemini Market Copilot</h2>
+          <span class="active-sym-tag" id="chatActiveSymbolTag">NASDAQ:NVDA • 1D</span>
+        </div>
+        <button class="modal-close-btn" id="closeChatBtn">✕</button>
+      </div>
+      <div class="chat-messages-container" id="chatMessages">
+        <div class="chat-msg ai-msg">
+          <div class="chat-msg-header">🤖 Antigravity Copilot</div>
+          <div class="chat-msg-body">
+            你好！我是你的 Gemini 市場動能策略助理。我已即時同步當前標的的 K 線量化快照、均線排列 (EMA 10/21/30, SMA 50/200)、相對強弱 (RS) 與基本面數據。<br>請問有什麼我可以協助分析的？
+          </div>
+        </div>
+      </div>
+      <!-- Quick Prompt Chips -->
+      <div class="chat-chips-container" id="chatChips">
+        <button class="chat-chip" data-prompt="請分析當前標的的型態架構、均線趨勢與關鍵支撐壓力位">📈 趨勢與支撐壓力</button>
+        <button class="chat-chip" data-prompt="目前股價相對於大盤基準的相對強弱 (RS) 表現如何？具備動能優勢嗎？">⚡ RS 動能評估</button>
+        <button class="chat-chip" data-prompt="請從 CANSLIM 與第二階段動能角度，給出具體的進出場防守條件">🛑 買賣風控指引</button>
+        <button class="chat-chip" data-prompt="這隻股票近期的基本面與估值位階有何潛在隱憂或亮點？">📊 基本面體檢</button>
+      </div>
+      <div class="chat-input-row">
+        <input type="text" class="chat-input" id="chatInput" placeholder="輸入問題（例如：現在適合買進嗎？停損設在哪？）" autocomplete="off" />
+        <button class="chat-send-btn" id="sendChatBtn">發送</button>
+      </div>
+      <div class="modal-footer">
+        <span class="ai-model-tag">Engine: Gemini 3.5 Flash Dual-Waterfall</span>
+        <button class="btn-secondary" id="clearChatBtn">清空對話</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stock Screener (RS + ATR + CANSLIM Engine) Modal & Mini-Dock -->
+  <div class="modal-overlay screener-modal-overlay" id="screenerModal" style="display: none;">
+    <div class="modal-dialog screener-dialog" id="screenerDialog">
+      <div class="modal-header screener-header">
+        <div class="modal-title-group">
+          <span class="modal-icon">🎯</span>
+          <span class="modal-title">Institutional Momentum Screener (RS + ATR + CANSLIM)</span>
+          <span class="badge-nonrepainting">Non-Repainting • Non-Overfitting</span>
+        </div>
+        <div class="screener-header-actions">
+          <button class="screener-action-btn" id="screenerDockBtn" title="切換底部停靠 / 浮動視窗 (Dock/Float)">🗗 停靠底部</button>
+          <button class="modal-close" id="closeScreenerModal">✕</button>
+        </div>
+      </div>
+
+      <div class="screener-presets-bar" id="screenerPresetsBar">
+        <button class="screener-preset-pill active" data-preset="stage2_vcp">Minervini Stage 2 VCP 突破</button>
+        <button class="screener-preset-pill" data-preset="rs_leaders">Mansfield RS 零軸翻揚領頭羊</button>
+        <button class="screener-preset-pill" data-preset="canslim_growth">CANSLIM 高成長突破潛力</button>
+        <button class="screener-preset-pill" data-preset="low_vol_base">低波動底層籌碼收斂 (Base)</button>
+        <button class="screener-preset-pill" data-preset="custom">自訂條件 (Custom)</button>
+      </div>
+
+      <div class="screener-controls-bar">
+        <div class="screener-control-group">
+          <label class="sc-label" for="screenerUniverseSelect">股票池:</label>
+          <select id="screenerUniverseSelect" class="screener-select">
+            <option value="us_momentum" selected>美股核心動能庫 (40+)</option>
+            <option value="watchlist">我的自選清單 (Watchlist)</option>
+            <option value="custom">自訂代碼清單 (Custom)</option>
+          </select>
+          <div class="screener-search-wrap" id="screenerSearchWrap" style="display: none;">
+            <input type="text" id="screenerCustomInput" class="screener-text-input" placeholder="輸入代碼或搜尋全美股（如 NVDA, TSLA, MRNA, CART）" />
+            <button type="button" class="screener-search-clear" id="screenerSearchClearBtn" title="清空代碼">✕</button>
+            <div class="screener-autocomplete-dropdown" id="screenerAutocompleteDropdown" style="display: none;"></div>
+          </div>
+        </div>
+
+        <div class="screener-filters-row">
+          <div class="sc-filter-item">
+            <label class="sc-label" for="scMinRsRating">RS Rating &ge;:</label>
+            <input type="number" id="scMinRsRating" min="1" max="99" value="80" class="screener-num-input" />
+          </div>
+
+          <div class="sc-filter-item">
+            <label class="sc-chk-label">
+              <input type="checkbox" id="scMansfieldZero" checked />
+              <span>Mansfield RS &gt; 0</span>
+            </label>
+          </div>
+
+          <div class="sc-filter-item">
+            <label class="sc-chk-label screener-filter-item">
+              <input type="checkbox" id="scStage2Only" checked />
+              <span>Stage 2 (50&gt;200MA &amp; 上升)</span>
+            </label>
+          </div>
+
+          <div class="sc-filter-item">
+            <label class="sc-chk-label screener-filter-item">
+              <input type="checkbox" id="scWeeklyStage2Only" />
+              <span>1W 週線 Stage 2 共振</span>
+            </label>
+          </div>
+
+          <div class="sc-filter-item">
+            <label class="sc-chk-label">
+              <input type="checkbox" id="scPowerTrendOnly" />
+              <span>Power Trend (10&gt;21&gt;50)</span>
+            </label>
+          </div>
+
+          <div class="sc-filter-item">
+            <label class="sc-chk-label">
+              <input type="checkbox" id="scAtrSqueezeOnly" checked />
+              <span>波動收縮 (Squeeze)</span>
+            </label>
+          </div>
+
+          <div class="sc-filter-item">
+            <label class="sc-label" for="scMaxAtrPercentile">ATR% 百分位 &le;:</label>
+            <input type="number" id="scMaxAtrPercentile" min="5" max="100" value="20" class="screener-num-input" />%
+          </div>
+
+          <div class="sc-filter-item">
+            <label class="sc-label" for="scMaxPctFromHigh">距 52W 高點 &le;:</label>
+            <input type="number" id="scMaxPctFromHigh" min="1" max="100" value="15" class="screener-num-input" />%
+          </div>
+
+          <div class="sc-filter-item">
+            <label class="sc-label" for="scMinVolRatio">50D 量比 &ge;:</label>
+            <input type="number" id="scMinVolRatio" step="0.1" min="0.1" max="10.0" value="1.1" class="screener-num-input" />x
+          </div>
+
+          <div class="sc-filter-item risk-filter-item">
+            <label class="sc-label" for="scRiskDollar">風控金額 Risk ($):</label>
+            <input type="number" id="scRiskDollar" min="50" max="100000" step="50" value="500" class="screener-num-input risk-dollar-input" title="即時動態連動建議買入股數 (無須重新請求)" />
+          </div>
+        </div>
+
+        <div class="screener-action-row">
+          <button class="btn-primary" id="runScreenerScanBtn">🚀 開始篩選</button>
+          <button class="btn-secondary" id="screenerAiBtn">🤖 AI 總結榜單焦點</button>
+          <button class="screener-action-btn" id="screenerExportTvBtn">📥 匯出 TV (.txt)</button>
+          <button class="screener-action-btn" id="screenerCopyListBtn">📋 複製清單</button>
+          <button class="screener-action-btn" id="screenerExportCsvBtn">📊 匯出 CSV</button>
+          <div class="screener-badges-group">
+            <span class="screener-stats-badge" id="screenerStatsBadge">準備就緒</span>
+            <span class="screener-bench-badge" id="screenerBenchBadge">基準 SPY: --</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- AI Macro & Momentum Synthesis Banner -->
+      <div class="screener-ai-box" id="screenerAiBox" style="display: none;">
+        <div class="ai-box-header">
+          <div class="ai-box-title-group">
+            <span class="ai-box-icon">🤖</span>
+            <span class="ai-box-title">Gemini AI 動能與領頭羊綜述</span>
+          </div>
+          <button class="ai-box-close" id="closeScreenerAiBox">✕</button>
+        </div>
+        <div class="ai-box-content" id="screenerAiContent">分析產出中...</div>
+      </div>
+
+      <!-- Screener Table Wrap -->
+      <div class="screener-table-wrap">
+        <table class="screener-table" id="screenerTable">
+          <thead>
+            <tr>
+              <th data-sort="symbol" class="sortable">代碼 <span class="sort-icon">↕</span></th>
+              <th data-sort="name" class="sortable">名稱 <span class="sort-icon">↕</span></th>
+              <th data-sort="close" class="sortable">現價 <span class="sort-icon">↕</span></th>
+              <th data-sort="change_pct" class="sortable">24H% <span class="sort-icon">↕</span></th>
+              <th data-sort="trend_regime" class="sortable">趨勢架構 <span class="sort-icon">↕</span></th>
+              <th data-sort="mansfield_rs" class="sortable">Mansfield RS <span class="sort-icon">↕</span></th>
+              <th data-sort="rs_rating" class="sortable">RS Rating <span class="sort-icon">↕</span></th>
+              <th data-sort="atr_pct" class="sortable">ATR% (Squeeze) <span class="sort-icon">↕</span></th>
+              <th data-sort="pct_from_52w_high" class="sortable">距52W高% <span class="sort-icon">↕</span></th>
+              <th data-sort="volume_ratio_50" class="sortable">50D量比 <span class="sort-icon">↕</span></th>
+              <th data-sort="suggested_shares" class="sortable" id="thSuggestedShares">建議股數 ($500) <span class="sort-icon">↕</span></th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="screenerTableBody">
+            <!-- Populated dynamically -->
+          </tbody>
+        </table>
+        <div class="screener-empty-state" id="screenerEmptyState" style="display: none;">
+          <div class="empty-icon">🔍</div>
+          <div class="empty-title">未發現符合當前條件之標的</div>
+          <div class="empty-desc">建議放寬「距 52 週新高距離（如調至 25%）」或關閉「僅限波動收縮 (Squeeze)」以擴大候選池。</div>
+        </div>
+      </div>
+
+      <div class="modal-footer screener-footer">
+        <span class="screener-footer-tip">💡 點選任一列即可 0ms 切換底層圖表；點擊「+自選」即時加至監控清單；可調整風控金額即時重新計算建議股數</span>
+        <button class="btn-secondary" id="closeScreenerFooterBtn">關閉</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Watchlist Desktop Right-Click Context Menu -->
+  <div id="wlContextMenu" class="desktop-context-menu" style="display: none;">
+    <div class="ctx-item" id="ctxRemoveWl">
+      <span class="ctx-icon">✕</span>
+      <span class="ctx-text">從自選清單移除 (Remove)</span>
+    </div>
+    <div class="ctx-item" id="ctxSetBenchmark">
+      <span class="ctx-icon">📊</span>
+      <span class="ctx-text">設為 RS 基準 (Benchmark)</span>
+    </div>
+    <div class="ctx-item" id="ctxCopySymbol">
+      <span class="ctx-icon">📋</span>
+      <span class="ctx-text">複製代碼 (Copy Symbol)</span>
+    </div>
+  </div>
+
+  <script src="https://s3.tradingview.com/tv.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

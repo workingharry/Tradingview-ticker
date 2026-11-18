@@ -1,0 +1,13 @@
+{
+  "name": "tradingview-terminal",
+  "version": "1.0.0",
+  "description": "TradingView Real-Time Terminal macOS Desktop Application",
+  "scripts": {
+    "tauri": "tauri",
+    "build:sidecar": "python3 scripts/build_sidecar.py --tauri-bin-dir src-tauri/bin",
+    "build:desktop": "npm run build:sidecar && npx tauri build --bundles app && python3 scripts/build_sidecar.py --sign-app \"src-tauri/target/release/bundle/macos/TradingView Terminal.app\" --package-dmg \"src-tauri/target/release/bundle/dmg/TradingView Terminal_1.0.0_aarch64.dmg\""
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4"
+  }
+}

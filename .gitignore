@@ -31,6 +31,7 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!server.spec
 
 # Installer logs
 pip-log.txt
@@ -158,3 +159,24 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Node / JS
+node_modules/
+package-lock.json
+
+# Local artifacts & databases
+*.sqlite
+*.sqlite3
+*.db
+*.zip
+exports/
+scratch/
+.agents/
+SESSION_HANDOFF.md
+
+# Tauri & Sidecar build outputs
+src-tauri/target/
+src-tauri/bin/server*
+src-tauri/bin/server-sidecar/
+dist/
+build/
