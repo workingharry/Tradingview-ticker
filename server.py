@@ -18,6 +18,7 @@ import signal
 import socket
 import sys
 import time
+import threading
 import urllib.parse
 from contextlib import asynccontextmanager, contextmanager
 from collections import OrderedDict
@@ -170,6 +171,7 @@ class YahooSessionManager:
         if getattr(self, "_initialized", False):
             return
         self._user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
+        self._thread_lock = threading.Lock()
         self._lock: Optional[asyncio.Lock] = None
         self._lock_loop: Optional[asyncio.AbstractEventLoop] = None
         self._cookies: Dict[str, str] = {}
@@ -182,9 +184,10 @@ class YahooSessionManager:
             current_loop = asyncio.get_running_loop()
         except RuntimeError:
             current_loop = None
-        if self._lock is None or self._lock_loop is not current_loop:
-            self._lock = asyncio.Lock()
-            self._lock_loop = current_loop
+        with self._thread_lock:
+            if self._lock is None or self._lock_loop is not current_loop:
+                self._lock = asyncio.Lock()
+                self._lock_loop = current_loop
         return self._lock
 
     def is_valid(self) -> bool:
@@ -365,17 +368,23 @@ class DesktopAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         if not is_desktop_mode():
-            return await call_next(request)
+            response = await call_next(request)
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            return response
 
         # Allow preflight CORS OPTIONS requests without auth
         if request.method == "OPTIONS":
-            return await call_next(request)
+            response = await call_next(request)
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            return response
 
         # Allow unauthenticated health check probe and non-API routes (static files, index)
         path = request.url.path
         normalized_path = path.rstrip("/")
         if normalized_path == "/api/health" or not normalized_path.startswith("/api"):
-            return await call_next(request)
+            response = await call_next(request)
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            return response
 
         token = extract_token_from_request(request)
         if not verify_token(token):
@@ -387,7 +396,9 @@ class DesktopAuthMiddleware(BaseHTTPMiddleware):
                 }
             )
 
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        return response
 
 def resolve_static_dir() -> Path:
     """Resolves the static assets directory for both development and frozen PyInstaller bundles."""

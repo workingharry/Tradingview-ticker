@@ -140,7 +140,14 @@ class TestIndicators(unittest.TestCase):
 
     def test_mansfield_rs_zero_lookahead_bias_when_target_predates_benchmark(self):
         """Verifies calcATRToolkit does not divide early target bars by future benchmark close (look-ahead bias prevention)."""
-        import subprocess, json
+        import subprocess, json, shutil, os
+        node_bin = shutil.which("node") or (
+            "/opt/homebrew/bin/node" if os.path.exists("/opt/homebrew/bin/node") else None
+        ) or (
+            "/usr/local/bin/node" if os.path.exists("/usr/local/bin/node") else None
+        )
+        if not node_bin:
+            self.skipTest("Node.js binary not found on system PATH")
         node_script = """
         const ind = require('./static/indicators.js');
         // Target bars start at t=1000, 1060, 1120
@@ -157,7 +164,7 @@ class TestIndicators(unittest.TestCase):
         const res = ind.calcATRToolkit(targetBars, benchBars, { mansfieldLen: 2 });
         console.log(JSON.stringify(res.mansfieldRS));
         """
-        proc = subprocess.run(["node", "-e", node_script], capture_output=True, text=True, check=True)
+        proc = subprocess.run([node_bin, "-e", node_script], capture_output=True, text=True, check=True)
         series = json.loads(proc.stdout.strip())
         # First bar at t=1000 had no benchmark, so ratio list has only t=1060 and t=1120 (length 2)
         # With mansfieldLen = 2, only 1 output point should be produced at t=1120
