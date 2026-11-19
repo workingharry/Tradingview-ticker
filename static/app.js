@@ -1181,7 +1181,16 @@ function initChart() {
     var rsVal = param.seriesData.get(rsSeries);
 
     if (candleData) {
+      var isHist = false;
+      if (latestBarData && latestBarData.time) {
+        if (typeof param.time === "object" && typeof latestBarData.time === "object") {
+          isHist = (param.time.year !== latestBarData.time.year || param.time.month !== latestBarData.time.month || param.time.day !== latestBarData.time.day);
+        } else {
+          isHist = (param.time !== latestBarData.time);
+        }
+      }
       updateCrosshairLegend({
+        time: param.time,
         open: candleData.open,
         high: candleData.high,
         low: candleData.low,
@@ -1191,10 +1200,26 @@ function initChart() {
         ema21: ema21Val ? ema21Val.value : undefined,
         sma50: sma50Val ? sma50Val.value : undefined,
         sma200: sma200Val ? sma200Val.value : undefined,
-        rs: rsVal ? rsVal.value : undefined
+        rs: rsVal ? rsVal.value : undefined,
+        isHistorical: isHist
       });
     }
   });
+
+  if (chartContainer && !chartContainer._hasMouseLeaveReset) {
+    chartContainer._hasMouseLeaveReset = true;
+    chartContainer.addEventListener("mouseleave", function() {
+      updateCrosshairLegend(latestBarData);
+    });
+  }
+  if (typeof window !== "undefined" && !window._hasEscapeResetLegend) {
+    window._hasEscapeResetLegend = true;
+    window.addEventListener("keydown", function(e) {
+      if (e.key === "Escape") {
+        updateCrosshairLegend(latestBarData);
+      }
+    });
+  }
 
   if (window.ResizeObserver) {
     resizeObserver = new ResizeObserver(function(entries) {
@@ -1461,13 +1486,39 @@ function applyIndicatorVisibilities() {
 }
 
 function updateCrosshairLegend(bar) {
+  var modeBadge = document.getElementById("legendModeBadge");
   if (!bar) {
     if (legendOpenEl) legendOpenEl.textContent = "--";
     if (legendHighEl) legendHighEl.textContent = "--";
     if (legendLowEl) legendLowEl.textContent = "--";
     if (legendCloseEl) legendCloseEl.textContent = "--";
     if (legendVolEl) legendVolEl.textContent = "--";
+    if (modeBadge) {
+      modeBadge.style.display = "none";
+    }
     return;
+  }
+
+  if (modeBadge) {
+    modeBadge.style.display = "inline-block";
+    if (bar.isHistorical) {
+      modeBadge.className = "legend-badge historical";
+      var dateStr = "";
+      if (bar.time) {
+        if (typeof bar.time === "object" && bar.time.year) {
+          dateStr = bar.time.year + "-" + String(bar.time.month).padStart(2, "0") + "-" + String(bar.time.day).padStart(2, "0");
+        } else if (typeof bar.time === "number") {
+          var d = new Date(bar.time * 1000);
+          dateStr = d.toISOString().slice(0, 10);
+        } else {
+          dateStr = String(bar.time);
+        }
+      }
+      modeBadge.textContent = "HISTORICAL" + (dateStr ? " (" + dateStr + ")" : "");
+    } else {
+      modeBadge.className = "legend-badge live";
+      modeBadge.textContent = "LIVE";
+    }
   }
 
   if (legendOpenEl) legendOpenEl.textContent = formatPrice(bar.open, activeSymbol);

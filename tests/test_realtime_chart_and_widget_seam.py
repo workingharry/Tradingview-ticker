@@ -108,6 +108,17 @@ class TestRealtimeChartAndWidgetSeam(unittest.TestCase):
             "handleLiveBar must inspect currentRawBars to properly align live bar timestamps with existing history."
         )
 
+    def test_crosshair_legend_mouseleave_and_historical_mode_badge(self):
+        """Verifies that crosshair legend has mouseleave reset and historical badge to prevent dashboard price discrepancies."""
+        html_path = Path(__file__).resolve().parent.parent / "static" / "index.html"
+        html_content = html_path.read_text(encoding="utf-8")
+        self.assertIn("legendModeBadge", html_content, "index.html must define legendModeBadge in chartLegend")
+
+        self.assertIn("mouseleave", self.app_js_content, "static/app.js must bind mouseleave to reset crosshair legend")
+        self.assertIn("isHistorical", self.app_js_content, "static/app.js must differentiate historical bars from latestBarData")
+        self.assertIn("HISTORICAL", self.app_js_content, "static/app.js must show HISTORICAL badge on historical crosshairs")
+        self.assertIn("LIVE", self.app_js_content, "static/app.js must show LIVE badge on real-time quotes")
+
 
 if __name__ == "__main__":
     unittest.main()

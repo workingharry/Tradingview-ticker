@@ -473,6 +473,29 @@ body {
   font-weight: 600;
 }
 
+.legend-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  transition: all 0.15s ease;
+}
+
+.legend-badge.live {
+  background: rgba(38, 166, 154, 0.2);
+  color: #26a69a;
+  border: 1px solid rgba(38, 166, 154, 0.4);
+}
+
+.legend-badge.historical {
+  background: rgba(255, 179, 0, 0.2);
+  color: #ffb300;
+  border: 1px solid rgba(255, 179, 0, 0.5);
+  box-shadow: 0 0 8px rgba(255, 179, 0, 0.2);
+}
+
 .legend-item {
   color: var(--text-dim);
 }
