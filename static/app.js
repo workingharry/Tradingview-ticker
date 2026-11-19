@@ -1168,7 +1168,7 @@ function initChart() {
   }
 
   chart.subscribeCrosshairMove(function(param) {
-    if (!param || !param.time || !param.seriesData || !param.seriesData.has(candleSeries)) {
+    if (!param || !param.time || !param.point || !param.seriesData || !param.seriesData.has(candleSeries)) {
       updateCrosshairLegend(latestBarData);
       return;
     }
