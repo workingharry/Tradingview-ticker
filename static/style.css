@@ -1316,12 +1316,17 @@ body {
 
 .chart-wrapper.layout-split-1x2 #chartContainer,
 .chart-wrapper.layout-split-2x2 #chartContainer,
+.chart-wrapper.layout-split-mtf #chartContainer,
 .chart-wrapper.layout-split-1x2 #tvWidgetContainer,
-.chart-wrapper.layout-split-2x2 #tvWidgetContainer {
+.chart-wrapper.layout-split-2x2 #tvWidgetContainer,
+.chart-wrapper.layout-split-mtf #tvWidgetContainer {
   position: relative !important;
   inset: auto !important;
   border: 1px solid var(--border-color);
   border-radius: 4px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .split-grid-container {

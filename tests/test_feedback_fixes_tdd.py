@@ -315,6 +315,26 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         # JS switchChartEngine refreshes split layout for Scheme C so all panes re-render uniformly
         self.assertIn("applySplitLayout(activeSplitLayout || \"1x1\");", self.js)
 
+    def test_seam16_tri_copilot_concurrency_and_lifecycle_hardening(self):
+        """Seam 16: Tri-Copilot converged fixes for MTF live ticks (B1), async race guard (B2), idempotent teardown (B3), and MTF CSS containment (B5a)."""
+        # B1: Timeframe-aware MTF live bar routing
+        self.assertIn("scTf === activeTimeframe", self.js)
+        self.assertIn("scObj.lastBar", self.js)
+
+        # B2: Monotonic generation token & AbortController race guard
+        self.assertIn("var paneGen = {};", self.js)
+        self.assertIn("var paneAbortControllers = {};", self.js)
+        self.assertIn("gen !== paneGen[paneNum]", self.js)
+
+        # B3: Idempotent sub-pane teardown lifecycle contract
+        self.assertIn("function disposeSubPane(paneNum)", self.js)
+        self.assertIn("disposeSubPane(2);", self.js)
+
+        # B5a: CSS Grid containment for MTF split layout
+        self.assertIn(".chart-wrapper.layout-split-mtf #tvWidgetContainer", self.css)
+        self.assertIn("min-width: 0", self.css)
+        self.assertIn("overflow: hidden", self.css)
+
 
 if __name__ == "__main__":
     unittest.main()

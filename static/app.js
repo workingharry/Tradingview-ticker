@@ -25,6 +25,41 @@
   var mtfSyncEnabled = false;
   var paneSymbols = { 1: "NASDAQ:NVDA", 2: "AMEX:SPY", 3: "NASDAQ:QQQ", 4: "NASDAQ:FAST" };
   var paneTimeframes = { 1: "1D", 2: "1D", 3: "1D", 4: "1D" };
+  var paneGen = {};
+  var paneAbortControllers = {};
+
+  function disposeSubPane(paneNum) {
+    if (paneAbortControllers[paneNum]) {
+      try {
+        paneAbortControllers[paneNum].abort();
+      } catch (e) {}
+      delete paneAbortControllers[paneNum];
+    }
+    if (subCharts[paneNum]) {
+      try {
+        if (subCharts[paneNum].chart && typeof subCharts[paneNum].chart.remove === "function") {
+          subCharts[paneNum].chart.remove();
+        }
+      } catch (e) {
+        console.warn("[disposeSubPane] chart.remove() error for pane " + paneNum, e);
+      }
+      delete subCharts[paneNum];
+    }
+    if (subTvWidgets[paneNum]) {
+      try {
+        if (typeof subTvWidgets[paneNum].remove === "function") {
+          subTvWidgets[paneNum].remove();
+        }
+      } catch (e) {
+        console.warn("[disposeSubPane] tvWidget.remove() error for pane " + paneNum, e);
+      }
+      delete subTvWidgets[paneNum];
+    }
+    var container = document.getElementById("splitChart" + paneNum);
+    if (container) {
+      container.innerHTML = "";
+    }
+  }
 
   function setFocusedPane(paneNum) {
     focusedPaneId = paneNum;
@@ -69,16 +104,10 @@
       titleEl.textContent = getSymbolDisplayName(symbol) + " • " + tf;
     }
 
+    var gen = (paneGen[paneNum] = (paneGen[paneNum] || 0) + 1);
+    disposeSubPane(paneNum);
+
     if (currentEngine === "C") {
-      if (subCharts[paneNum]) {
-        try {
-          if (subCharts[paneNum].chart && typeof subCharts[paneNum].chart.remove === "function") {
-            subCharts[paneNum].chart.remove();
-          }
-        } catch (e) {}
-        delete subCharts[paneNum];
-      }
-      container.innerHTML = "";
       var tvSymbol = toTradingViewRealtimeSymbol(symbol);
       var tvInterval = ({ "1m": "1", "5m": "5", "15m": "15", "1h": "60", "60m": "60", "1D": "D", "1W": "W" })[tf] || "D";
       var subTvStudies = [];
@@ -115,7 +144,7 @@
             locale: currentLang === "zh" ? "zh_TW" : "en",
             toolbar_bg: "#131722",
             enable_publishing: false,
-            allow_symbol_change: true,
+            allow_symbol_change: false,
             hide_side_toolbar: true,
             withdateranges: false,
             details: false,
@@ -144,73 +173,73 @@
       return;
     }
 
-    if (subTvWidgets[paneNum]) {
-      delete subTvWidgets[paneNum];
-      container.innerHTML = "";
-    }
+    if (typeof LightweightCharts === "undefined") return;
+    var subChart = LightweightCharts.createChart(container, {
+      width: container.clientWidth || 380,
+      height: container.clientHeight || 240,
+      layout: {
+        background: { color: "#131722" },
+        textColor: "#9ca3af"
+      },
+      grid: {
+        vertLines: { color: "#1e222d" },
+        horzLines: { color: "#1e222d" }
+      },
+      timeScale: { borderColor: "#2a2e39", timeVisible: true }
+    });
+    var subSeries = subChart.addCandlestickSeries({
+      upColor: "#26a69a",
+      downColor: "#ef5350",
+      borderVisible: false,
+      wickUpColor: "#26a69a",
+      wickDownColor: "#ef5350"
+    });
+    var ema21Series = subChart.addLineSeries({
+      color: "#a855f7",
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false
+    });
+    var ema30Series = subChart.addLineSeries({
+      color: "#f59e0b",
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false
+    });
+    var ema200Series = subChart.addLineSeries({
+      color: "#ec4899",
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false
+    });
+    var subObj = {
+      chart: subChart,
+      series: subSeries,
+      ema21: ema21Series,
+      ema30: ema30Series,
+      ema200: ema200Series,
+      lastBar: null
+    };
+    subCharts[paneNum] = subObj;
 
-    if (!subCharts[paneNum]) {
-      if (typeof LightweightCharts === "undefined") return;
-      var subChart = LightweightCharts.createChart(container, {
-        width: container.clientWidth || 380,
-        height: container.clientHeight || 240,
-        layout: {
-          background: { color: "#131722" },
-          textColor: "#9ca3af"
-        },
-        grid: {
-          vertLines: { color: "#1e222d" },
-          horzLines: { color: "#1e222d" }
-        },
-        timeScale: { borderColor: "#2a2e39", timeVisible: true }
-      });
-      var subSeries = subChart.addCandlestickSeries({
-        upColor: "#26a69a",
-        downColor: "#ef5350",
-        borderVisible: false,
-        wickUpColor: "#26a69a",
-        wickDownColor: "#ef5350"
-      });
-      var ema21Series = subChart.addLineSeries({
-        color: "#a855f7",
-        lineWidth: 1,
-        priceLineVisible: false,
-        lastValueVisible: false,
-        crosshairMarkerVisible: false
-      });
-      var ema30Series = subChart.addLineSeries({
-        color: "#f59e0b",
-        lineWidth: 1,
-        priceLineVisible: false,
-        lastValueVisible: false,
-        crosshairMarkerVisible: false
-      });
-      var ema200Series = subChart.addLineSeries({
-        color: "#ec4899",
-        lineWidth: 1,
-        priceLineVisible: false,
-        lastValueVisible: false,
-        crosshairMarkerVisible: false
-      });
-      subCharts[paneNum] = {
-        chart: subChart,
-        series: subSeries,
-        ema21: ema21Series,
-        ema30: ema30Series,
-        ema200: ema200Series
-      };
+    var ac = null;
+    if (typeof AbortController !== "undefined") {
+      ac = paneAbortControllers[paneNum] = new AbortController();
     }
-
-    var subObj = subCharts[paneNum];
     var url = "/api/history?symbol=" + encodeURIComponent(symbol) + "&timeframe=" + encodeURIComponent(tf);
     if (sessionToken) url += "&token=" + encodeURIComponent(sessionToken);
 
-    fetch(url)
+    fetch(url, { signal: ac ? ac.signal : undefined })
       .then(function(r) { return r.ok ? r.json() : null; })
       .then(function(d) {
-        if (paneSymbols[paneNum] !== symbol) return;
+        if (gen !== paneGen[paneNum] || subCharts[paneNum] !== subObj) return;
+        if (!container.isConnected && !document.contains(container)) return;
         if (d && Array.isArray(d.bars) && d.bars.length > 0) {
           subObj.series.setData(d.bars);
+          subObj.lastBar = d.bars[d.bars.length - 1];
           if (window.Indicators && typeof window.Indicators.calcEMA === "function") {
             try {
               if (subObj.ema21) subObj.ema21.setData(window.Indicators.calcEMA(d.bars, 21));
@@ -219,6 +248,7 @@
             } catch (emaErr) {}
           }
           requestAnimationFrame(function() {
+            if (gen !== paneGen[paneNum] || subCharts[paneNum] !== subObj) return;
             var sw = container.clientWidth;
             var sh = container.clientHeight;
             if (sw > 0 && sh > 0) {
@@ -228,7 +258,10 @@
           });
         }
       })
-      .catch(function() {});
+      .catch(function(e) {
+        if (e && e.name === "AbortError") return;
+        console.warn("[loadSubChart] fetch error for pane " + paneNum, e);
+      });
   }
 
   function applySplitLayout(layout) {
@@ -254,6 +287,8 @@
       if (splitPane2) splitPane2.style.display = "flex";
       if (splitPane3) splitPane3.style.display = "none";
       if (splitPane4) splitPane4.style.display = "none";
+      disposeSubPane(3);
+      disposeSubPane(4);
       loadSubChart(2, paneSymbols[2] || "AMEX:SPY", paneTimeframes[2] || "1D");
     } else if (activeSplitLayout === "2x2") {
       if (chartWrapper) chartWrapper.classList.add("layout-split-2x2");
@@ -266,6 +301,9 @@
       loadSubChart(4, paneSymbols[4] || ((symbolsList[1] && symbolsList[1].id !== activeSymbol) ? symbolsList[1].id : "NASDAQ:FAST"), paneTimeframes[4] || "1D");
     } else {
       if (splitGrid) splitGrid.style.display = "none";
+      disposeSubPane(2);
+      disposeSubPane(3);
+      disposeSubPane(4);
     }
 
     setFocusedPane(1);
@@ -1989,6 +2027,9 @@ function switchSymbol(symbol) {
 function switchChartEngine(engineMode) {
   currentEngine = engineMode;
   safeSetStorage("tv_chart_engine", engineMode);
+  disposeSubPane(2);
+  disposeSubPane(3);
+  disposeSubPane(4);
   var tvWidgetContainer = document.getElementById("tvWidgetContainer");
   var chartContainer = document.getElementById("chartContainer");
   var deepvueHud = document.getElementById("deepvueHud");
@@ -2790,13 +2831,24 @@ function handleLiveBar(symbol, bar) {
   for (var pId in subCharts) {
     if (paneSymbols[pId] === symbol && subCharts[pId] && subCharts[pId].series) {
       try {
-        subCharts[pId].series.update({
-          time: barTime,
-          open: open,
-          high: high,
-          low: low,
-          close: close
-        });
+        var scObj = subCharts[pId];
+        var scTf = paneTimeframes[pId] || "1D";
+        if (scTf === activeTimeframe) {
+          subCharts[pId].series.update({
+            time: barTime,
+            open: open,
+            high: high,
+            low: low,
+            close: close
+          });
+          scObj.lastBar = { time: barTime, open: open, high: high, low: low, close: close };
+        } else if (scObj.lastBar) {
+          var lb = scObj.lastBar;
+          lb.high = Math.max(lb.high, high, close);
+          lb.low = Math.min(lb.low, low, close);
+          lb.close = close;
+          subCharts[pId].series.update(lb);
+        }
       } catch (subErr) {}
     }
   }
