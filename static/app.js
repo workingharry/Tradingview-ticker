@@ -513,7 +513,7 @@
           if (bSpan) bSpan.textContent = "Ref: " + getSymbolDisplayName(rsBenchmarkTag);
           var rTitle = document.getElementById("rsPaneTitle");
           if (rTitle) rTitle.textContent = "RS Line vs " + getSymbolDisplayName(rsBenchmarkTag);
-          var inputBench = document.getElementById("rsBenchmarkInput");
+          var inputBench = document.getElementById("rsBenchmarkCustomInput");
           if (inputBench) inputBench.value = rsBenchmarkTag;
         }
         if (p.activeTimeframe && typeof p.activeTimeframe === "string" && p.activeTimeframe !== activeTimeframe) {
@@ -2654,7 +2654,7 @@ if (ctxSetBenchmark) {
       if (bSpan) bSpan.textContent = "Ref: " + getSymbolDisplayName(activeContextSymbol);
       var title = document.getElementById("rsPaneTitle");
       if (title) title.textContent = "RS Line vs " + getSymbolDisplayName(activeContextSymbol);
-      var inputBench = document.getElementById("rsBenchmarkInput");
+      var inputBench = document.getElementById("rsBenchmarkCustomInput");
       if (inputBench) inputBench.value = activeContextSymbol;
       loadBenchmarkHistory(activeContextSymbol);
       loadHistory(activeSymbol);
