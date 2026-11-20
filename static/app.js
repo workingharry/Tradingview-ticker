@@ -461,7 +461,8 @@
     showLegend: true,
     collapseLegend: false,
     showDrawingToolbar: false,
-    showAnalysisTools: false
+    showAnalysisTools: false,
+    tvCompareRs: false
   };
 
   var defaultAvwapConfig = {
@@ -1929,12 +1930,13 @@ function initTradingViewWidget(symbol) {
 
   var tvInterval = ({ "1m": "1", "5m": "5", "15m": "15", "1h": "60", "60m": "60", "1D": "D", "1W": "W" })[activeTimeframe] || "D";
 
-  // User specification: Scheme C TradingView widget exclusively loads 21 EMA, 30 EMA, 200 EMA, and RS Line (Compare vs SPY)
+  // User specification: Scheme C TradingView widget exclusively loads 21 EMA, 30 EMA, 200 EMA.
+  // SPDR S&P 500 Compare study removed from default view per user request.
   var tvStudies = [];
   if (indicatorConfig.ema21 !== false) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 21 } });
   if (indicatorConfig.ema30 !== false) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 30 } });
   if (indicatorConfig.sma200 !== false || indicatorConfig.ema200 !== false) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 200 } });
-  if (indicatorConfig.rsLine !== false) tvStudies.push({ id: "Compare@tv-basicstudies", inputs: { symbol: toTradingViewRealtimeSymbol(rsBenchmarkTag || "SPY") } });
+  if (indicatorConfig.tvCompareRs) tvStudies.push({ id: "Compare@tv-basicstudies", inputs: { symbol: toTradingViewRealtimeSymbol(rsBenchmarkTag || "SPY") } });
 
   if (typeof TradingView !== "undefined" && TradingView.widget) {
     try {
@@ -4336,7 +4338,8 @@ function syncIndicatorCheckboxes() {
     chkShowLegend: indicatorConfig.showLegend !== false,
     chkCollapseLegend: Boolean(indicatorConfig.collapseLegend),
     chkShowDrawingToolbar: Boolean(indicatorConfig.showDrawingToolbar),
-    chkShowAnalysisTools: Boolean(indicatorConfig.showAnalysisTools)
+    chkShowAnalysisTools: Boolean(indicatorConfig.showAnalysisTools),
+    chkTvCompareRs: Boolean(indicatorConfig.tvCompareRs)
   };
   for (var cid in checkMap) {
     var cel = document.getElementById(cid);
@@ -5752,6 +5755,18 @@ function initEventListeners() {
       indicatorConfig.showAnalysisTools = e.target.checked;
       saveIndicatorConfig();
       applyIndicatorVisibilities();
+      if (typeof savePreferencesImmediate === "function") savePreferencesImmediate();
+    };
+  }
+
+  var chkTvCompareRs = document.getElementById("chkTvCompareRs");
+  if (chkTvCompareRs) {
+    chkTvCompareRs.onchange = function(e) {
+      indicatorConfig.tvCompareRs = e.target.checked;
+      saveIndicatorConfig();
+      if (currentEngine === "C" && typeof initTradingViewWidget === "function") {
+        initTradingViewWidget(activeSymbol);
+      }
       if (typeof savePreferencesImmediate === "function") savePreferencesImmediate();
     };
   }

@@ -268,6 +268,16 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         self.assertIn("#aiLensBtn", self.css)
         self.assertIn("#screenerBtn", self.css)
 
+    def test_seam13_tradingview_spy_compare_removed_by_default(self):
+        """Seam 13: TradingView SPDR S&P 500 comparison study overlay is removed by default from Scheme C."""
+        # HTML modal checkbox exists
+        self.assertIn('id="chkTvCompareRs"', self.html)
+
+        # JS defaults tvCompareRs to false and only adds study when explicitly enabled
+        self.assertIn("tvCompareRs: false", self.js)
+        self.assertIn("if (indicatorConfig.tvCompareRs) tvStudies.push", self.js)
+        self.assertIn("chkTvCompareRs", self.js)
+
 
 if __name__ == "__main__":
     unittest.main()
