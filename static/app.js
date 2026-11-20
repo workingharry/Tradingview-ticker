@@ -19,6 +19,7 @@
   var bbLowerSeries = null;
   var resizeObserver = null;
   var subCharts = {};
+  var subTvWidgets = {};
   var activeSplitLayout = "1x1";
   var focusedPaneId = 1;
   var mtfSyncEnabled = false;
@@ -66,6 +67,86 @@
 
     if (titleEl) {
       titleEl.textContent = getSymbolDisplayName(symbol) + " • " + tf;
+    }
+
+    if (currentEngine === "C") {
+      if (subCharts[paneNum]) {
+        try {
+          if (subCharts[paneNum].chart && typeof subCharts[paneNum].chart.remove === "function") {
+            subCharts[paneNum].chart.remove();
+          }
+        } catch (e) {}
+        delete subCharts[paneNum];
+      }
+      container.innerHTML = "";
+      var tvSymbol = toTradingViewRealtimeSymbol(symbol);
+      var tvInterval = ({ "1m": "1", "5m": "5", "15m": "15", "1h": "60", "60m": "60", "1D": "D", "1W": "W" })[tf] || "D";
+      var subTvStudies = [];
+      if (indicatorConfig.ema21 !== false) {
+        subTvStudies.push({
+          id: "MAExp@tv-basicstudies",
+          inputs: { length: 21 },
+          override: { "plot.color": "#a855f7", "plot.linewidth": 2 }
+        });
+      }
+      if (indicatorConfig.ema30 !== false) {
+        subTvStudies.push({
+          id: "MAExp@tv-basicstudies",
+          inputs: { length: 30 },
+          override: { "plot.color": "#f59e0b", "plot.linewidth": 2 }
+        });
+      }
+      if (indicatorConfig.sma200 !== false || indicatorConfig.ema200 !== false) {
+        subTvStudies.push({
+          id: "MAExp@tv-basicstudies",
+          inputs: { length: 200 },
+          override: { "plot.color": "#ec4899", "plot.linewidth": 2 }
+        });
+      }
+      if (typeof TradingView !== "undefined" && TradingView.widget) {
+        try {
+          subTvWidgets[paneNum] = new TradingView.widget({
+            autosize: true,
+            symbol: tvSymbol,
+            interval: tvInterval,
+            timezone: "exchange",
+            theme: "dark",
+            style: "1",
+            locale: currentLang === "zh" ? "zh_TW" : "en",
+            toolbar_bg: "#131722",
+            enable_publishing: false,
+            allow_symbol_change: true,
+            hide_side_toolbar: true,
+            withdateranges: false,
+            details: false,
+            hotlist: false,
+            calendar: false,
+            studies: subTvStudies,
+            studies_overrides: {
+              "volume.volume ma.display": true,
+              "volume.volume ma.length": 50,
+              "volume.volume.color.0": "#ef4444",
+              "volume.volume.color.1": "#26a69a",
+              "moving average exponential.0.plot.color": "#a855f7",
+              "moving average exponential.0.plot.linewidth": 2,
+              "moving average exponential.1.plot.color": "#f59e0b",
+              "moving average exponential.1.plot.linewidth": 2,
+              "moving average exponential.2.plot.color": "#ec4899",
+              "moving average exponential.2.plot.linewidth": 2
+            },
+            disabled_features: ["use_localstorage_for_settings"],
+            container_id: "splitChart" + paneNum
+          });
+        } catch (e) {
+          console.warn("Sub-pane TradingView widget init error", e);
+        }
+      }
+      return;
+    }
+
+    if (subTvWidgets[paneNum]) {
+      delete subTvWidgets[paneNum];
+      container.innerHTML = "";
     }
 
     if (!subCharts[paneNum]) {
@@ -1919,14 +2000,11 @@ function switchChartEngine(engineMode) {
     if (chartLegend) chartLegend.style.display = "none";
     if (deepvueHud) deepvueHud.style.display = "none";
     if (dateRangeBar) dateRangeBar.style.display = "none";
-    var splitGrid = document.getElementById("splitChartGrid");
-    if (splitGrid) splitGrid.style.display = "none";
-    var chartWrapper = document.querySelector(".chart-wrapper");
-    if (chartWrapper) chartWrapper.classList.remove("layout-split-1x2", "layout-split-2x2");
     if (tvWidgetContainer) {
       tvWidgetContainer.style.display = "block";
       initTradingViewWidget(activeSymbol);
     }
+    applySplitLayout(activeSplitLayout || "1x1");
   } else {
     if (tvWidgetContainer) {
       tvWidgetContainer.style.display = "none";

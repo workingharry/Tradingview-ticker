@@ -302,6 +302,19 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         # JS handleLiveBar forwards live ticks to subCharts
         self.assertIn("subCharts[pId].series.update", self.js)
 
+    def test_seam15_multi_chart_engine_uniformity(self):
+        """Seam 15: Multi-chart split layout engine uniformity (Scheme C TradingView widget per sub-pane vs Scheme A Lightweight Charts)."""
+        # JS tracks subTvWidgets dictionary for TradingView widget instances in sub-panes
+        self.assertIn("var subTvWidgets = {};", self.js)
+
+        # JS loadSubChart branches on currentEngine === "C" to instantiate TradingView.widget per sub-pane
+        self.assertIn('if (currentEngine === "C")', self.js)
+        self.assertIn('container_id: "splitChart" + paneNum', self.js)
+        self.assertIn("subTvWidgets[paneNum] =", self.js)
+
+        # JS switchChartEngine refreshes split layout for Scheme C so all panes re-render uniformly
+        self.assertIn("applySplitLayout(activeSplitLayout || \"1x1\");", self.js)
+
 
 if __name__ == "__main__":
     unittest.main()
