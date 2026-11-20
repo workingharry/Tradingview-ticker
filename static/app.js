@@ -459,7 +459,8 @@
     atr: false,
     rsMode: "mansfield",
     showLegend: true,
-    collapseLegend: false
+    collapseLegend: false,
+    showDrawingToolbar: false
   };
 
   var defaultAvwapConfig = {
@@ -1709,6 +1710,13 @@ function applyIndicatorVisibilities() {
   if (btnToggleLegendCollapse) {
     btnToggleLegendCollapse.textContent = indicatorConfig.collapseLegend ? "👁️‍🗨️" : "👁️";
     btnToggleLegendCollapse.title = indicatorConfig.collapseLegend ? "展開圖例數值 (Expand Legend Values)" : "收起圖例數值 (Collapse Legend Values)";
+  }
+
+  var drawingToolbar = document.getElementById("drawingToolbar");
+  if (drawingToolbar) {
+    var isDtbVis = Boolean(indicatorConfig && indicatorConfig.showDrawingToolbar && currentEngine !== "C");
+    drawingToolbar.style.display = isDtbVis ? "flex" : "none";
+    drawingToolbar.classList.toggle("visible", isDtbVis);
   }
 
   calcAndRenderAvwap();
@@ -4315,7 +4323,8 @@ function syncIndicatorCheckboxes() {
     chkAvwap: indicatorConfig.avwap,
     chkAtr: indicatorConfig.atr,
     chkShowLegend: indicatorConfig.showLegend !== false,
-    chkCollapseLegend: Boolean(indicatorConfig.collapseLegend)
+    chkCollapseLegend: Boolean(indicatorConfig.collapseLegend),
+    chkShowDrawingToolbar: Boolean(indicatorConfig.showDrawingToolbar)
   };
   for (var cid in checkMap) {
     var cel = document.getElementById(cid);
@@ -5710,6 +5719,17 @@ function initEventListeners() {
       indicatorConfig.collapseLegend = e.target.checked;
       saveIndicatorConfig();
       applyIndicatorVisibilities();
+      if (typeof savePreferencesImmediate === "function") savePreferencesImmediate();
+    };
+  }
+
+  var chkShowDrawingToolbar = document.getElementById("chkShowDrawingToolbar");
+  if (chkShowDrawingToolbar) {
+    chkShowDrawingToolbar.onchange = function(e) {
+      indicatorConfig.showDrawingToolbar = e.target.checked;
+      saveIndicatorConfig();
+      applyIndicatorVisibilities();
+      if (typeof resizeAllCharts === "function") resizeAllCharts();
       if (typeof savePreferencesImmediate === "function") savePreferencesImmediate();
     };
   }

@@ -237,6 +237,20 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         self.assertNotIn(".chat-toggle-btn", self.css)
         self.assertNotIn(".chat-modal-dialog", self.css)
 
+    def test_seam11_drawing_toolbar_hidden_by_default(self):
+        """Seam 11: Drawing toolbar is removed/hidden by default from UI and configurable via settings."""
+        # HTML element is hidden by default and modal checkbox exists
+        self.assertIn('id="drawingToolbar"', self.html)
+        self.assertIn('style="display: none;"', self.html)
+        self.assertIn('id="chkShowDrawingToolbar"', self.html)
+
+        # JS defaults showDrawingToolbar to false and binds controls
+        self.assertIn("showDrawingToolbar: false", self.js)
+        self.assertIn("chkShowDrawingToolbar", self.js)
+
+        # CSS defaults to display: none and supports visible class
+        self.assertIn(".drawing-toolbar.visible", self.css)
+
 
 if __name__ == "__main__":
     unittest.main()
