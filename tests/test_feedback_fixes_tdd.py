@@ -251,6 +251,23 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         # CSS defaults to display: none and supports visible class
         self.assertIn(".drawing-toolbar.visible", self.css)
 
+    def test_seam12_analysis_and_screener_buttons_hidden_by_default(self):
+        """Seam 12: Fundamentals, AI Lens, and Screener buttons are removed/hidden by default from top header."""
+        # HTML elements have style="display: none;" by default
+        self.assertIn('id="fundamentalsBtn" style="display: none;"', self.html)
+        self.assertIn('id="aiLensBtn" style="display: none;"', self.html)
+        self.assertIn('id="screenerBtn" style="display: none;"', self.html)
+        self.assertIn('id="chkShowAnalysisTools"', self.html)
+
+        # JS defaults showAnalysisTools to false and binds controls
+        self.assertIn("showAnalysisTools: false", self.js)
+        self.assertIn("chkShowAnalysisTools", self.js)
+
+        # CSS hides them with display: none !important by default
+        self.assertIn("#fundamentalsBtn", self.css)
+        self.assertIn("#aiLensBtn", self.css)
+        self.assertIn("#screenerBtn", self.css)
+
 
 if __name__ == "__main__":
     unittest.main()

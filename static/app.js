@@ -460,7 +460,8 @@
     rsMode: "mansfield",
     showLegend: true,
     collapseLegend: false,
-    showDrawingToolbar: false
+    showDrawingToolbar: false,
+    showAnalysisTools: false
   };
 
   var defaultAvwapConfig = {
@@ -1717,6 +1718,16 @@ function applyIndicatorVisibilities() {
     var isDtbVis = Boolean(indicatorConfig && indicatorConfig.showDrawingToolbar && currentEngine !== "C");
     drawingToolbar.style.display = isDtbVis ? "flex" : "none";
     drawingToolbar.classList.toggle("visible", isDtbVis);
+  }
+
+  var isToolsVis = Boolean(indicatorConfig && indicatorConfig.showAnalysisTools);
+  var toolBtnIds = ["fundamentalsBtn", "aiLensBtn", "screenerBtn"];
+  for (var ti = 0; ti < toolBtnIds.length; ti++) {
+    var tEl = document.getElementById(toolBtnIds[ti]);
+    if (tEl) {
+      tEl.style.display = isToolsVis ? "inline-flex" : "none";
+      tEl.classList.toggle("visible", isToolsVis);
+    }
   }
 
   calcAndRenderAvwap();
@@ -4324,7 +4335,8 @@ function syncIndicatorCheckboxes() {
     chkAtr: indicatorConfig.atr,
     chkShowLegend: indicatorConfig.showLegend !== false,
     chkCollapseLegend: Boolean(indicatorConfig.collapseLegend),
-    chkShowDrawingToolbar: Boolean(indicatorConfig.showDrawingToolbar)
+    chkShowDrawingToolbar: Boolean(indicatorConfig.showDrawingToolbar),
+    chkShowAnalysisTools: Boolean(indicatorConfig.showAnalysisTools)
   };
   for (var cid in checkMap) {
     var cel = document.getElementById(cid);
@@ -5730,6 +5742,16 @@ function initEventListeners() {
       saveIndicatorConfig();
       applyIndicatorVisibilities();
       if (typeof resizeAllCharts === "function") resizeAllCharts();
+      if (typeof savePreferencesImmediate === "function") savePreferencesImmediate();
+    };
+  }
+
+  var chkShowAnalysisTools = document.getElementById("chkShowAnalysisTools");
+  if (chkShowAnalysisTools) {
+    chkShowAnalysisTools.onchange = function(e) {
+      indicatorConfig.showAnalysisTools = e.target.checked;
+      saveIndicatorConfig();
+      applyIndicatorVisibilities();
       if (typeof savePreferencesImmediate === "function") savePreferencesImmediate();
     };
   }

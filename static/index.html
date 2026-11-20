@@ -100,20 +100,20 @@
           <span>Indicators</span>
         </button>
 
-        <!-- Fundamentals & AI Analysis Trigger -->
-        <button class="tool-btn" id="fundamentalsBtn" title="Fundamental Analysis & AI Diagnosis">
+        <!-- Fundamentals & AI Analysis Trigger (Removed/Hidden by default per user request) -->
+        <button class="tool-btn" id="fundamentalsBtn" style="display: none;" title="Fundamental Analysis & AI Diagnosis">
           <span class="tool-icon">📊</span>
           <span id="fundamentalsBtnLabel">財報分析</span>
         </button>
 
-        <!-- AI Agent Lens Decision Engine Trigger -->
-        <button class="tool-btn" id="aiLensBtn" title="AI Agent Lens (Non-Repainting Decision Engine)">
+        <!-- AI Agent Lens Decision Engine Trigger (Removed/Hidden by default per user request) -->
+        <button class="tool-btn" id="aiLensBtn" style="display: none;" title="AI Agent Lens (Non-Repainting Decision Engine)">
           <span class="tool-icon">🤖</span>
           <span id="aiLensBtnLabel">AI Lens</span>
         </button>
 
-        <!-- Institutional Stock Screener (RS + ATR + CANSLIM Engine) -->
-        <button class="tool-btn" id="screenerBtn" title="Stock Screener (Alt+S)">
+        <!-- Institutional Stock Screener (RS + ATR + CANSLIM Engine) (Removed/Hidden by default per user request) -->
+        <button class="tool-btn" id="screenerBtn" style="display: none;" title="Stock Screener (Alt+S)">
           <span class="tool-icon">🎯</span>
           <span id="screenerBtnLabel">智能選股</span>
         </button>
@@ -457,6 +457,11 @@
           <input type="checkbox" id="chkShowDrawingToolbar" />
           <span class="color-dot dot-gray"></span>
           <span class="ind-name">顯示左側繪圖工具欄 (Show Left Drawing Toolbar)</span>
+        </label>
+        <label class="ind-toggle-row">
+          <input type="checkbox" id="chkShowAnalysisTools" />
+          <span class="color-dot dot-gray"></span>
+          <span class="ind-name">顯示財報/AI Lens/選股按鈕 (Show Analysis Tools)</span>
         </label>
       </div>
       <div class="modal-footer">
