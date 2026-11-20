@@ -90,7 +90,34 @@
         wickUpColor: "#26a69a",
         wickDownColor: "#ef5350"
       });
-      subCharts[paneNum] = { chart: subChart, series: subSeries };
+      var ema21Series = subChart.addLineSeries({
+        color: "#a855f7",
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false
+      });
+      var ema30Series = subChart.addLineSeries({
+        color: "#f59e0b",
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false
+      });
+      var ema200Series = subChart.addLineSeries({
+        color: "#ec4899",
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false
+      });
+      subCharts[paneNum] = {
+        chart: subChart,
+        series: subSeries,
+        ema21: ema21Series,
+        ema30: ema30Series,
+        ema200: ema200Series
+      };
     }
 
     var subObj = subCharts[paneNum];
@@ -103,7 +130,21 @@
         if (paneSymbols[paneNum] !== symbol) return;
         if (d && Array.isArray(d.bars) && d.bars.length > 0) {
           subObj.series.setData(d.bars);
-          subObj.chart.timeScale().fitContent();
+          if (window.Indicators && typeof window.Indicators.calcEMA === "function") {
+            try {
+              if (subObj.ema21) subObj.ema21.setData(window.Indicators.calcEMA(d.bars, 21));
+              if (subObj.ema30) subObj.ema30.setData(window.Indicators.calcEMA(d.bars, 30));
+              if (subObj.ema200) subObj.ema200.setData(window.Indicators.calcEMA(d.bars, 200));
+            } catch (emaErr) {}
+          }
+          requestAnimationFrame(function() {
+            var sw = container.clientWidth;
+            var sh = container.clientHeight;
+            if (sw > 0 && sh > 0) {
+              subObj.chart.applyOptions({ width: sw, height: sh });
+            }
+            subObj.chart.timeScale().fitContent();
+          });
         }
       })
       .catch(function() {});
@@ -1455,21 +1496,22 @@ function initChart() {
 }
 
 function resizeAllCharts() {
-  if (currentEngine === "C") return;
-  var priceContainer = document.getElementById("chart");
-  var rsChartContainer = document.getElementById("rsChart");
-  if (chart && priceContainer) {
-    var pw = priceContainer.clientWidth;
-    var ph = priceContainer.clientHeight;
-    if (pw > 0 && ph > 0) {
-      chart.applyOptions({ width: pw, height: ph });
+  if (currentEngine !== "C") {
+    var priceContainer = document.getElementById("chart");
+    var rsChartContainer = document.getElementById("rsChart");
+    if (chart && priceContainer) {
+      var pw = priceContainer.clientWidth;
+      var ph = priceContainer.clientHeight;
+      if (pw > 0 && ph > 0) {
+        chart.applyOptions({ width: pw, height: ph });
+      }
     }
-  }
-  if (rsChart && rsChartContainer && indicatorConfig.rsLine) {
-    var rw = rsChartContainer.clientWidth;
-    var rh = rsChartContainer.clientHeight;
-    if (rw > 0 && rh > 0) {
-      rsChart.applyOptions({ width: rw, height: rh });
+    if (rsChart && rsChartContainer && indicatorConfig.rsLine) {
+      var rw = rsChartContainer.clientWidth;
+      var rh = rsChartContainer.clientHeight;
+      if (rw > 0 && rh > 0) {
+        rsChart.applyOptions({ width: rw, height: rh });
+      }
     }
   }
   for (var p in subCharts) {
@@ -1923,11 +1965,22 @@ function initTradingViewWidget(symbol) {
   tvWidgetContainer.innerHTML = "";
 
   // Clear stale cached TradingView study properties so fresh distinct colors apply immediately
+  // CAUTION: Strictly protect terminal application preferences (tv_chart_engine, tv_terminal_lang, etc.)
   try {
     var tvKeys = [];
     for (var k = 0; k < localStorage.length; k++) {
       var lk = localStorage.key(k);
-      if (lk && (lk.indexOf("tradingview") !== -1 || lk.indexOf("tv_chart") !== -1)) {
+      if (
+        lk &&
+        lk !== "tv_chart_engine" &&
+        lk !== "tv_terminal_lang" &&
+        lk !== "tv_active_timeframe" &&
+        lk !== "tv_price_scale_mode" &&
+        lk !== "tv_indicator_config" &&
+        lk !== "tv_symbols_cache" &&
+        lk !== "tv_session_token" &&
+        (lk.indexOf("tradingview") !== -1 || lk.indexOf("tv_chart_studies") !== -1 || lk.indexOf("tv_chart_settings") !== -1)
+      ) {
         tvKeys.push(lk);
       }
     }
@@ -2654,6 +2707,21 @@ function handleLiveBar(symbol, bar) {
 
   updateCrosshairLegend(liveBar);
   updateDeepvueHud(currentRawBars);
+
+  // Forward live tick updates to matching sub-charts in multi-pane split layout
+  for (var pId in subCharts) {
+    if (paneSymbols[pId] === symbol && subCharts[pId] && subCharts[pId].series) {
+      try {
+        subCharts[pId].series.update({
+          time: barTime,
+          open: open,
+          high: high,
+          low: low,
+          close: close
+        });
+      } catch (subErr) {}
+    }
+  }
 }
 
 function updateSymbolMetrics(symbol, quote, bar) {

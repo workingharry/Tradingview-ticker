@@ -281,6 +281,27 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         self.assertIn("indicatorConfig.tvCompareRs", self.js)
         self.assertIn("chkTvCompareRs", self.js)
 
+    def test_seam14_split_layout_and_storage_protection(self):
+        """Seam 14: Multi-chart split layout integrity, resize non-blocking, and storage key protection."""
+        # CSS supports #tvWidgetContainer in split grid
+        self.assertIn(".chart-wrapper.layout-split-1x2 #tvWidgetContainer", self.css)
+        self.assertIn(".chart-wrapper.layout-split-2x2 #tvWidgetContainer", self.css)
+
+        # JS preserves tv_chart_engine in initTradingViewWidget localStorage cleaning
+        self.assertIn('lk !== "tv_chart_engine"', self.js)
+
+        # JS resizeAllCharts does not short-circuit subCharts for Engine C
+        self.assertIn("if (currentEngine !== \"C\")", self.js)
+        self.assertIn("for (var p in subCharts)", self.js)
+
+        # JS loadSubChart renders EMA 21, 30, 200 indicators
+        self.assertIn('color: "#a855f7"', self.js)
+        self.assertIn('color: "#f59e0b"', self.js)
+        self.assertIn('color: "#ec4899"', self.js)
+
+        # JS handleLiveBar forwards live ticks to subCharts
+        self.assertIn("subCharts[pId].series.update", self.js)
+
 
 if __name__ == "__main__":
     unittest.main()
