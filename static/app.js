@@ -4803,8 +4803,6 @@ function initEventListeners() {
         if (typeof renderDrawingCanvas === "function") renderDrawingCanvas();
       }
       updateCrosshairLegend(latestBarData);
-    } else if ((e.metaKey || e.ctrlKey) && k === "j") {
-      e.preventDefault(); openChatModal();
     } else if ((e.altKey && k === "s") || ((e.metaKey || e.ctrlKey) && e.shiftKey && k === "s")) {
       e.preventDefault(); toggleScreenerModal();
     } else if (e.altKey && k === "l") {
@@ -4819,7 +4817,7 @@ function initEventListeners() {
       e.preventDefault(); _addQuickPriceLine(true);
     } else if (!e.metaKey && !e.ctrlKey && !e.altKey) {
       var tag = e.target && e.target.tagName;
-      var modalOpen = (searchModal && searchModal.style.display === "flex") || (indicatorModal && indicatorModal.style.display === "flex") || (chatModal && chatModal.style.display === "flex");
+      var modalOpen = (searchModal && searchModal.style.display === "flex") || (indicatorModal && indicatorModal.style.display === "flex");
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || modalOpen) return;
       if (e.key === "/") {
         e.preventDefault(); if (typeof syncIndicatorCheckboxes === "function") syncIndicatorCheckboxes(); if (indicatorModal) indicatorModal.style.display = "flex";
@@ -4834,71 +4832,6 @@ function initEventListeners() {
       }
     }
   });
-
-  var openChatBtn = document.getElementById("openChatBtn");
-  var closeChatBtn = document.getElementById("closeChatBtn");
-  var chatModal = document.getElementById("chatModal");
-  var chatInput = document.getElementById("chatInput");
-  var sendChatBtn = document.getElementById("sendChatBtn");
-  var clearChatBtn = document.getElementById("clearChatBtn");
-
-  if (openChatBtn) {
-    openChatBtn.onclick = function() {
-      openChatModal();
-    };
-  }
-  if (closeChatBtn) {
-    closeChatBtn.onclick = function() {
-      closeChatModal();
-    };
-  }
-  if (chatModal) {
-    chatModal.onclick = function(e) {
-      if (e.target === chatModal) closeChatModal();
-    };
-  }
-  if (sendChatBtn) {
-    sendChatBtn.onclick = function() {
-      sendChatMessage();
-    };
-  }
-  if (chatInput) {
-    chatInput.onkeydown = function(e) {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        sendChatMessage();
-      }
-    };
-  }
-  if (clearChatBtn) {
-    clearChatBtn.onclick = function() {
-      var msgs = document.getElementById("chatMessages");
-      if (msgs) {
-        while (msgs.firstChild) msgs.removeChild(msgs.firstChild);
-        var aiDiv = document.createElement("div");
-        aiDiv.className = "chat-msg ai-msg";
-        var hDiv = document.createElement("div");
-        hDiv.className = "chat-msg-header";
-        hDiv.textContent = "🤖 Antigravity Copilot";
-        var bDiv = document.createElement("div");
-        bDiv.className = "chat-msg-body";
-        bDiv.textContent = "對話已清空。隨時向我提問關於當前標的之技術面或基本面問題！";
-        aiDiv.appendChild(hDiv);
-        aiDiv.appendChild(bDiv);
-        msgs.appendChild(aiDiv);
-      }
-    };
-  }
-
-  var chips = document.querySelectorAll(".chat-chip");
-  for (var cIdx = 0; cIdx < chips.length; cIdx++) {
-    (function(chip) {
-      chip.onclick = function() {
-        var p = chip.getAttribute("data-prompt");
-        if (p) sendChatMessage(p);
-      };
-    })(chips[cIdx]);
-  }
 
   // Bind pane selection clicks
   var p1El = document.getElementById("chartContainer");
@@ -5965,113 +5898,6 @@ if (typeof window !== "undefined") {
       hasPendingChartUpdate: hasPendingChartUpdate
     };
   };
-}
-
-function openChatModal() {
-  var modal = document.getElementById("chatModal");
-  if (!modal) return;
-  modal.style.display = "flex";
-  var tag = document.getElementById("chatActiveSymbolTag");
-  if (tag) {
-    tag.textContent = activeSymbol + " • " + (activeTimeframe || "1D").toUpperCase();
-  }
-  var input = document.getElementById("chatInput");
-  if (input) input.focus();
-}
-
-function closeChatModal() {
-  var modal = document.getElementById("chatModal");
-  if (modal) modal.style.display = "none";
-}
-
-function appendChatMessage(role, text) {
-  var msgs = document.getElementById("chatMessages");
-  if (!msgs) return;
-  var div = document.createElement("div");
-  div.className = "chat-msg " + (role === "user" ? "user-msg" : "ai-msg");
-
-  var header = document.createElement("div");
-  header.className = "chat-msg-header";
-  header.textContent = role === "user" ? "👤 交易員 (You)" : "🤖 Antigravity Copilot";
-
-  var body = document.createElement("div");
-  body.className = "chat-msg-body";
-  var lines = (text || "").split("\n");
-  for (var li = 0; li < lines.length; li++) {
-    if (li > 0) body.appendChild(document.createElement("br"));
-    var line = lines[li];
-    var parts = line.split("**");
-    for (var pi = 0; pi < parts.length; pi++) {
-      if (pi % 2 === 1) {
-        var strongEl = document.createElement("strong");
-        strongEl.textContent = parts[pi];
-        body.appendChild(strongEl);
-      } else if (parts[pi]) {
-        body.appendChild(document.createTextNode(parts[pi]));
-      }
-    }
-  }
-
-  div.appendChild(header);
-  div.appendChild(body);
-  msgs.appendChild(div);
-  msgs.scrollTop = msgs.scrollHeight;
-}
-
-function sendChatMessage(msgText) {
-  var input = document.getElementById("chatInput");
-  var text = (msgText || (input ? input.value : "")).trim();
-  if (!text) return;
-  if (input && !msgText) input.value = "";
-
-  appendChatMessage("user", text);
-
-  var msgs = document.getElementById("chatMessages");
-  var loadingDiv = document.createElement("div");
-  loadingDiv.className = "chat-msg ai-msg loading-msg";
-  var lHead = document.createElement("div");
-  lHead.className = "chat-msg-header";
-  lHead.textContent = "🤖 Antigravity Copilot";
-  var lBody = document.createElement("div");
-  lBody.className = "chat-msg-body";
-  lBody.textContent = "正在分析 " + activeSymbol + " 量化快照與技術指標...";
-  loadingDiv.appendChild(lHead);
-  loadingDiv.appendChild(lBody);
-  if (msgs) {
-    msgs.appendChild(loadingDiv);
-    msgs.scrollTop = msgs.scrollHeight;
-  }
-
-  var chatUrl = "/api/chat";
-  if (sessionToken) {
-    chatUrl += "?token=" + encodeURIComponent(sessionToken);
-  }
-
-  fetch(chatUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(sessionToken ? { "X-Session-Token": sessionToken } : {})
-    },
-    body: JSON.stringify({
-      message: text,
-      symbol: activeSymbol,
-      timeframe: activeTimeframe
-    })
-  })
-  .then(function(res) {
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    return res.json();
-  })
-  .then(function(data) {
-    if (loadingDiv && loadingDiv.parentNode) loadingDiv.parentNode.removeChild(loadingDiv);
-    var reply = data.reply || "分析完成。";
-    appendChatMessage("ai", reply);
-  })
-  .catch(function(err) {
-    if (loadingDiv && loadingDiv.parentNode) loadingDiv.parentNode.removeChild(loadingDiv);
-    appendChatMessage("ai", "連線分析異常 (" + err.message + ")，已自動切換至本機備份策略。");
-  });
 }
 
 function bootstrap() {

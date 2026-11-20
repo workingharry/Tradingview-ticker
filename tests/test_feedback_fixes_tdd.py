@@ -221,6 +221,22 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         self.assertIn(".legend-toggle-btn", self.css)
         self.assertIn(".chart-legend.collapsed", self.css)
 
+    def test_seam10_ai_copilot_removed(self):
+        """Seam 10: AI Copilot button, chat modal, keyboard shortcut and styles are completely removed."""
+        # HTML elements must be completely removed
+        self.assertNotIn("openChatBtn", self.html)
+        self.assertNotIn("chatModal", self.html)
+        self.assertNotIn("AI Copilot", self.html)
+
+        # JS triggers must be completely removed
+        self.assertNotIn("openChatBtn", self.js)
+        self.assertNotIn("k === \"j\"", self.js)
+        self.assertNotIn("openChatModal", self.js)
+
+        # CSS styles must be completely removed
+        self.assertNotIn(".chat-toggle-btn", self.css)
+        self.assertNotIn(".chat-modal-dialog", self.css)
+
 
 if __name__ == "__main__":
     unittest.main()

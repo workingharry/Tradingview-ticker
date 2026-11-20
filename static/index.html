@@ -48,13 +48,6 @@
         </select>
       </div>
 
-      <!-- Gemini Copilot Chat Toggle Button -->
-      <button class="chat-toggle-btn" id="openChatBtn" title="開啟 Gemini AI 市場助理 (⌘J)">
-        <span class="chat-icon">💬</span>
-        <span class="chat-text">AI Copilot</span>
-        <kbd class="chat-shortcut">⌘J</kbd>
-      </button>
-
       <!-- Multi-Chart Split Layout Toggle -->
       <div class="split-layout-selector" id="splitLayoutSelector" title="切換分屏顯示模式">
         <button class="split-btn active" data-layout="1x1" title="單圖 (1x1)">1x1</button>
@@ -806,43 +799,6 @@
       <div class="modal-footer">
         <span id="aiLensModelNotice" class="ai-model-tag">Model: gemini-3.5-flash</span>
         <button class="btn-secondary" id="closeAiLensFooterBtn">關閉</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Gemini Market Copilot Chat Modal -->
-  <div class="modal-backdrop" id="chatModal" style="display: none;">
-    <div class="modal-dialog chat-modal-dialog">
-      <div class="modal-header">
-        <div class="modal-title-group">
-          <span class="modal-icon">💬</span>
-          <h2 class="modal-title">Gemini Market Copilot</h2>
-          <span class="active-sym-tag" id="chatActiveSymbolTag">NASDAQ:NVDA • 1D</span>
-        </div>
-        <button class="modal-close-btn" id="closeChatBtn">✕</button>
-      </div>
-      <div class="chat-messages-container" id="chatMessages">
-        <div class="chat-msg ai-msg">
-          <div class="chat-msg-header">🤖 Antigravity Copilot</div>
-          <div class="chat-msg-body">
-            你好！我是你的 Gemini 市場動能策略助理。我已即時同步當前標的的 K 線量化快照、均線排列 (EMA 10/21/30, SMA 50/200)、相對強弱 (RS) 與基本面數據。<br>請問有什麼我可以協助分析的？
-          </div>
-        </div>
-      </div>
-      <!-- Quick Prompt Chips -->
-      <div class="chat-chips-container" id="chatChips">
-        <button class="chat-chip" data-prompt="請分析當前標的的型態架構、均線趨勢與關鍵支撐壓力位">📈 趨勢與支撐壓力</button>
-        <button class="chat-chip" data-prompt="目前股價相對於大盤基準的相對強弱 (RS) 表現如何？具備動能優勢嗎？">⚡ RS 動能評估</button>
-        <button class="chat-chip" data-prompt="請從 CANSLIM 與第二階段動能角度，給出具體的進出場防守條件">🛑 買賣風控指引</button>
-        <button class="chat-chip" data-prompt="這隻股票近期的基本面與估值位階有何潛在隱憂或亮點？">📊 基本面體檢</button>
-      </div>
-      <div class="chat-input-row">
-        <input type="text" class="chat-input" id="chatInput" placeholder="輸入問題（例如：現在適合買進嗎？停損設在哪？）" autocomplete="off" />
-        <button class="chat-send-btn" id="sendChatBtn">發送</button>
-      </div>
-      <div class="modal-footer">
-        <span class="ai-model-tag">Engine: Gemini 3.5 Flash Dual-Waterfall</span>
-        <button class="btn-secondary" id="clearChatBtn">清空對話</button>
       </div>
     </div>
   </div>
