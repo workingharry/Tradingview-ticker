@@ -206,6 +206,21 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         self.assertIn("priceLineVisible: false", self.js)
         self.assertIn("lastValueVisible: false", self.js)
 
+    def test_seam9_legend_collapse_and_visibility_toggle(self):
+        """Seam 9: Top legend bar supports show/hide and compact collapse toggle with state persistence."""
+        self.assertIn("btnToggleLegendCollapse", self.html)
+        self.assertIn("chkShowLegend", self.html)
+        self.assertIn("chkCollapseLegend", self.html)
+
+        self.assertIn("btnToggleLegendCollapse", self.js)
+        self.assertIn("chkShowLegend", self.js)
+        self.assertIn("chkCollapseLegend", self.js)
+        self.assertIn("collapseLegend", self.js)
+        self.assertIn("showLegend", self.js)
+
+        self.assertIn(".legend-toggle-btn", self.css)
+        self.assertIn(".chart-legend.collapsed", self.css)
+
 
 if __name__ == "__main__":
     unittest.main()

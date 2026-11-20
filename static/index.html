@@ -197,6 +197,7 @@
         <div class="chart-wrapper">
           <!-- Interactive OHLC Crosshair Legend -->
           <div class="chart-legend" id="chartLegend">
+            <button class="legend-toggle-btn" id="btnToggleLegendCollapse" title="收起/展開圖例數值 (Toggle Legend Collapse)">👁️</button>
             <span class="legend-symbol" id="legendSymbol">BTCUSDT</span>
             <span class="legend-interval" id="legendInterval">1D</span>
             <span class="legend-badge live" id="legendModeBadge">LIVE</span>
@@ -447,6 +448,18 @@
             <button class="btn-primary" id="applyRsBenchmarkBtn">Set Tag</button>
           </div>
         </div>
+
+        <div class="ind-section-title" style="margin-top: 16px;">Legend & Chart Header Display</div>
+        <label class="ind-toggle-row">
+          <input type="checkbox" id="chkShowLegend" checked />
+          <span class="color-dot dot-gray"></span>
+          <span class="ind-name">顯示頂部圖例資訊欄 (Show Top Legend Bar)</span>
+        </label>
+        <label class="ind-toggle-row">
+          <input type="checkbox" id="chkCollapseLegend" />
+          <span class="color-dot dot-gray"></span>
+          <span class="ind-name">精簡收起圖例數值 (Compact Legend / Hide Values)</span>
+        </label>
       </div>
       <div class="modal-footer">
         <button class="btn-secondary" id="closeIndicatorModalBottom">Done</button>

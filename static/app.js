@@ -457,7 +457,9 @@
     vwap: false,
     avwap: true,
     atr: false,
-    rsMode: "mansfield"
+    rsMode: "mansfield",
+    showLegend: true,
+    collapseLegend: false
   };
 
   var defaultAvwapConfig = {
@@ -1692,6 +1694,21 @@ function applyIndicatorVisibilities() {
   var avwapPaneEl = document.getElementById("avwapPane");
   if (avwapPaneEl) {
     avwapPaneEl.style.display = (indicatorConfig.avwap && avwapConfig.displayMode === "pane") ? "flex" : "none";
+  }
+
+  var chartLegend = document.getElementById("chartLegend");
+  if (chartLegend) {
+    if (indicatorConfig.showLegend === false) {
+      chartLegend.style.display = "none";
+    } else {
+      chartLegend.style.display = (currentEngine === "C") ? "none" : "flex";
+      chartLegend.classList.toggle("collapsed", Boolean(indicatorConfig.collapseLegend));
+    }
+  }
+  var btnToggleLegendCollapse = document.getElementById("btnToggleLegendCollapse");
+  if (btnToggleLegendCollapse) {
+    btnToggleLegendCollapse.textContent = indicatorConfig.collapseLegend ? "👁️‍🗨️" : "👁️";
+    btnToggleLegendCollapse.title = indicatorConfig.collapseLegend ? "展開圖例數值 (Expand Legend Values)" : "收起圖例數值 (Collapse Legend Values)";
   }
 
   calcAndRenderAvwap();
@@ -4296,7 +4313,9 @@ function syncIndicatorCheckboxes() {
     chkRsLine: indicatorConfig.rsLine,
     chkVwap: indicatorConfig.vwap,
     chkAvwap: indicatorConfig.avwap,
-    chkAtr: indicatorConfig.atr
+    chkAtr: indicatorConfig.atr,
+    chkShowLegend: indicatorConfig.showLegend !== false,
+    chkCollapseLegend: Boolean(indicatorConfig.collapseLegend)
   };
   for (var cid in checkMap) {
     var cel = document.getElementById(cid);
@@ -5730,6 +5749,37 @@ function initEventListeners() {
     applyIndicatorVisibilities();
     if (currentRawBars && currentRawBars.length) updateRsPane(currentRawBars, benchmarkRawBars);
   };
+
+  var btnToggleLegendCollapse = document.getElementById("btnToggleLegendCollapse");
+  if (btnToggleLegendCollapse) {
+    btnToggleLegendCollapse.onclick = function(e) {
+      e.stopPropagation();
+      indicatorConfig.collapseLegend = !indicatorConfig.collapseLegend;
+      saveIndicatorConfig();
+      applyIndicatorVisibilities();
+      if (typeof savePreferencesImmediate === "function") savePreferencesImmediate();
+    };
+  }
+
+  var chkShowLegend = document.getElementById("chkShowLegend");
+  if (chkShowLegend) {
+    chkShowLegend.onchange = function(e) {
+      indicatorConfig.showLegend = e.target.checked;
+      saveIndicatorConfig();
+      applyIndicatorVisibilities();
+      if (typeof savePreferencesImmediate === "function") savePreferencesImmediate();
+    };
+  }
+
+  var chkCollapseLegend = document.getElementById("chkCollapseLegend");
+  if (chkCollapseLegend) {
+    chkCollapseLegend.onchange = function(e) {
+      indicatorConfig.collapseLegend = e.target.checked;
+      saveIndicatorConfig();
+      applyIndicatorVisibilities();
+      if (typeof savePreferencesImmediate === "function") savePreferencesImmediate();
+    };
+  }
 
   var btnModeMansfield = document.getElementById("btnModeMansfield");
   var btnModeDeepvue = document.getElementById("btnModeDeepvue");
