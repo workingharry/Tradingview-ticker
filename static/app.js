@@ -319,8 +319,49 @@
 
   var renderDrawingCanvas = function() {};
   var lastCrosshairPrice = null;
-  var magnetMode = false;
+  var magnetMode = (typeof localStorage !== "undefined" && localStorage.getItem("tv_magnet_mode") === "true");
+  var isAlwaysOnTop = (typeof localStorage !== "undefined" && localStorage.getItem("tv_always_on_top") === "true");
   var tvPriceLineHandles = [];
+  var currentDrawTool = "cursor";
+  var drawings = [];
+  var drawingInProgress = null;
+  var isDraggingHandle = null;
+
+  function loadDrawingsForSymbol(sym) {
+    try {
+      if (typeof localStorage !== "undefined" && sym) {
+        var raw = localStorage.getItem("tv_drawings_" + sym);
+        return raw ? JSON.parse(raw) : [];
+      }
+    } catch (e) {}
+    return [];
+  }
+
+  function saveDrawingsForActiveSymbol() {
+    try {
+      if (typeof localStorage !== "undefined" && activeSymbol) {
+        localStorage.setItem("tv_drawings_" + activeSymbol, JSON.stringify(drawings));
+      }
+      if (typeof savePreferencesDebounced === "function") savePreferencesDebounced();
+    } catch (e) {}
+  }
+
+  function normalizeBarTime(t) {
+    if (typeof t === "number") {
+      return Math.floor(t > 1e11 ? t / 1000 : t);
+    }
+    if (typeof t === "string") {
+      var num = Number(t);
+      if (!isNaN(num) && num > 0) {
+        return Math.floor(num > 1e11 ? num / 1000 : num);
+      }
+      var d = new Date(t);
+      if (!isNaN(d.getTime())) {
+        return Math.floor(d.getTime() / 1000);
+      }
+    }
+    return 0;
+  }
 
   var DEFAULT_WATCHLIST_SEEDS = [
     { id: "NASDAQ:NVDA", name: "NVIDIA Corp.", exchange: "NASDAQ", pair: "NVDA", type: "stock", sort_order: 0, sector: "Technology", industry: "Semiconductors" },
@@ -468,7 +509,10 @@
           activeTimeframe: activeTimeframe,
           rsBenchmarkTag: rsBenchmarkTag,
           currentEngine: currentEngine,
-          currentLang: currentLang
+          currentLang: currentLang,
+          currentCandleStyle: currentCandleStyle,
+          alwaysOnTop: isAlwaysOnTop,
+          magnetMode: magnetMode
         };
         var headers = { "Content-Type": "application/json" };
         if (sessionToken) headers["X-Session-Token"] = sessionToken;
@@ -481,6 +525,37 @@
         });
       } catch (e) {}
     }, 300);
+  }
+
+  function savePreferencesImmediate() {
+    if (prefSaveTimer) {
+      clearTimeout(prefSaveTimer);
+      prefSaveTimer = null;
+    }
+    try {
+      var payload = {
+        indicatorConfig: indicatorConfig,
+        avwapConfig: avwapConfig,
+        activeSymbol: activeSymbol,
+        activeTimeframe: activeTimeframe,
+        rsBenchmarkTag: rsBenchmarkTag,
+        currentEngine: currentEngine,
+        currentLang: currentLang,
+        currentCandleStyle: currentCandleStyle,
+        alwaysOnTop: isAlwaysOnTop,
+        magnetMode: magnetMode
+      };
+      var headers = { "Content-Type": "application/json" };
+      if (sessionToken) headers["X-Session-Token"] = sessionToken;
+      fetch("/api/preferences", {
+        method: "POST",
+        headers: headers,
+        body: JSON.stringify(payload),
+        keepalive: true
+      }).catch(function(err) {
+        console.debug("Preferences save immediate non-critical error:", err);
+      });
+    } catch (e) {}
   }
 
   function syncPreferencesFromBackend() {
@@ -519,11 +594,42 @@
         if (p.activeTimeframe && typeof p.activeTimeframe === "string" && p.activeTimeframe !== activeTimeframe) {
           activeTimeframe = p.activeTimeframe;
         }
+        if (p.currentCandleStyle && typeof p.currentCandleStyle === "string" && p.currentCandleStyle !== currentCandleStyle) {
+          currentCandleStyle = p.currentCandleStyle;
+          safeSetStorage("tv_candle_style", currentCandleStyle);
+          if (typeof updateCandleStyleUI === "function") updateCandleStyleUI();
+        }
+        if (p.currentLang && typeof p.currentLang === "string" && p.currentLang !== currentLang) {
+          currentLang = p.currentLang;
+          safeSetStorage("tv_terminal_lang", currentLang);
+          if (typeof setLanguage === "function") setLanguage(currentLang);
+        }
+        if (p.alwaysOnTop !== undefined) {
+          isAlwaysOnTop = Boolean(p.alwaysOnTop);
+          safeSetStorage("tv_always_on_top", String(isAlwaysOnTop));
+          var pinBtn = document.getElementById("btnPinWindow");
+          if (pinBtn) {
+            pinBtn.classList.toggle("active", isAlwaysOnTop);
+            pinBtn.setAttribute("title", isAlwaysOnTop ? "取消視窗置頂 (Pinned on Top)" : "視窗置頂 (Always on Top)");
+          }
+          if (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === "function") {
+            window.__TAURI__.core.invoke("set_always_on_top", { enabled: isAlwaysOnTop }).catch(function() {});
+          }
+        }
+        if (p.magnetMode !== undefined) {
+          magnetMode = Boolean(p.magnetMode);
+          safeSetStorage("tv_magnet_mode", String(magnetMode));
+          var mgBtn = document.getElementById("btnMagnet");
+          if (mgBtn) mgBtn.classList.toggle("active", magnetMode);
+        }
         if (needsRefresh) {
+          syncIndicatorCheckboxes();
           applyIndicatorVisibilities();
-          if (typeof populateIndicatorModal === "function") populateIndicatorModal();
           if (currentRawBars && currentRawBars.length > 0) {
             calcAndRenderAvwap();
+          }
+          if (currentEngine === "C" || p.currentEngine === "C" || p.currentEngine === "tradingview") {
+            if (typeof initTradingViewWidget === "function") initTradingViewWidget(activeSymbol);
           }
         }
       })
@@ -1004,6 +1110,10 @@ function updateActiveCandleWithPrice(price, volume, tickTime) {
       }
     }
 
+    if (indicatorConfig && indicatorConfig.avwap) {
+      calcAndRenderAvwap();
+    }
+
     updateCrosshairLegend(liveBar);
     updateDeepvueHud(currentRawBars);
   } catch (chartErr) {
@@ -1249,6 +1359,7 @@ function initChart() {
   }
 
   chart.subscribeCrosshairMove(function(param) {
+    if (typeof renderDrawingCanvas === "function") renderDrawingCanvas();
     if (!param || !param.time || !param.point || !param.seriesData || !param.seriesData.has(candleSeries)) {
       updateCrosshairLegend(latestBarData);
       return;
@@ -1512,6 +1623,7 @@ function updateAvwapHudAndLegend(data, activeBarTime) {
 }
 
 function applyIndicatorVisibilities() {
+  if (typeof syncIndicatorCheckboxes === "function") syncIndicatorCheckboxes();
   if (ema10Series) ema10Series.applyOptions({ visible: indicatorConfig.ema10 });
   if (ema21Series) ema21Series.applyOptions({ visible: indicatorConfig.ema21 });
   if (ema30Series) ema30Series.applyOptions({ visible: indicatorConfig.ema30 });
@@ -1656,8 +1768,15 @@ function updateCrosshairLegend(bar) {
 
 function switchSymbol(symbol) {
   if (activeSymbol === symbol && currentRawBars.length > 0) return;
+  if (activeSymbol && typeof saveDrawingsForActiveSymbol === "function") {
+    saveDrawingsForActiveSymbol();
+  }
   activeSymbol = symbol;
   safeSetStorage("tv_active_symbol", symbol);
+  if (typeof loadDrawingsForSymbol === "function") {
+    drawings = loadDrawingsForSymbol(symbol);
+    if (typeof renderDrawingCanvas === "function") renderDrawingCanvas();
+  }
   isHistoryLoading = true;
   currentRawBars = [];
 
@@ -1754,15 +1873,13 @@ function initTradingViewWidget(symbol) {
 
   var tvInterval = ({ "1m": "1", "5m": "5", "15m": "15", "1h": "60", "60m": "60", "1D": "D", "1W": "W" })[activeTimeframe] || "D";
 
+  // User specification: Scheme C TradingView widget exclusively loads 21 EMA, 30 EMA, 200 EMA, and RS Line (Compare vs SPY)
   var tvStudies = [];
-  if (indicatorConfig.ema10) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 10 } });
-  if (indicatorConfig.ema21) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 21 } });
-  if (indicatorConfig.ema30) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 30 } });
-  if (indicatorConfig.sma50) tvStudies.push({ id: "MASimple@tv-basicstudies", inputs: { length: 50 } });
-  if (indicatorConfig.sma200) tvStudies.push({ id: "MASimple@tv-basicstudies", inputs: { length: 200 } });
-  if (indicatorConfig.vwap) tvStudies.push({ id: "VWAP@tv-basicstudies" });
-  if (indicatorConfig.bollinger) tvStudies.push({ id: "Bollinger Bands@tv-basicstudies" });
-  if (indicatorConfig.rsLine) tvStudies.push({ id: "Compare@tv-basicstudies", inputs: { symbol: rsBenchmarkTag || "SPY" } });
+  if (indicatorConfig.ema21 !== false) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 21 } });
+  if (indicatorConfig.ema30 !== false) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 30 } });
+  if (indicatorConfig.sma200 !== false || indicatorConfig.ema200 !== false) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 200 } });
+  if (indicatorConfig.rsLine !== false) tvStudies.push({ id: "Compare@tv-basicstudies", inputs: { symbol: toTradingViewRealtimeSymbol(rsBenchmarkTag || "SPY") } });
+  if (indicatorConfig.avwap) tvStudies.push({ id: "Anchored VWAP@tv-basicstudies" });
 
   if (typeof TradingView !== "undefined" && TradingView.widget) {
     try {
@@ -1788,7 +1905,7 @@ function initTradingViewWidget(symbol) {
           "volume.volume ma.length": 50,
           "volume.volume.color.0": "#ef4444",
           "volume.volume.color.1": "#26a69a",
-          "moving average exponential.plot.color": "#00e5ff",
+          "moving average exponential.plot.color": "#a855f7",
           "moving average exponential.plot.linewidth": 2,
           "moving average.plot.color": "#eab308",
           "moving average.plot.linewidth": 2,
@@ -1807,7 +1924,7 @@ function initTradingViewWidget(symbol) {
             var chart = typeof tvWidgetInstance.activeChart === "function" ? tvWidgetInstance.activeChart() : null;
             if (chart && typeof chart.getAllStudies === "function") {
               var allStudies = chart.getAllStudies();
-              var emaColors = ["#00e5ff", "#a855f7", "#f59e0b"];
+              var emaColors = ["#a855f7", "#f59e0b", "#ec4899"]; // 21 EMA (purple), 30 EMA (amber), 200 EMA (pink/red)
               var emaIdx = 0;
               for (var si = 0; si < allStudies.length; si++) {
                 var st = allStudies[si];
@@ -1818,6 +1935,13 @@ function initTradingViewWidget(symbol) {
                     var studyApi = chart.getStudyById(st.id);
                     if (studyApi && typeof studyApi.applyOverrides === "function") {
                       studyApi.applyOverrides({ "plot.color": cColor });
+                    }
+                  }
+                } else if (st.name && st.name.indexOf("Compare") !== -1) {
+                  if (typeof chart.getStudyById === "function") {
+                    var compApi = chart.getStudyById(st.id);
+                    if (compApi && typeof compApi.applyOverrides === "function") {
+                      compApi.applyOverrides({ "plot.color": "#3b82f6" });
                     }
                   }
                 }
@@ -2072,9 +2196,11 @@ function loadHistory(symbol, tf, isBackfill) {
         var uniqueBars = [];
         for (var i = 0; i < rawBars.length; i++) {
           var bar = rawBars[i];
-          if (!bar || typeof bar.time !== "number") continue;
+          if (!bar) continue;
+          var barTime = normalizeBarTime(bar.time);
+          if (barTime <= 0) continue;
           var cleanBar = {
-            time: bar.time,
+            time: barTime,
             open: safeNum(bar.open),
             high: safeNum(bar.high),
             low: safeNum(bar.low),
@@ -2286,14 +2412,14 @@ function handleLiveBar(symbol, bar) {
   if (isHistoryLoading) return;
   if (symbol !== activeSymbol || !candleSeries || !bar) return;
 
-  var barTime = safeNum(bar.time);
+  var barTime = normalizeBarTime(bar.time);
   var open = safeNum(bar.open);
   var high = safeNum(bar.high);
   var low = safeNum(bar.low);
   var close = safeNum(bar.close);
   var volume = safeNum(bar.volume);
 
-  if (isNaN(barTime) || barTime <= 0) return;
+  if (barTime <= 0) return;
   if (isNaN(open) || isNaN(high) || isNaN(low) || isNaN(close) || close <= 0) return;
 
   var tfSec = TF_SECONDS[activeTimeframe] || 60;
@@ -2647,17 +2773,7 @@ var ctxSetBenchmark = document.getElementById("ctxSetBenchmark");
 if (ctxSetBenchmark) {
   ctxSetBenchmark.onclick = function() {
     if (activeContextSymbol) {
-      rsBenchmarkTag = activeContextSymbol;
-      safeSetStorage("tv_rs_benchmark", activeContextSymbol);
-      if (typeof savePreferencesDebounced === "function") savePreferencesDebounced();
-      var bSpan = document.getElementById("rsActiveBadge");
-      if (bSpan) bSpan.textContent = "Ref: " + getSymbolDisplayName(activeContextSymbol);
-      var title = document.getElementById("rsPaneTitle");
-      if (title) title.textContent = "RS Line vs " + getSymbolDisplayName(activeContextSymbol);
-      var inputBench = document.getElementById("rsBenchmarkCustomInput");
-      if (inputBench) inputBench.value = activeContextSymbol;
-      loadBenchmarkHistory(activeContextSymbol);
-      loadHistory(activeSymbol);
+      setRsBenchmark(activeContextSymbol);
     }
   };
 }
@@ -2688,6 +2804,7 @@ function unsubscribeSymbol(symbolId) {
   }).catch(function(err) {
     console.warn("Unsubscribe error:", err);
   });
+  if (typeof savePreferencesImmediate === "function") savePreferencesImmediate();
   if (typeof savePreferencesDebounced === "function") savePreferencesDebounced();
 }
 
@@ -3096,6 +3213,12 @@ function setRsBenchmark(tag) {
   var rsPills = document.querySelectorAll ? document.querySelectorAll(".rs-pill") : [];
   for (var p = 0; p < rsPills.length; p++) {
     rsPills[p].classList.toggle("active", rsPills[p].getAttribute("data-bench") === tag);
+  }
+
+  if (typeof savePreferencesImmediate === "function") savePreferencesImmediate();
+
+  if (currentEngine === "C" && typeof initTradingViewWidget === "function") {
+    initTradingViewWidget(activeSymbol);
   }
 
   loadBenchmarkHistory(tag).then(function() {
@@ -4294,6 +4417,7 @@ function applyAvwapSettingsFromModal() {
   indicatorConfig.avwap = true;
   saveIndicatorConfig();
   applyIndicatorVisibilities();
+  if (typeof savePreferencesImmediate === "function") savePreferencesImmediate();
 }
 
 function parseAndApplyPineScript() {
@@ -4629,6 +4753,17 @@ function initEventListeners() {
       if (fundamentalsModal) fundamentalsModal.style.display = "none";
       if (aiLensModal) aiLensModal.style.display = "none";
       closeScreenerModal(); closeChatModal();
+      if (currentDrawTool !== "cursor" || drawingInProgress) {
+        currentDrawTool = "cursor";
+        drawingInProgress = null;
+        var allDrawBtns = document.querySelectorAll ? document.querySelectorAll(".draw-tool-btn[data-tool]:not(.draw-tool-toggle)") : [];
+        for (var dti = 0; dti < allDrawBtns.length; dti++) {
+          allDrawBtns[dti].classList.toggle("active", allDrawBtns[dti].getAttribute("data-tool") === "cursor");
+        }
+        var dwc = document.getElementById("drawingCanvas");
+        if (dwc) dwc.classList.remove("drawing-active");
+        if (typeof renderDrawingCanvas === "function") renderDrawingCanvas();
+      }
       updateCrosshairLegend(latestBarData);
     } else if ((e.metaKey || e.ctrlKey) && k === "j") {
       e.preventDefault(); openChatModal();
@@ -4754,10 +4889,10 @@ function initEventListeners() {
   // ==========================================================================
   // Left Vertical Drawing Toolbar & Overlay Canvas Engine
   // ==========================================================================
-  var currentDrawTool = "cursor";
-  var drawings = [];
-  var drawingInProgress = null;
-  var isDraggingHandle = null;
+  currentDrawTool = "cursor";
+  drawings = activeSymbol ? loadDrawingsForSymbol(activeSymbol) : [];
+  drawingInProgress = null;
+  isDraggingHandle = null;
 
   var drawingCanvas = document.getElementById("drawingCanvas");
   var drawToolBtns = document.querySelectorAll ? document.querySelectorAll(".draw-tool-btn[data-tool]:not(.draw-tool-clear):not(.draw-tool-toggle)") : [];
@@ -4777,29 +4912,51 @@ function initEventListeners() {
 
   var btnMagnet = document.getElementById("btnMagnet");
   if (btnMagnet) {
+    btnMagnet.classList.toggle("active", magnetMode);
     btnMagnet.onclick = function() {
       magnetMode = !magnetMode;
+      safeSetStorage("tv_magnet_mode", String(magnetMode));
       btnMagnet.classList.toggle("active", magnetMode);
+      if (typeof savePreferencesImmediate === "function") savePreferencesImmediate();
     };
   }
 
   var btnPinWindow = document.getElementById("btnPinWindow");
-  var isAlwaysOnTop = false;
   if (btnPinWindow) {
+    btnPinWindow.classList.toggle("active", isAlwaysOnTop);
+    btnPinWindow.setAttribute("title", isAlwaysOnTop ? "取消視窗置頂 (Pinned on Top)" : "視窗置頂 (Always on Top)");
+
+    if (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === "function") {
+      window.__TAURI__.core.invoke("get_always_on_top")
+        .then(function(state) {
+          if (typeof state === "boolean") {
+            isAlwaysOnTop = state;
+            btnPinWindow.classList.toggle("active", isAlwaysOnTop);
+            btnPinWindow.setAttribute("title", isAlwaysOnTop ? "取消視窗置頂 (Pinned on Top)" : "視窗置頂 (Always on Top)");
+          }
+        })
+        .catch(function() {});
+    }
+
     btnPinWindow.onclick = function() {
       if (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === "function") {
         window.__TAURI__.core.invoke("toggle_always_on_top")
           .then(function(state) {
             isAlwaysOnTop = Boolean(state);
+            safeSetStorage("tv_always_on_top", String(isAlwaysOnTop));
             btnPinWindow.classList.toggle("active", isAlwaysOnTop);
             btnPinWindow.setAttribute("title", isAlwaysOnTop ? "取消視窗置頂 (Pinned on Top)" : "視窗置頂 (Always on Top)");
+            if (typeof savePreferencesImmediate === "function") savePreferencesImmediate();
           })
           .catch(function(err) {
             console.warn("Toggle always on top error:", err);
           });
       } else {
         isAlwaysOnTop = !isAlwaysOnTop;
+        safeSetStorage("tv_always_on_top", String(isAlwaysOnTop));
         btnPinWindow.classList.toggle("active", isAlwaysOnTop);
+        btnPinWindow.setAttribute("title", isAlwaysOnTop ? "取消視窗置頂 (Pinned on Top)" : "視窗置頂 (Always on Top)");
+        if (typeof savePreferencesImmediate === "function") savePreferencesImmediate();
       }
     };
   }
@@ -4809,11 +4966,12 @@ function initEventListeners() {
     btnClearDrawings.onclick = function() {
       drawings = [];
       drawingInProgress = null;
+      saveDrawingsForActiveSymbol();
       if (candleSeries && tvPriceLineHandles.length) {
         for (var pi = 0; pi < tvPriceLineHandles.length; pi++) { try { candleSeries.removePriceLine(tvPriceLineHandles[pi]); } catch (e) {} }
         tvPriceLineHandles = [];
       }
-      if (drawingCanvas) drawingCanvas.classList.remove("interactive");
+      if (drawingCanvas) drawingCanvas.classList.remove("interactive", "cursor-move", "cursor-ns-resize", "cursor-pointer");
       renderDrawingCanvas();
     };
   }
@@ -4841,6 +4999,8 @@ function initEventListeners() {
       drawingCanvas.height = drawingCanvas.clientHeight;
     }
     ctx.clearRect(0, 0, drawingCanvas.width, drawingCanvas.height);
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
 
     var timeScale = chart.timeScale ? chart.timeScale() : null;
     if (!timeScale) return;
@@ -4848,6 +5008,7 @@ function initEventListeners() {
     // Render Anchored VWAP (AVWAP) Overlay
     if (indicatorConfig && indicatorConfig.avwap && currentAvwapData && currentAvwapData.avwap && currentAvwapData.avwap.length > 0 && avwapConfig.displayMode === "overlay") {
       var avPts = [];
+      var firstOnScreenIdx = -1;
       for (var avi = 0; avi < currentAvwapData.avwap.length; avi++) {
         var aItem = currentAvwapData.avwap[avi];
         var aX = timeScale.timeToCoordinate(aItem.time);
@@ -4855,6 +5016,7 @@ function initEventListeners() {
         var aYUp = aItem.upper !== undefined ? candlestickSeries.priceToCoordinate(aItem.upper) : aYVwap;
         var aYLo = aItem.lower !== undefined ? candlestickSeries.priceToCoordinate(aItem.lower) : aYVwap;
         if (aX !== null && !isNaN(aX) && aYVwap !== null && !isNaN(aYVwap)) {
+          if (firstOnScreenIdx === -1) firstOnScreenIdx = avi;
           avPts.push({
             x: aX,
             yVwap: aYVwap,
@@ -4863,6 +5025,21 @@ function initEventListeners() {
             isAbove: aItem.isAbove
           });
         }
+      }
+
+      // Extrapolate to left screen border (x = 0) if anchor/earlier points are off-screen
+      if (avPts.length > 0 && firstOnScreenIdx > 0 && avPts[0].x > 0) {
+        var prevItem = currentAvwapData.avwap[firstOnScreenIdx - 1];
+        var prevY = candlestickSeries.priceToCoordinate(prevItem.value);
+        var prevYUp = prevItem.upper !== undefined ? candlestickSeries.priceToCoordinate(prevItem.upper) : prevY;
+        var prevYLo = prevItem.lower !== undefined ? candlestickSeries.priceToCoordinate(prevItem.lower) : prevY;
+        avPts.unshift({
+          x: 0,
+          yVwap: prevY !== null && !isNaN(prevY) ? prevY : avPts[0].yVwap,
+          yUpper: prevYUp !== null && !isNaN(prevYUp) ? prevYUp : avPts[0].yUpper,
+          yLower: prevYLo !== null && !isNaN(prevYLo) ? prevYLo : avPts[0].yLower,
+          isAbove: prevItem.isAbove !== undefined ? prevItem.isAbove : avPts[0].isAbove
+        });
       }
 
       if (avPts.length > 0) {
@@ -4926,9 +5103,10 @@ function initEventListeners() {
 
         // 4. Anchor Badge Marker
         if (avwapConfig.showAnchorLbl && currentAvwapData.anchorBar) {
-          var markX = timeScale.timeToCoordinate(currentAvwapData.anchorBar.time);
+          var rawMarkX = timeScale.timeToCoordinate(currentAvwapData.anchorBar.time);
           var markY = candlestickSeries.priceToCoordinate(currentAvwapData.anchorBar.price);
-          if (markX !== null && !isNaN(markX) && markY !== null && !isNaN(markY)) {
+          if (markY !== null && !isNaN(markY)) {
+            var markX = (rawMarkX !== null && !isNaN(rawMarkX)) ? Math.max(28, rawMarkX) : 28;
             ctx.save();
             ctx.strokeStyle = "#787b86";
             ctx.lineWidth = 1;
@@ -4998,7 +5176,7 @@ function initEventListeners() {
         var xCenter = d.time ? timeScale.timeToCoordinate(d.time) : drawingCanvas.width * 0.5;
         if (xCenter === null || isNaN(xCenter)) xCenter = drawingCanvas.width * 0.5;
         var boxWidth = Math.min(260, drawingCanvas.width * 0.45);
-        var left = Math.max(10, xCenter - boxWidth * 0.5);
+        var left = Math.max(10, xCenter);
         var right = left + boxWidth;
 
         var yEntry = candlestickSeries.priceToCoordinate(d.entryPrice);
@@ -5032,19 +5210,22 @@ function initEventListeners() {
           d.targetHandleY = yTarget;
           d.stopHandleY = yStop;
           d.targetTop = targetTop;
+          d.targetHeight = targetHeight;
           d.stopTop = stopTop;
           d.stopHeight = stopHeight;
           d.boxLeft = left;
           d.boxRight = right;
 
-          d.closeBtnX = right - 14;
-          d.closeBtnY = targetTop + 14;
+          d.closeBtnX = Math.max(20, Math.min(drawingCanvas.width - 20, right - 14));
+          d.closeBtnY = Math.max(20, Math.min(drawingCanvas.height - 20, targetTop + 14));
           ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
           ctx.beginPath();
           ctx.arc(d.closeBtnX, d.closeBtnY, 9, 0, Math.PI * 2);
           ctx.fill();
           ctx.fillStyle = "#ffffff";
           ctx.font = "bold 10px sans-serif";
+          ctx.textAlign = "left";
+          ctx.textBaseline = "alphabetic";
           ctx.fillText("✕", d.closeBtnX - 4, d.closeBtnY + 3.5);
 
           ctx.fillStyle = "#22c55e";
@@ -5165,7 +5346,8 @@ function initEventListeners() {
         if (rd.type === "risk-reward") {
           if (rd.closeBtnX && rd.closeBtnY && Math.hypot(x - rd.closeBtnX, y - rd.closeBtnY) <= 14) {
             drawings.splice(k, 1);
-            if (drawingCanvas) drawingCanvas.classList.remove("interactive");
+            saveDrawingsForActiveSymbol();
+            if (drawingCanvas) drawingCanvas.classList.remove("interactive", "cursor-move", "cursor-ns-resize", "cursor-pointer");
             renderDrawingCanvas();
             return;
           }
@@ -5178,9 +5360,25 @@ function initEventListeners() {
               isDraggingHandle = { drawing: rd, handle: "stop" };
               return;
             }
-            var yEntCoord = candlestickSeries.priceToCoordinate(rd.entryPrice);
+            var yEntCoord = candlestickSeries ? candlestickSeries.priceToCoordinate(rd.entryPrice) : null;
             if (yEntCoord !== null && Math.abs(y - yEntCoord) <= 10) {
               isDraggingHandle = { drawing: rd, handle: "entry" };
+              return;
+            }
+            var bMinY = Math.min(rd.targetTop || 0, rd.stopTop || 0);
+            var bMaxY = Math.max((rd.targetTop || 0) + (rd.targetHeight || 0), (rd.stopTop || 0) + (rd.stopHeight || 0));
+            if (y >= bMinY && y <= bMaxY) {
+              isDraggingHandle = {
+                drawing: rd,
+                handle: "body",
+                startX: x,
+                startY: y,
+                origPrice: price || rd.entryPrice,
+                origTime: rd.time,
+                origEntry: rd.entryPrice,
+                origTarget: rd.targetPrice,
+                origStop: rd.stopPrice
+              };
               return;
             }
           }
@@ -5201,11 +5399,7 @@ function initEventListeners() {
             stopPrice: stopP,
             riskDollar: 500
           });
-          currentDrawTool = "cursor";
-          for (var j = 0; j < drawToolBtns.length; j++) {
-            drawToolBtns[j].classList.toggle("active", drawToolBtns[j].getAttribute("data-tool") === "cursor");
-          }
-          drawingCanvas.classList.remove("drawing-active");
+          saveDrawingsForActiveSymbol();
           renderDrawingCanvas();
         }
       } else if (currentDrawTool === "ruler") {
@@ -5224,21 +5418,13 @@ function initEventListeners() {
             y2: y
           });
           drawingInProgress = null;
-          currentDrawTool = "cursor";
-          for (var rIdx = 0; rIdx < drawToolBtns.length; rIdx++) {
-            drawToolBtns[rIdx].classList.toggle("active", drawToolBtns[rIdx].getAttribute("data-tool") === "cursor");
-          }
-          drawingCanvas.classList.remove("drawing-active");
+          saveDrawingsForActiveSymbol();
           renderDrawingCanvas();
         }
       } else if (currentDrawTool === "hline") {
         if (price) {
           drawings.push({ type: "hline", price: price, color: "#3b82f6" });
-          currentDrawTool = "cursor";
-          for (var hIdx = 0; hIdx < drawToolBtns.length; hIdx++) {
-            drawToolBtns[hIdx].classList.toggle("active", drawToolBtns[hIdx].getAttribute("data-tool") === "cursor");
-          }
-          drawingCanvas.classList.remove("drawing-active");
+          saveDrawingsForActiveSymbol();
           renderDrawingCanvas();
         }
       } else if (currentDrawTool === "trendline") {
@@ -5253,11 +5439,7 @@ function initEventListeners() {
             price2: price
           });
           drawingInProgress = null;
-          currentDrawTool = "cursor";
-          for (var tIdx = 0; tIdx < drawToolBtns.length; tIdx++) {
-            drawToolBtns[tIdx].classList.toggle("active", drawToolBtns[tIdx].getAttribute("data-tool") === "cursor");
-          }
-          drawingCanvas.classList.remove("drawing-active");
+          saveDrawingsForActiveSymbol();
           renderDrawingCanvas();
         }
       } else if (currentDrawTool === "avwap") {
@@ -5278,13 +5460,8 @@ function initEventListeners() {
           saveIndicatorConfig();
           applyIndicatorVisibilities();
           calcAndRenderAvwap();
+          renderDrawingCanvas();
         }
-        currentDrawTool = "cursor";
-        for (var aIdx = 0; aIdx < drawToolBtns.length; aIdx++) {
-          drawToolBtns[aIdx].classList.toggle("active", drawToolBtns[aIdx].getAttribute("data-tool") === "cursor");
-        }
-        drawingCanvas.classList.remove("drawing-active");
-        renderDrawingCanvas();
       }
     });
 
@@ -5305,6 +5482,17 @@ function initEventListeners() {
             isDraggingHandle.drawing.entryPrice = newPrice;
             isDraggingHandle.drawing.targetPrice += diff;
             isDraggingHandle.drawing.stopPrice += diff;
+          } else if (isDraggingHandle.handle === "body") {
+            var bDiff = newPrice - (isDraggingHandle.origPrice || isDraggingHandle.drawing.entryPrice);
+            isDraggingHandle.drawing.entryPrice = isDraggingHandle.origEntry + bDiff;
+            isDraggingHandle.drawing.targetPrice = isDraggingHandle.origTarget + bDiff;
+            isDraggingHandle.drawing.stopPrice = isDraggingHandle.origStop + bDiff;
+            if (timeScale && typeof timeScale.coordinateToTime === "function") {
+              var newT = timeScale.coordinateToTime(x);
+              if (newT !== null && newT !== undefined) {
+                isDraggingHandle.drawing.time = newT;
+              }
+            }
           }
           renderDrawingCanvas();
         }
@@ -5321,37 +5509,67 @@ function initEventListeners() {
     window.addEventListener("mouseup", function() {
       if (isDraggingHandle) {
         isDraggingHandle = null;
+        saveDrawingsForActiveSymbol();
       }
     });
   }
 
-  // Hover detection for interactive elements (handles & close buttons)
+  // Hover detection for interactive elements (handles, close button, body)
   var chartContainerEl = document.getElementById("chartContainer");
   if (chartContainerEl && drawingCanvas) {
     chartContainerEl.addEventListener("mousemove", function(e) {
-      if (currentDrawTool !== "cursor" || drawings.length === 0) return;
+      if (currentDrawTool !== "cursor") {
+        if (!drawingCanvas.classList.contains("interactive")) {
+          drawingCanvas.classList.add("interactive");
+        }
+        return;
+      }
+      if (drawings.length === 0 && !isDraggingHandle) {
+        if (drawingCanvas.classList.contains("interactive")) {
+          drawingCanvas.classList.remove("interactive", "cursor-move", "cursor-ns-resize", "cursor-pointer");
+        }
+        return;
+      }
       var rect = drawingCanvas.getBoundingClientRect();
       var mx = e.clientX - rect.left;
       var my = e.clientY - rect.top;
-      var isOver = false;
-      for (var k = 0; k < drawings.length; k++) {
-        var d = drawings[k];
-        if (d.type === "risk-reward") {
-          if (d.closeBtnX && d.closeBtnY && Math.hypot(mx - d.closeBtnX, my - d.closeBtnY) <= 14) {
-            isOver = true;
-            break;
-          }
-          if (d.boxLeft && d.boxRight && mx >= d.boxLeft && mx <= d.boxRight) {
-            if (d.targetHandleY && Math.abs(my - d.targetHandleY) <= 10) { isOver = true; break; }
-            if (d.stopHandleY && Math.abs(my - d.stopHandleY) <= 10) { isOver = true; break; }
-            if (candlestickSeries) {
-              var yEnt = candlestickSeries.priceToCoordinate(d.entryPrice);
-              if (yEnt !== null && Math.abs(my - yEnt) <= 10) { isOver = true; break; }
+      var hoverState = "none";
+
+      if (isDraggingHandle) {
+        hoverState = isDraggingHandle.handle === "body" ? "body" : "handle";
+      } else {
+        for (var k = 0; k < drawings.length; k++) {
+          var d = drawings[k];
+          if (d.type === "risk-reward") {
+            if (d.closeBtnX && d.closeBtnY && Math.hypot(mx - d.closeBtnX, my - d.closeBtnY) <= 14) {
+              hoverState = "close";
+              break;
+            }
+            if (d.boxLeft && d.boxRight && mx >= d.boxLeft && mx <= d.boxRight) {
+              if (d.targetHandleY && Math.abs(my - d.targetHandleY) <= 10) { hoverState = "handle"; break; }
+              if (d.stopHandleY && Math.abs(my - d.stopHandleY) <= 10) { hoverState = "handle"; break; }
+              if (candlestickSeries) {
+                var yEnt = candlestickSeries.priceToCoordinate(d.entryPrice);
+                if (yEnt !== null && Math.abs(my - yEnt) <= 10) { hoverState = "handle"; break; }
+              }
+              var bMinY = Math.min(d.targetTop || 0, d.stopTop || 0);
+              var bMaxY = Math.max((d.targetTop || 0) + (d.targetHeight || 0), (d.stopTop || 0) + (d.stopHeight || 0));
+              if (my >= bMinY && my <= bMaxY) {
+                hoverState = "body";
+                break;
+              }
             }
           }
         }
       }
-      drawingCanvas.classList.toggle("interactive", isOver);
+
+      var isInteractive = hoverState !== "none";
+      if (drawingCanvas.classList.contains("interactive") !== isInteractive) {
+        drawingCanvas.classList.toggle("interactive", isInteractive);
+      }
+      drawingCanvas.classList.toggle("cursor-pointer", hoverState === "close");
+      drawingCanvas.classList.toggle("cursor-ns-resize", hoverState === "handle");
+      drawingCanvas.classList.toggle("cursor-move", hoverState === "body");
     });
   }
 
@@ -5452,8 +5670,8 @@ function initEventListeners() {
       if (indicatorModal) indicatorModal.style.display = "flex";
     };
   }
-  if (closeIndicatorModal) closeIndicatorModal.onclick = function() { if (indicatorModal) indicatorModal.style.display = "none"; };
-  if (closeIndicatorModalBottom) closeIndicatorModalBottom.onclick = function() { if (indicatorModal) indicatorModal.style.display = "none"; };
+  if (closeIndicatorModal) closeIndicatorModal.onclick = function() { if (indicatorModal) indicatorModal.style.display = "none"; if (typeof savePreferencesImmediate === "function") savePreferencesImmediate(); };
+  if (closeIndicatorModalBottom) closeIndicatorModalBottom.onclick = function() { if (indicatorModal) indicatorModal.style.display = "none"; if (typeof savePreferencesImmediate === "function") savePreferencesImmediate(); };
 
   if (chkEma10) chkEma10.onchange = function(e) { indicatorConfig.ema10 = e.target.checked; saveIndicatorConfig(); applyIndicatorVisibilities(); };
   if (chkEma21) chkEma21.onchange = function(e) { indicatorConfig.ema21 = e.target.checked; saveIndicatorConfig(); applyIndicatorVisibilities(); };
@@ -5796,6 +6014,9 @@ function bootstrap() {
       activeTimeframe = activeTfBtn.getAttribute("data-tf");
     }
   }
+
+  window.addEventListener("beforeunload", savePreferencesImmediate);
+  window.addEventListener("pagehide", savePreferencesImmediate);
 
   initChart();
   initEventListeners();

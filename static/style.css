@@ -2016,6 +2016,18 @@ body {
   cursor: crosshair;
 }
 
+.drawing-overlay-canvas.cursor-move {
+  cursor: move !important;
+}
+
+.drawing-overlay-canvas.cursor-ns-resize {
+  cursor: ns-resize !important;
+}
+
+.drawing-overlay-canvas.cursor-pointer {
+  cursor: pointer !important;
+}
+
 /* ==========================================================================
    Multi-Chart Active Pane Focus & MTF Sync
    ========================================================================== */

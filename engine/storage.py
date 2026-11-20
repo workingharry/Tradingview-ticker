@@ -350,7 +350,7 @@ class Storage:
         return max(0, deleted)
 
     def get_watchlist(self) -> List[Dict[str, Any]]:
-        """Returns the persisted watchlist ordered by sort_order. Auto-seeds defaults if empty."""
+        """Returns the persisted watchlist ordered by sort_order. Auto-seeds defaults on first initialization only."""
         if self._closed:
             raise RuntimeError("Cannot read from closed storage")
         with self._lock:
@@ -358,23 +358,42 @@ class Storage:
             cursor.execute("SELECT id, name, exchange, pair, type, sort_order, sector, industry FROM watchlist ORDER BY sort_order ASC, rowid ASC;")
             rows = cursor.fetchall()
             if not rows:
-                for item in DEFAULT_WATCHLIST_SEEDS:
-                    cursor.execute(
-                        "INSERT OR IGNORE INTO watchlist (id, name, exchange, pair, type, sort_order, sector, industry) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
-                        (
-                            item["id"],
-                            item["name"],
-                            item["exchange"],
-                            item["pair"],
-                            item["type"],
-                            item.get("sort_order", 0),
-                            item.get("sector", ""),
-                            item.get("industry", ""),
+                cursor.execute("SELECT value FROM preferences WHERE key = 'watchlist_seeded';")
+                seeded_row = cursor.fetchone()
+                if not seeded_row:
+                    for item in DEFAULT_WATCHLIST_SEEDS:
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO watchlist (id, name, exchange, pair, type, sort_order, sector, industry) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+                            (
+                                item["id"],
+                                item["name"],
+                                item["exchange"],
+                                item["pair"],
+                                item["type"],
+                                item.get("sort_order", 0),
+                                item.get("sector", ""),
+                                item.get("industry", ""),
+                            )
                         )
+                    import time
+                    now = int(time.time())
+                    cursor.execute(
+                        "INSERT INTO preferences (key, value, updated_at) VALUES ('watchlist_seeded', 'true', ?) ON CONFLICT(key) DO UPDATE SET value='true', updated_at=excluded.updated_at;",
+                        (now,)
                     )
-                self._conn.commit()
-                cursor.execute("SELECT id, name, exchange, pair, type, sort_order, sector, industry FROM watchlist ORDER BY sort_order ASC, rowid ASC;")
-                rows = cursor.fetchall()
+                    self._conn.commit()
+                    cursor.execute("SELECT id, name, exchange, pair, type, sort_order, sector, industry FROM watchlist ORDER BY sort_order ASC, rowid ASC;")
+                    rows = cursor.fetchall()
+            else:
+                cursor.execute("SELECT value FROM preferences WHERE key = 'watchlist_seeded';")
+                if not cursor.fetchone():
+                    import time
+                    now = int(time.time())
+                    cursor.execute(
+                        "INSERT INTO preferences (key, value, updated_at) VALUES ('watchlist_seeded', 'true', ?) ON CONFLICT(key) DO NOTHING;",
+                        (now,)
+                    )
+                    self._conn.commit()
             return [
                 {
                     "id": str(r[0]),

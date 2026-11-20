@@ -77,6 +77,11 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         self.assertEqual(stored_prefs["activeSymbol"], "NASDAQ:NVDA")
         self.assertFalse(stored_prefs["indicatorConfig"]["ema10"])
 
+        # 4. Frontend contracts: savePreferencesImmediate and syncIndicatorCheckboxes
+        self.assertIn("savePreferencesImmediate", self.js)
+        self.assertIn("syncIndicatorCheckboxes", self.js)
+        self.assertIn("beforeunload", self.js)
+
     def test_seam2_watchlist_unsubscribe_and_storage_sync(self):
         """Seam 2: Unsubscribe endpoint evicts symbol and frontend calls POST with auth."""
         with TestClient(app) as client:
@@ -93,7 +98,10 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         """Seam 3: toggle_always_on_top Tauri command exists in Rust and bound in UI."""
         # Rust lib.rs must declare the command and register it
         self.assertIn("fn toggle_always_on_top", self.rust)
+        self.assertIn("fn get_always_on_top", self.rust)
+        self.assertIn("fn set_always_on_top", self.rust)
         self.assertIn("toggle_always_on_top", self.rust)
+        self.assertIn("get_always_on_top", self.rust)
         self.assertIn("set_always_on_top", self.rust)
 
         # UI must contain the pin button and style
@@ -103,6 +111,7 @@ class TestFeedbackFixesTDD(unittest.TestCase):
 
         # Frontend JS must invoke the Tauri IPC command
         self.assertIn('"toggle_always_on_top"', self.js)
+        self.assertIn('"get_always_on_top"', self.js)
         self.assertIn("btnPinWindow", self.js)
 
     def test_seam4_drawing_toolbar_isolation_and_ruler(self):
@@ -132,19 +141,56 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         self.assertIn("closeBtnY", self.js)
         self.assertIn("isDraggingHandle", self.js)
 
+        # Forward anchor to avoid candlestick occlusion and body dragging
+        self.assertIn("left = Math.max(10, xCenter)", self.js)
+        self.assertIn('handle: "body"', self.js)
+        self.assertIn(".cursor-move", self.css)
+        self.assertIn(".cursor-ns-resize", self.css)
+        self.assertIn(".cursor-pointer", self.css)
+
     def test_seam6_tradingview_widget_studies_and_distinct_colors(self):
-        """Seam 6: Scheme C configures distinct EMA colors and Compare study for RS."""
+        """Seam 6: Scheme C configures 21, 30, 200 EMA with distinct colors and Compare study for RS."""
         # Compare study must be pushed for RS line
         self.assertIn("Compare@tv-basicstudies", self.js)
 
-        # Distinct EMA colors in studies_overrides
-        self.assertIn('"moving average exponential.plot.color": "#00e5ff"', self.js)
-        self.assertIn('"moving average.plot.color": "#eab308"', self.js)
+        # 21, 30, 200 EMA study lengths specified by user
+        self.assertIn('inputs: { length: 21 }', self.js)
+        self.assertIn('inputs: { length: 30 }', self.js)
+        self.assertIn('inputs: { length: 200 }', self.js)
 
-        # onChartReady color overrides for multi-EMA distinctions
+        # Distinct EMA colors in studies_overrides and onChartReady
+        self.assertIn('"moving average exponential.plot.color": "#a855f7"', self.js)
         self.assertIn("onChartReady", self.js)
         self.assertIn("#a855f7", self.js)  # EMA 21 purple
         self.assertIn("#f59e0b", self.js)  # EMA 30 amber
+        self.assertIn("#ec4899", self.js)  # EMA 200 pink/red
+        self.assertIn("toTradingViewRealtimeSymbol", self.js)
+
+    def test_seam7_watchlist_seed_guard_on_deletion(self):
+        """Seam 7: Intentional watchlist clearing persists across database queries and does not auto-resurrect."""
+        import tempfile
+        from engine.storage import Storage
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "test_seed_guard.sqlite"
+            with Storage(db_path=db_path) as storage:
+                # 1. First read auto-seeds default items
+                initial_wl = storage.get_watchlist()
+                self.assertGreater(len(initial_wl), 0)
+
+                # 2. Intentionally delete all symbols
+                for item in initial_wl:
+                    deleted = storage.remove_watchlist_item(item["id"])
+                    self.assertTrue(deleted)
+
+                # 3. Verify watchlist is now empty
+                empty_wl = storage.get_watchlist()
+                self.assertEqual(len(empty_wl), 0)
+
+            # 4. Re-open database from disk simulating an app restart
+            with Storage(db_path=db_path) as storage_restarted:
+                restarted_wl = storage_restarted.get_watchlist()
+                self.assertEqual(len(restarted_wl), 0, "Intentional clearing must NOT resurrect default tickers")
 
 
 if __name__ == "__main__":

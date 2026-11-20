@@ -326,6 +326,17 @@ fn toggle_always_on_top(window: tauri::WebviewWindow) -> Result<bool, String> {
     Ok(new_state)
 }
 
+#[tauri::command]
+fn get_always_on_top(window: tauri::WebviewWindow) -> Result<bool, String> {
+    window.is_always_on_top().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_always_on_top(window: tauri::WebviewWindow, enabled: bool) -> Result<bool, String> {
+    window.set_always_on_top(enabled).map_err(|e| e.to_string())?;
+    Ok(enabled)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_state = AppState::new();
@@ -425,7 +436,9 @@ pub fn run() {
             update_tray_ticker,
             toggle_battery_saver,
             send_price_alert,
-            toggle_always_on_top
+            toggle_always_on_top,
+            get_always_on_top,
+            set_always_on_top
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
