@@ -199,6 +199,13 @@ class TestFeedbackFixesTDD(unittest.TestCase):
                 restarted_wl = storage_restarted.get_watchlist()
                 self.assertEqual(len(restarted_wl), 0, "Intentional clearing must NOT resurrect default tickers")
 
+    def test_seam8_indicator_horizontal_price_lines_disabled(self):
+        """Seam 8: Moving averages & indicators have horizontal price lines disabled (priceLineVisible: false)."""
+        # Indicators must disable horizontal price lines across the chart
+        self.assertIn("ema10Series = chart.addLineSeries", self.js)
+        self.assertIn("priceLineVisible: false", self.js)
+        self.assertIn("lastValueVisible: false", self.js)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1221,50 +1221,66 @@ function initChart() {
     color: "#9ca3af",
     lineWidth: 1,
     lineStyle: LightweightCharts.LineStyle.Dashed,
-    priceScaleId: "vol_overlay"
+    priceScaleId: "vol_overlay",
+    priceLineVisible: false,
+    lastValueVisible: false
   });
 
   ema10Series = chart.addLineSeries({
     color: "#00e5ff",
     lineWidth: 1,
-    title: "EMA 10"
+    title: "EMA 10",
+    priceLineVisible: false,
+    lastValueVisible: false
   });
 
   ema21Series = chart.addLineSeries({
     color: "#a855f7",
     lineWidth: 1,
-    title: "EMA 21"
+    title: "EMA 21",
+    priceLineVisible: false,
+    lastValueVisible: false
   });
 
   ema30Series = chart.addLineSeries({
     color: "#eab308",
     lineWidth: 1,
-    title: "EMA 30"
+    title: "EMA 30",
+    priceLineVisible: false,
+    lastValueVisible: false
   });
 
   vwapSeries = chart.addLineSeries({
     color: "#ec4899",
     lineWidth: 2,
-    title: "VWAP"
+    title: "VWAP",
+    priceLineVisible: false,
+    lastValueVisible: false
   });
 
   sma50Series = chart.addLineSeries({
     color: "#f59e0b",
     lineWidth: 2,
-    title: "SMA 50"
+    title: "SMA 50",
+    priceLineVisible: false,
+    lastValueVisible: false
   });
 
   sma200Series = chart.addLineSeries({
     color: "#ef4444",
     lineWidth: 2,
-    title: "SMA 200"
+    title: "SMA 200",
+    priceLineVisible: false,
+    lastValueVisible: false
   });
 
   rsSeries = chart.addLineSeries({
     color: "#2962ff",
     lineWidth: 2,
     title: "RS (" + rsBenchmarkTag + ")",
-    priceScaleId: "rs_scale"
+    priceScaleId: "rs_scale",
+    priceLineVisible: false,
+    lastValueVisible: false
   });
   rsSeries.priceScale().applyOptions({
     scaleMargins: { top: 0.15, bottom: 0.4 }
@@ -1273,12 +1289,16 @@ function initChart() {
   bbUpperSeries = chart.addLineSeries({
     color: "#38bdf8",
     lineWidth: 1,
-    lineStyle: LightweightCharts.LineStyle.Dotted
+    lineStyle: LightweightCharts.LineStyle.Dotted,
+    priceLineVisible: false,
+    lastValueVisible: false
   });
   bbLowerSeries = chart.addLineSeries({
     color: "#38bdf8",
     lineWidth: 1,
-    lineStyle: LightweightCharts.LineStyle.Dotted
+    lineStyle: LightweightCharts.LineStyle.Dotted,
+    priceLineVisible: false,
+    lastValueVisible: false
   });
 
   // Deepvue RS Independent Sub-Chart Pane
@@ -1327,14 +1347,18 @@ function initChart() {
     rsLinePaneSeries = rsChart.addLineSeries({
       color: "#2962ff",
       lineWidth: 2,
-      title: "RS"
+      title: "RS",
+      priceLineVisible: false,
+      lastValueVisible: false
     });
 
     rsEmaPaneSeries = rsChart.addLineSeries({
       color: "#f59e0b",
       lineWidth: 1,
       lineStyle: LightweightCharts.LineStyle.Dashed,
-      title: "RS 21 EMA"
+      title: "RS 21 EMA",
+      priceLineVisible: false,
+      lastValueVisible: false
     });
 
     // Bidirectional range synchronization
@@ -1620,18 +1644,18 @@ function updateAvwapHudAndLegend(data, activeBarTime) {
 
 function applyIndicatorVisibilities() {
   if (typeof syncIndicatorCheckboxes === "function") syncIndicatorCheckboxes();
-  if (ema10Series) ema10Series.applyOptions({ visible: indicatorConfig.ema10 });
-  if (ema21Series) ema21Series.applyOptions({ visible: indicatorConfig.ema21 });
-  if (ema30Series) ema30Series.applyOptions({ visible: indicatorConfig.ema30 });
-  if (vwapSeries) vwapSeries.applyOptions({ visible: indicatorConfig.vwap });
-  if (sma50Series) sma50Series.applyOptions({ visible: indicatorConfig.sma50 });
-  if (sma200Series) sma200Series.applyOptions({ visible: indicatorConfig.sma200 });
-  if (volSmaSeries) volSmaSeries.applyOptions({ visible: indicatorConfig.volSma });
-  if (rsSeries) rsSeries.applyOptions({ visible: Boolean(indicatorConfig.rsOverlayMain) });
-  if (rsLinePaneSeries) rsLinePaneSeries.applyOptions({ visible: indicatorConfig.rsLine });
-  if (rsEmaPaneSeries) rsEmaPaneSeries.applyOptions({ visible: indicatorConfig.rsLine });
-  if (bbUpperSeries) bbUpperSeries.applyOptions({ visible: indicatorConfig.bollinger });
-  if (bbLowerSeries) bbLowerSeries.applyOptions({ visible: indicatorConfig.bollinger });
+  if (ema10Series) ema10Series.applyOptions({ visible: indicatorConfig.ema10, priceLineVisible: false, lastValueVisible: false });
+  if (ema21Series) ema21Series.applyOptions({ visible: indicatorConfig.ema21, priceLineVisible: false, lastValueVisible: false });
+  if (ema30Series) ema30Series.applyOptions({ visible: indicatorConfig.ema30, priceLineVisible: false, lastValueVisible: false });
+  if (vwapSeries) vwapSeries.applyOptions({ visible: indicatorConfig.vwap, priceLineVisible: false, lastValueVisible: false });
+  if (sma50Series) sma50Series.applyOptions({ visible: indicatorConfig.sma50, priceLineVisible: false, lastValueVisible: false });
+  if (sma200Series) sma200Series.applyOptions({ visible: indicatorConfig.sma200, priceLineVisible: false, lastValueVisible: false });
+  if (volSmaSeries) volSmaSeries.applyOptions({ visible: indicatorConfig.volSma, priceLineVisible: false, lastValueVisible: false });
+  if (rsSeries) rsSeries.applyOptions({ visible: Boolean(indicatorConfig.rsOverlayMain), priceLineVisible: false, lastValueVisible: false });
+  if (rsLinePaneSeries) rsLinePaneSeries.applyOptions({ visible: indicatorConfig.rsLine, priceLineVisible: false, lastValueVisible: false });
+  if (rsEmaPaneSeries) rsEmaPaneSeries.applyOptions({ visible: indicatorConfig.rsLine, priceLineVisible: false, lastValueVisible: false });
+  if (bbUpperSeries) bbUpperSeries.applyOptions({ visible: indicatorConfig.bollinger, priceLineVisible: false, lastValueVisible: false });
+  if (bbLowerSeries) bbLowerSeries.applyOptions({ visible: indicatorConfig.bollinger, priceLineVisible: false, lastValueVisible: false });
 
   var rsPaneEl = document.getElementById("rsPane");
   var priceContainerEl = document.getElementById("chart");
