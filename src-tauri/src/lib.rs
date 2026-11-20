@@ -318,6 +318,14 @@ fn send_price_alert(
         .map_err(|e| format!("Notification error: {}", e))
 }
 
+#[tauri::command]
+fn toggle_always_on_top(window: tauri::WebviewWindow) -> Result<bool, String> {
+    let current = window.is_always_on_top().map_err(|e| e.to_string())?;
+    let new_state = !current;
+    window.set_always_on_top(new_state).map_err(|e| e.to_string())?;
+    Ok(new_state)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_state = AppState::new();
@@ -416,7 +424,8 @@ pub fn run() {
             get_session_info,
             update_tray_ticker,
             toggle_battery_saver,
-            send_price_alert
+            send_price_alert,
+            toggle_always_on_top
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

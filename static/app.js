@@ -456,8 +456,85 @@
     return merged;
   }
 
+  var prefSaveTimer = null;
+  function savePreferencesDebounced() {
+    if (prefSaveTimer) clearTimeout(prefSaveTimer);
+    prefSaveTimer = setTimeout(function() {
+      try {
+        var payload = {
+          indicatorConfig: indicatorConfig,
+          avwapConfig: avwapConfig,
+          activeSymbol: activeSymbol,
+          activeTimeframe: activeTimeframe,
+          rsBenchmarkTag: rsBenchmarkTag,
+          currentEngine: currentEngine,
+          currentLang: currentLang
+        };
+        var headers = { "Content-Type": "application/json" };
+        if (sessionToken) headers["X-Session-Token"] = sessionToken;
+        fetch("/api/preferences", {
+          method: "POST",
+          headers: headers,
+          body: JSON.stringify(payload)
+        }).catch(function(err) {
+          console.debug("Preferences save non-critical error:", err);
+        });
+      } catch (e) {}
+    }, 300);
+  }
+
+  function syncPreferencesFromBackend() {
+    var headers = {};
+    if (sessionToken) headers["X-Session-Token"] = sessionToken;
+    fetch("/api/preferences", { headers: headers })
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(res) {
+        if (!res || !res.preferences) return;
+        var p = res.preferences;
+        var needsRefresh = false;
+        if (p.indicatorConfig && typeof p.indicatorConfig === "object") {
+          for (var k in defaultIndicatorConfig) {
+            if (p.indicatorConfig[k] !== undefined) indicatorConfig[k] = p.indicatorConfig[k];
+          }
+          safeSetStorage("tv_indicator_config", JSON.stringify(indicatorConfig));
+          needsRefresh = true;
+        }
+        if (p.avwapConfig && typeof p.avwapConfig === "object") {
+          for (var ak in defaultAvwapConfig) {
+            if (p.avwapConfig[ak] !== undefined) avwapConfig[ak] = p.avwapConfig[ak];
+          }
+          safeSetStorage("tv_avwap_config", JSON.stringify(avwapConfig));
+          needsRefresh = true;
+        }
+        if (p.rsBenchmarkTag && typeof p.rsBenchmarkTag === "string") {
+          rsBenchmarkTag = p.rsBenchmarkTag;
+          safeSetStorage("tv_rs_benchmark", rsBenchmarkTag);
+          var bSpan = document.getElementById("rsActiveBadge");
+          if (bSpan) bSpan.textContent = "Ref: " + getSymbolDisplayName(rsBenchmarkTag);
+          var rTitle = document.getElementById("rsPaneTitle");
+          if (rTitle) rTitle.textContent = "RS Line vs " + getSymbolDisplayName(rsBenchmarkTag);
+          var inputBench = document.getElementById("rsBenchmarkInput");
+          if (inputBench) inputBench.value = rsBenchmarkTag;
+        }
+        if (p.activeTimeframe && typeof p.activeTimeframe === "string" && p.activeTimeframe !== activeTimeframe) {
+          activeTimeframe = p.activeTimeframe;
+        }
+        if (needsRefresh) {
+          applyIndicatorVisibilities();
+          if (typeof populateIndicatorModal === "function") populateIndicatorModal();
+          if (currentRawBars && currentRawBars.length > 0) {
+            calcAndRenderAvwap();
+          }
+        }
+      })
+      .catch(function(err) {
+        console.debug("Backend preferences fetch skipped:", err);
+      });
+  }
+
   function saveIndicatorConfig() {
     safeSetStorage("tv_indicator_config", JSON.stringify(indicatorConfig));
+    savePreferencesDebounced();
   }
 
   function loadSavedAvwapConfig() {
@@ -479,6 +556,7 @@
 
   function saveAvwapConfig() {
     safeSetStorage("tv_avwap_config", JSON.stringify(avwapConfig));
+    savePreferencesDebounced();
   }
 
   var indicatorConfig = loadSavedIndicatorConfig();
@@ -1682,8 +1760,9 @@ function initTradingViewWidget(symbol) {
   if (indicatorConfig.ema30) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 30 } });
   if (indicatorConfig.sma50) tvStudies.push({ id: "MASimple@tv-basicstudies", inputs: { length: 50 } });
   if (indicatorConfig.sma200) tvStudies.push({ id: "MASimple@tv-basicstudies", inputs: { length: 200 } });
+  if (indicatorConfig.vwap) tvStudies.push({ id: "VWAP@tv-basicstudies" });
   if (indicatorConfig.bollinger) tvStudies.push({ id: "Bollinger Bands@tv-basicstudies" });
-  if (indicatorConfig.rsLine) tvStudies.push({ id: "Relative Strength Index@tv-basicstudies" });
+  if (indicatorConfig.rsLine) tvStudies.push({ id: "Compare@tv-basicstudies", inputs: { symbol: rsBenchmarkTag || "SPY" } });
 
   if (typeof TradingView !== "undefined" && TradingView.widget) {
     try {
@@ -1708,11 +1787,47 @@ function initTradingViewWidget(symbol) {
           "volume.volume ma.display": true,
           "volume.volume ma.length": 50,
           "volume.volume.color.0": "#ef4444",
-          "volume.volume.color.1": "#26a69a"
+          "volume.volume.color.1": "#26a69a",
+          "moving average exponential.plot.color": "#00e5ff",
+          "moving average exponential.plot.linewidth": 2,
+          "moving average.plot.color": "#eab308",
+          "moving average.plot.linewidth": 2,
+          "vwap.plot.color": "#26a69a",
+          "vwap.plot.linewidth": 2,
+          "compare.plot.color": "#3b82f6",
+          "compare.plot.linewidth": 2
         },
         enabled_features: ["use_localstorage_for_settings"],
         container_id: "tvWidgetContainer"
       });
+
+      if (typeof tvWidgetInstance.onChartReady === "function") {
+        tvWidgetInstance.onChartReady(function() {
+          try {
+            var chart = typeof tvWidgetInstance.activeChart === "function" ? tvWidgetInstance.activeChart() : null;
+            if (chart && typeof chart.getAllStudies === "function") {
+              var allStudies = chart.getAllStudies();
+              var emaColors = ["#00e5ff", "#a855f7", "#f59e0b"];
+              var emaIdx = 0;
+              for (var si = 0; si < allStudies.length; si++) {
+                var st = allStudies[si];
+                if (st.name && st.name.indexOf("Moving Average Exponential") !== -1) {
+                  var cColor = emaColors[emaIdx % emaColors.length];
+                  emaIdx++;
+                  if (typeof chart.getStudyById === "function") {
+                    var studyApi = chart.getStudyById(st.id);
+                    if (studyApi && typeof studyApi.applyOverrides === "function") {
+                      studyApi.applyOverrides({ "plot.color": cColor });
+                    }
+                  }
+                }
+              }
+            }
+          } catch (stErr) {
+            console.debug("TV studies custom color override non-critical:", stErr);
+          }
+        });
+      }
     } catch (e) {
       console.warn("TradingView widget init error", e);
     }
@@ -2534,10 +2649,13 @@ if (ctxSetBenchmark) {
     if (activeContextSymbol) {
       rsBenchmarkTag = activeContextSymbol;
       safeSetStorage("tv_rs_benchmark", activeContextSymbol);
+      if (typeof savePreferencesDebounced === "function") savePreferencesDebounced();
       var bSpan = document.getElementById("rsActiveBadge");
       if (bSpan) bSpan.textContent = "Ref: " + getSymbolDisplayName(activeContextSymbol);
       var title = document.getElementById("rsPaneTitle");
       if (title) title.textContent = "RS Line vs " + getSymbolDisplayName(activeContextSymbol);
+      var inputBench = document.getElementById("rsBenchmarkInput");
+      if (inputBench) inputBench.value = activeContextSymbol;
       loadBenchmarkHistory(activeContextSymbol);
       loadHistory(activeSymbol);
     }
@@ -2562,11 +2680,15 @@ function unsubscribeSymbol(symbolId) {
   if (activeSymbol === symbolId && symbolsList.length > 0) {
     switchSymbol(symbolsList[0].id);
   }
+  var headers = {};
+  if (sessionToken) headers["X-Session-Token"] = sessionToken;
   fetch("/api/symbols/unsubscribe?symbol=" + encodeURIComponent(symbolId), {
-    method: "DELETE"
+    method: "POST",
+    headers: headers
   }).catch(function(err) {
     console.warn("Unsubscribe error:", err);
   });
+  if (typeof savePreferencesDebounced === "function") savePreferencesDebounced();
 }
 
 function updateWatchlistPrice(symbol, quote) {
@@ -4638,7 +4760,7 @@ function initEventListeners() {
   var isDraggingHandle = null;
 
   var drawingCanvas = document.getElementById("drawingCanvas");
-  var drawToolBtns = document.querySelectorAll ? document.querySelectorAll(".draw-tool-btn:not(.draw-tool-clear)") : [];
+  var drawToolBtns = document.querySelectorAll ? document.querySelectorAll(".draw-tool-btn[data-tool]:not(.draw-tool-clear):not(.draw-tool-toggle)") : [];
 
   for (var dtIdx = 0; dtIdx < drawToolBtns.length; dtIdx++) {
     (function(btn) {
@@ -4653,6 +4775,35 @@ function initEventListeners() {
     })(drawToolBtns[dtIdx]);
   }
 
+  var btnMagnet = document.getElementById("btnMagnet");
+  if (btnMagnet) {
+    btnMagnet.onclick = function() {
+      magnetMode = !magnetMode;
+      btnMagnet.classList.toggle("active", magnetMode);
+    };
+  }
+
+  var btnPinWindow = document.getElementById("btnPinWindow");
+  var isAlwaysOnTop = false;
+  if (btnPinWindow) {
+    btnPinWindow.onclick = function() {
+      if (window.__TAURI__ && window.__TAURI__.core && typeof window.__TAURI__.core.invoke === "function") {
+        window.__TAURI__.core.invoke("toggle_always_on_top")
+          .then(function(state) {
+            isAlwaysOnTop = Boolean(state);
+            btnPinWindow.classList.toggle("active", isAlwaysOnTop);
+            btnPinWindow.setAttribute("title", isAlwaysOnTop ? "取消視窗置頂 (Pinned on Top)" : "視窗置頂 (Always on Top)");
+          })
+          .catch(function(err) {
+            console.warn("Toggle always on top error:", err);
+          });
+      } else {
+        isAlwaysOnTop = !isAlwaysOnTop;
+        btnPinWindow.classList.toggle("active", isAlwaysOnTop);
+      }
+    };
+  }
+
   var btnClearDrawings = document.getElementById("btnClearDrawings");
   if (btnClearDrawings) {
     btnClearDrawings.onclick = function() {
@@ -4662,6 +4813,7 @@ function initEventListeners() {
         for (var pi = 0; pi < tvPriceLineHandles.length; pi++) { try { candleSeries.removePriceLine(tvPriceLineHandles[pi]); } catch (e) {} }
         tvPriceLineHandles = [];
       }
+      if (drawingCanvas) drawingCanvas.classList.remove("interactive");
       renderDrawingCanvas();
     };
   }
@@ -4856,7 +5008,7 @@ function initEventListeners() {
         if (yEntry !== null && yTarget !== null && yStop !== null) {
           var targetTop = Math.min(yTarget, yEntry);
           var targetHeight = Math.max(2, Math.abs(yTarget - yEntry));
-          ctx.fillStyle = "rgba(34, 197, 94, 0.20)";
+          ctx.fillStyle = "rgba(34, 197, 94, 0.08)";
           ctx.fillRect(left, targetTop, boxWidth, targetHeight);
           ctx.strokeStyle = "#22c55e";
           ctx.lineWidth = 1.5;
@@ -4864,7 +5016,7 @@ function initEventListeners() {
 
           var stopTop = Math.min(yStop, yEntry);
           var stopHeight = Math.max(2, Math.abs(yStop - yEntry));
-          ctx.fillStyle = "rgba(239, 68, 68, 0.20)";
+          ctx.fillStyle = "rgba(239, 68, 68, 0.08)";
           ctx.fillRect(left, stopTop, boxWidth, stopHeight);
           ctx.strokeStyle = "#ef4444";
           ctx.lineWidth = 1.5;
@@ -4879,8 +5031,21 @@ function initEventListeners() {
 
           d.targetHandleY = yTarget;
           d.stopHandleY = yStop;
+          d.targetTop = targetTop;
+          d.stopTop = stopTop;
+          d.stopHeight = stopHeight;
           d.boxLeft = left;
           d.boxRight = right;
+
+          d.closeBtnX = right - 14;
+          d.closeBtnY = targetTop + 14;
+          ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+          ctx.beginPath();
+          ctx.arc(d.closeBtnX, d.closeBtnY, 9, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "bold 10px sans-serif";
+          ctx.fillText("✕", d.closeBtnX - 4, d.closeBtnY + 3.5);
 
           ctx.fillStyle = "#22c55e";
           ctx.fillRect(left + boxWidth * 0.5 - 10, yTarget - 4, 20, 8);
@@ -4907,6 +5072,29 @@ function initEventListeners() {
           ctx.fillStyle = "#93c5fd";
           ctx.fillText("建議買進: " + shares + " 股 ($" + (d.riskDollar || 500) + " 風控)", left + 10, yEntry + 18);
         }
+      } else if (d.type === "ruler") {
+        var rx1 = d.time1 ? timeScale.timeToCoordinate(d.time1) : d.x1;
+        var ry1 = candlestickSeries ? candlestickSeries.priceToCoordinate(d.price1) : d.y1;
+        var rx2 = d.time2 ? timeScale.timeToCoordinate(d.time2) : d.x2;
+        var ry2 = candlestickSeries ? candlestickSeries.priceToCoordinate(d.price2) : d.y2;
+        if (rx1 !== null && ry1 !== null && rx2 !== null && ry2 !== null) {
+          var rLeft = Math.min(rx1, rx2);
+          var rTop = Math.min(ry1, ry2);
+          var rW = Math.max(2, Math.abs(rx2 - rx1));
+          var rH = Math.max(2, Math.abs(ry2 - ry1));
+          ctx.fillStyle = "rgba(41, 98, 255, 0.08)";
+          ctx.fillRect(rLeft, rTop, rW, rH);
+          ctx.strokeStyle = "#2962ff";
+          ctx.lineWidth = 1;
+          ctx.setLineDash([2, 2]);
+          ctx.strokeRect(rLeft, rTop, rW, rH);
+          ctx.setLineDash([]);
+          var dp = d.price2 - d.price1;
+          var dpPct = d.price1 > 0 ? (dp / d.price1) * 100 : 0;
+          ctx.fillStyle = dp >= 0 ? "#26a69a" : "#ef5350";
+          ctx.font = "bold 11px Inter, system-ui, sans-serif";
+          ctx.fillText((dp >= 0 ? "+" : "") + dp.toFixed(2) + " (" + (dpPct >= 0 ? "+" : "") + dpPct.toFixed(2) + "%)", rLeft + 6, rTop + 16);
+        }
       }
     }
 
@@ -4922,6 +5110,28 @@ function initEventListeners() {
         ctx.lineTo(drawingInProgress.currentX, drawingInProgress.currentY);
         ctx.stroke();
         ctx.setLineDash([]);
+      }
+    } else if (drawingInProgress && drawingInProgress.type === "ruler" && drawingInProgress.step === 1) {
+      var rLeft = Math.min(drawingInProgress.x1, drawingInProgress.currentX);
+      var rTop = Math.min(drawingInProgress.y1, drawingInProgress.currentY);
+      var rW = Math.max(2, Math.abs(drawingInProgress.currentX - drawingInProgress.x1));
+      var rH = Math.max(2, Math.abs(drawingInProgress.currentY - drawingInProgress.y1));
+      ctx.fillStyle = "rgba(41, 98, 255, 0.12)";
+      ctx.fillRect(rLeft, rTop, rW, rH);
+      ctx.strokeStyle = "#2962ff";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 2]);
+      ctx.strokeRect(rLeft, rTop, rW, rH);
+      ctx.setLineDash([]);
+      if (candlestickSeries) {
+        var pCurrent = candlestickSeries.coordinateToPrice(drawingInProgress.currentY);
+        if (pCurrent && drawingInProgress.price1) {
+          var dpActive = pCurrent - drawingInProgress.price1;
+          var dpPctActive = (dpActive / drawingInProgress.price1) * 100;
+          ctx.fillStyle = dpActive >= 0 ? "#26a69a" : "#ef5350";
+          ctx.font = "bold 11px Inter, system-ui, sans-serif";
+          ctx.fillText((dpActive >= 0 ? "+" : "") + dpActive.toFixed(2) + " (" + (dpPctActive >= 0 ? "+" : "") + dpPctActive.toFixed(2) + "%)", rLeft + 6, rTop + 16);
+        }
       }
     }
   }
@@ -4952,14 +5162,25 @@ function initEventListeners() {
 
       for (var k = drawings.length - 1; k >= 0; k--) {
         var rd = drawings[k];
-        if (rd.type === "risk-reward" && rd.boxLeft && rd.boxRight) {
-          if (x >= rd.boxLeft && x <= rd.boxRight) {
-            if (Math.abs(y - rd.targetHandleY) <= 8) {
+        if (rd.type === "risk-reward") {
+          if (rd.closeBtnX && rd.closeBtnY && Math.hypot(x - rd.closeBtnX, y - rd.closeBtnY) <= 14) {
+            drawings.splice(k, 1);
+            if (drawingCanvas) drawingCanvas.classList.remove("interactive");
+            renderDrawingCanvas();
+            return;
+          }
+          if (rd.boxLeft && rd.boxRight && x >= rd.boxLeft && x <= rd.boxRight) {
+            if (Math.abs(y - rd.targetHandleY) <= 10) {
               isDraggingHandle = { drawing: rd, handle: "target" };
               return;
             }
-            if (Math.abs(y - rd.stopHandleY) <= 8) {
+            if (Math.abs(y - rd.stopHandleY) <= 10) {
               isDraggingHandle = { drawing: rd, handle: "stop" };
+              return;
+            }
+            var yEntCoord = candlestickSeries.priceToCoordinate(rd.entryPrice);
+            if (yEntCoord !== null && Math.abs(y - yEntCoord) <= 10) {
+              isDraggingHandle = { drawing: rd, handle: "entry" };
               return;
             }
           }
@@ -4983,6 +5204,29 @@ function initEventListeners() {
           currentDrawTool = "cursor";
           for (var j = 0; j < drawToolBtns.length; j++) {
             drawToolBtns[j].classList.toggle("active", drawToolBtns[j].getAttribute("data-tool") === "cursor");
+          }
+          drawingCanvas.classList.remove("drawing-active");
+          renderDrawingCanvas();
+        }
+      } else if (currentDrawTool === "ruler") {
+        if (!drawingInProgress) {
+          drawingInProgress = { type: "ruler", step: 1, time1: time, price1: price, x1: x, y1: y, currentX: x, currentY: y };
+        } else if (drawingInProgress.step === 1) {
+          drawings.push({
+            type: "ruler",
+            time1: drawingInProgress.time1,
+            price1: drawingInProgress.price1,
+            time2: time,
+            price2: price,
+            x1: drawingInProgress.x1,
+            y1: drawingInProgress.y1,
+            x2: x,
+            y2: y
+          });
+          drawingInProgress = null;
+          currentDrawTool = "cursor";
+          for (var rIdx = 0; rIdx < drawToolBtns.length; rIdx++) {
+            drawToolBtns[rIdx].classList.toggle("active", drawToolBtns[rIdx].getAttribute("data-tool") === "cursor");
           }
           drawingCanvas.classList.remove("drawing-active");
           renderDrawingCanvas();
@@ -5056,13 +5300,18 @@ function initEventListeners() {
             isDraggingHandle.drawing.targetPrice = newPrice;
           } else if (isDraggingHandle.handle === "stop") {
             isDraggingHandle.drawing.stopPrice = newPrice;
+          } else if (isDraggingHandle.handle === "entry") {
+            var diff = newPrice - isDraggingHandle.drawing.entryPrice;
+            isDraggingHandle.drawing.entryPrice = newPrice;
+            isDraggingHandle.drawing.targetPrice += diff;
+            isDraggingHandle.drawing.stopPrice += diff;
           }
           renderDrawingCanvas();
         }
         return;
       }
 
-      if (drawingInProgress && drawingInProgress.type === "trendline") {
+      if (drawingInProgress && (drawingInProgress.type === "trendline" || drawingInProgress.type === "ruler")) {
         drawingInProgress.currentX = x;
         drawingInProgress.currentY = y;
         renderDrawingCanvas();
@@ -5073,6 +5322,36 @@ function initEventListeners() {
       if (isDraggingHandle) {
         isDraggingHandle = null;
       }
+    });
+  }
+
+  // Hover detection for interactive elements (handles & close buttons)
+  var chartContainerEl = document.getElementById("chartContainer");
+  if (chartContainerEl && drawingCanvas) {
+    chartContainerEl.addEventListener("mousemove", function(e) {
+      if (currentDrawTool !== "cursor" || drawings.length === 0) return;
+      var rect = drawingCanvas.getBoundingClientRect();
+      var mx = e.clientX - rect.left;
+      var my = e.clientY - rect.top;
+      var isOver = false;
+      for (var k = 0; k < drawings.length; k++) {
+        var d = drawings[k];
+        if (d.type === "risk-reward") {
+          if (d.closeBtnX && d.closeBtnY && Math.hypot(mx - d.closeBtnX, my - d.closeBtnY) <= 14) {
+            isOver = true;
+            break;
+          }
+          if (d.boxLeft && d.boxRight && mx >= d.boxLeft && mx <= d.boxRight) {
+            if (d.targetHandleY && Math.abs(my - d.targetHandleY) <= 10) { isOver = true; break; }
+            if (d.stopHandleY && Math.abs(my - d.stopHandleY) <= 10) { isOver = true; break; }
+            if (candlestickSeries) {
+              var yEnt = candlestickSeries.priceToCoordinate(d.entryPrice);
+              if (yEnt !== null && Math.abs(my - yEnt) <= 10) { isOver = true; break; }
+            }
+          }
+        }
+      }
+      drawingCanvas.classList.toggle("interactive", isOver);
     });
   }
 
@@ -5520,6 +5799,7 @@ function bootstrap() {
 
   initChart();
   initEventListeners();
+  syncPreferencesFromBackend();
   syncIndicatorCheckboxes();
   applyIndicatorVisibilities();
   updateCandleStyleUI();

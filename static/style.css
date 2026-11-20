@@ -1097,6 +1097,33 @@ body {
   font-size: 13px;
 }
 
+/* Always-on-Top Pin Button */
+.pin-toggle-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  padding: 4px 8px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.15s ease;
+  line-height: 1;
+}
+.pin-toggle-btn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-bright);
+  border-color: var(--border-color);
+}
+.pin-toggle-btn.active {
+  background: rgba(41, 98, 255, 0.2) !important;
+  color: #2962ff !important;
+  border-color: #2962ff !important;
+  box-shadow: 0 0 8px rgba(41, 98, 255, 0.35);
+}
+
 
 /* Deepvue Technical HUD (Upper Right of Chart) */
 .deepvue-hud {
@@ -1980,8 +2007,12 @@ body {
   z-index: 8;
 }
 
-.drawing-overlay-canvas.drawing-active {
+.drawing-overlay-canvas.drawing-active,
+.drawing-overlay-canvas.interactive {
   pointer-events: auto;
+}
+
+.drawing-overlay-canvas.drawing-active {
   cursor: crosshair;
 }
 
