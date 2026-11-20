@@ -187,8 +187,8 @@
     let avgGain = gains / period;
     let avgLoss = losses / period;
 
-    let rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
-    let rsi = avgLoss === 0 ? 100 : 100 - (100 / (1 + rs));
+    let rs = avgLoss === 0 ? (avgGain === 0 ? 1 : 100) : avgGain / avgLoss;
+    let rsi = avgLoss === 0 ? (avgGain === 0 ? 50 : 100) : 100 - (100 / (1 + rs));
     result.push({ time: bars[period].time, value: Number(rsi.toFixed(2)) });
 
     for (let i = period + 1; i < bars.length; i++) {
@@ -199,8 +199,8 @@
       avgGain = (avgGain * (period - 1) + gain) / period;
       avgLoss = (avgLoss * (period - 1) + loss) / period;
 
-      rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
-      rsi = avgLoss === 0 ? 100 : 100 - (100 / (1 + rs));
+      rs = avgLoss === 0 ? (avgGain === 0 ? 1 : 100) : avgGain / avgLoss;
+      rsi = avgLoss === 0 ? (avgGain === 0 ? 50 : 100) : 100 - (100 / (1 + rs));
       result.push({ time: bars[i].time, value: Number(rsi.toFixed(2)) });
     }
     return result;
@@ -624,7 +624,7 @@
         index: anchorIdx,
         barsAgo: barsAgo,
         time: aBar.time,
-        price: safeNum(aBar.low, safeNum(aBar.close)),
+        price: mode === "Swing High" ? safeNum(aBar.high, safeNum(aBar.close)) : safeNum(aBar.low, safeNum(aBar.close)),
         mode: mode,
         label: mode + " (" + barsAgo + " bars ago)"
       },

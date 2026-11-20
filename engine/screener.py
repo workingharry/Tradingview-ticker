@@ -573,10 +573,10 @@ def evaluate_canslim_stage(
         past_sma200 = _sma(past_closes, 200)
         if past_sma200 is not None and sma200 > past_sma200:
             sma200_rising = True
-    elif sma200 is not None:
-        # If stock has 200-220 bars, compare with bar 0
+    elif len(closes) > 200 and sma200 is not None:
+        # If stock has 201-220 bars, compare with earliest 200-bar window
         past_sma200 = _sma(closes[:200], 200)
-        if past_sma200 and sma200 >= past_sma200:
+        if past_sma200 and sma200 > past_sma200:
             sma200_rising = True
 
     # Full Stage 2 Qualification

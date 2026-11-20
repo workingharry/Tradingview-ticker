@@ -38,8 +38,8 @@ def parse_tradingview_packets_with_remainder(raw_data: str) -> Tuple[List[Dict[s
         if not match:
             # Check if this might be an incomplete delimiter at the tail of the buffer
             tail = raw_data[cursor:]
-            if tail.startswith("~") and ("~m~" not in tail or tail.count("~m~") < 2):
-                # Incomplete delimiter header; leave in buffer for next chunk
+            if tail.startswith("~") and len(tail) < 32 and ("~m~" not in tail or tail.count("~m~") < 2):
+                # Incomplete delimiter header; leave short prefix for next chunk
                 break
 
             # Resynchronize by scanning forward for the next '~m~'
@@ -55,6 +55,9 @@ def parse_tradingview_packets_with_remainder(raw_data: str) -> Tuple[List[Dict[s
         try:
             expected_length = int(match.group(1))
         except ValueError:
+            cursor = match.end()
+            continue
+        if expected_length > 4 * 1024 * 1024:
             cursor = match.end()
             continue
 

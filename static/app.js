@@ -299,11 +299,9 @@
         }
       }
 
-      if (sessionToken) {
-        if (typeof target === "string" && target.indexOf("/api/") !== -1 && target.indexOf("token=") === -1) {
-          var sep = target.indexOf("?") === -1 ? "?" : "&";
-          target = target + sep + "token=" + encodeURIComponent(sessionToken);
-        }
+      var targetUrlStr = typeof target === "string" ? target : (target && target.url ? target.url : "");
+      var isLocalApi = targetUrlStr.indexOf("/api/") === 0 || (apiBase && targetUrlStr.indexOf(apiBase + "/api/") === 0) || targetUrlStr.indexOf(window.location.origin + "/api/") === 0;
+      if (sessionToken && isLocalApi) {
         init.headers = init.headers || {};
         if (typeof Headers !== "undefined" && init.headers instanceof Headers) {
           if (!init.headers.has("X-Session-Token")) {
@@ -318,6 +316,11 @@
       return _rawFetch.call(this, target, init);
     };
   }
+
+  var renderDrawingCanvas = function() {};
+  var lastCrosshairPrice = null;
+  var magnetMode = false;
+  var tvPriceLineHandles = [];
 
   var DEFAULT_WATCHLIST_SEEDS = [
     { id: "NASDAQ:NVDA", name: "NVIDIA Corp.", exchange: "NASDAQ", pair: "NVDA", type: "stock", sort_order: 0, sector: "Technology", industry: "Semiconductors" },
@@ -1174,10 +1177,13 @@ function initChart() {
     }
     var candleData = param.seriesData.get(candleSeries);
     var volData = param.seriesData.get(volumeSeries);
+    if (candleSeries && param.point) { lastCrosshairPrice = candleSeries.coordinateToPrice(param.point.y); }
     var ema10Val = param.seriesData.get(ema10Series);
     var ema21Val = param.seriesData.get(ema21Series);
+    var ema30Val = typeof ema30Series !== "undefined" && ema30Series ? param.seriesData.get(ema30Series) : null;
     var sma50Val = param.seriesData.get(sma50Series);
     var sma200Val = param.seriesData.get(sma200Series);
+    var vwapVal = typeof vwapSeries !== "undefined" && vwapSeries ? param.seriesData.get(vwapSeries) : null;
     var rsVal = param.seriesData.get(rsSeries);
 
     if (candleData) {
@@ -1198,8 +1204,10 @@ function initChart() {
         volume: volData ? volData.value : undefined,
         ema10: ema10Val ? ema10Val.value : undefined,
         ema21: ema21Val ? ema21Val.value : undefined,
+        ema30: ema30Val ? ema30Val.value : undefined,
         sma50: sma50Val ? sma50Val.value : undefined,
         sma200: sma200Val ? sma200Val.value : undefined,
+        vwap: vwapVal ? vwapVal.value : undefined,
         rs: rsVal ? rsVal.value : undefined,
         isHistorical: isHist
       });
@@ -1212,14 +1220,7 @@ function initChart() {
       updateCrosshairLegend(latestBarData);
     });
   }
-  if (typeof window !== "undefined" && !window._hasEscapeResetLegend) {
-    window._hasEscapeResetLegend = true;
-    window.addEventListener("keydown", function(e) {
-      if (e.key === "Escape") {
-        updateCrosshairLegend(latestBarData);
-      }
-    });
-  }
+  // Escape legend reset consolidated in global keydown handler
 
   if (window.ResizeObserver) {
     resizeObserver = new ResizeObserver(function(entries) {
@@ -1391,8 +1392,9 @@ function updateAvwapHudAndLegend(data, activeBarTime) {
 
   var color = targetPt.isAbove ? (avwapConfig.colorAbove || "#26a69a") : (avwapConfig.colorBelow || "#ef5350");
 
+  var avwapVal = targetPt.value !== undefined ? targetPt.value : targetPt.avwap;
   if (legVal) {
-    legVal.textContent = targetPt.value.toFixed(2);
+    legVal.textContent = typeof avwapVal === "number" && isFinite(avwapVal) ? avwapVal.toFixed(2) : "--";
     legVal.style.color = color;
   }
 
@@ -1525,6 +1527,12 @@ function updateCrosshairLegend(bar) {
   if (legendHighEl) legendHighEl.textContent = formatPrice(bar.high, activeSymbol);
   if (legendLowEl) legendLowEl.textContent = formatPrice(bar.low, activeSymbol);
   if (legendCloseEl) legendCloseEl.textContent = formatPrice(bar.close, activeSymbol);
+  var legendChgEl = document.getElementById("legendChg");
+  if (legendChgEl && typeof bar.close === "number" && typeof bar.open === "number" && bar.open > 0) {
+    var chgPct = ((bar.close - bar.open) / bar.open) * 100;
+    legendChgEl.textContent = (chgPct >= 0 ? "+" : "") + chgPct.toFixed(2) + "%";
+    legendChgEl.style.color = chgPct >= 0 ? "#26a69a" : "#ef5350";
+  }
   if (legendVolEl) legendVolEl.textContent = formatVolume(bar.volume);
 
   if (legEma10 && bar.ema10 !== undefined) {
@@ -1666,7 +1674,7 @@ function initTradingViewWidget(symbol) {
 
   var tvSymbol = toTradingViewRealtimeSymbol(symbol);
 
-  var tvInterval = activeTimeframe === "1W" ? "W" : (activeTimeframe === "1D" ? "D" : activeTimeframe.replace("m", ""));
+  var tvInterval = ({ "1m": "1", "5m": "5", "15m": "15", "1h": "60", "60m": "60", "1D": "D", "1W": "W" })[activeTimeframe] || "D";
 
   var tvStudies = [];
   if (indicatorConfig.ema10) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 10 } });
@@ -2699,14 +2707,15 @@ function selectAndSubscribeSymbol(item) {
   }
 }
 
-function openSearch() {
+function openSearch(seedChar) {
   if (searchModal) {
+    var q = typeof seedChar === "string" ? seedChar : "";
     searchModal.style.display = "flex";
     if (searchInput) {
-      searchInput.value = "";
+      searchInput.value = q;
       searchInput.focus();
     }
-    executeSearch("");
+    executeSearch(q);
   }
 }
 
@@ -3187,7 +3196,8 @@ function recoverTerminalState(options) {
   var opts = options || {};
   var sym = opts.symbol || activeSymbol || "BINANCE:BTCUSDT";
   var tf = opts.timeframe || activeTimeframe || "1D";
-  var sinceTime = opts.sinceTime || (allBars[sym] && allBars[sym].length ? allBars[sym][allBars[sym].length - 1].time : null);
+  var activeBars = (sym === activeSymbol && Array.isArray(currentRawBars)) ? currentRawBars : [];
+  var sinceTime = opts.sinceTime || (activeBars.length ? activeBars[activeBars.length - 1].time : null);
 
   var url = "/api/recovery?symbol=" + encodeURIComponent(sym) + "&timeframe=" + encodeURIComponent(tf);
   if (sinceTime) {
@@ -3203,41 +3213,38 @@ function recoverTerminalState(options) {
       if (!data || data.status !== "ok") return data;
 
       if (Array.isArray(data.watchlist) && data.watchlist.length > 0) {
-        watchlist = data.watchlist;
+        symbolsList = data.watchlist;
         renderWatchlist();
       }
 
       if (Array.isArray(data.bars) && data.bars.length > 0) {
-        allBars[sym] = data.bars;
-        currentRawBars = data.bars;
-        if (activeSymbol === sym && currentEngine !== "C") {
-          renderChartData(data.bars);
+        if (activeSymbol === sym) {
+          currentRawBars = data.bars;
+          if (currentEngine !== "C") renderChartData(currentRawBars);
         }
-      } else if (Array.isArray(data.delta_bars) && data.delta_bars.length > 0) {
-        if (!allBars[sym]) allBars[sym] = [];
+      } else if (Array.isArray(data.delta_bars) && data.delta_bars.length > 0 && activeSymbol === sym) {
+        if (!Array.isArray(currentRawBars)) currentRawBars = [];
         for (var i = 0; i < data.delta_bars.length; i++) {
           var db = data.delta_bars[i];
-          var lastIdx = allBars[sym].length - 1;
-          if (lastIdx >= 0 && allBars[sym][lastIdx].time === db.time) {
-            allBars[sym][lastIdx] = db;
-          } else if (lastIdx < 0 || allBars[sym][lastIdx].time < db.time) {
-            allBars[sym].push(db);
+          var lastIdx = currentRawBars.length - 1;
+          if (lastIdx >= 0 && currentRawBars[lastIdx].time === db.time) {
+            currentRawBars[lastIdx] = db;
+          } else if (lastIdx < 0 || currentRawBars[lastIdx].time < db.time) {
+            currentRawBars.push(db);
           }
         }
-        currentRawBars = allBars[sym];
-        if (activeSymbol === sym && currentEngine !== "C") {
-          renderChartData(allBars[sym]);
-        }
+        if (currentEngine !== "C") renderChartData(currentRawBars);
       }
 
-      var refTicker = activeRsBenchmark || "SPY";
-      var benchSym = refTicker.indexOf(":") !== -1 ? refTicker : (isCryptoSymbol(sym) ? "BINANCE:BTCUSDT" : "AMEX:" + refTicker);
-      if (isIndicatorActive("rs") && activeSymbol === sym) {
+      var refTicker = rsBenchmarkTag || "SPY";
+      var isCrypto = /^(BINANCE|COINBASE|BYBIT|OKX):/i.test(sym);
+      var benchSym = refTicker.indexOf(":") !== -1 ? refTicker : (isCrypto ? "BINANCE:BTCUSDT" : "AMEX:" + refTicker);
+      if (indicatorConfig && indicatorConfig.rsLine && activeSymbol === sym) {
         fetch("/api/history?symbol=" + encodeURIComponent(benchSym) + "&timeframe=" + encodeURIComponent(tf))
           .then(function(r) { return r.ok ? r.json() : null; })
           .then(function(bData) {
-            if (bData && Array.isArray(bData.bars) && bData.bars.length > 0) {
-              updateRsPane(allBars[sym] || currentRawBars, bData.bars);
+            if (bData && Array.isArray(bData.bars) && bData.bars.length > 0 && typeof updateRsPane === "function") {
+              updateRsPane(currentRawBars, bData.bars);
             }
           })
           .catch(function(e) {
@@ -3933,6 +3940,7 @@ function escapeCsvField(val) {
     return isFinite(val) ? String(val) : '""';
   }
   var str = String(val);
+  if (/^[=+\-@\t\r]/.test(str)) str = "'" + str;
   return '"' + str.replace(/"/g, '""') + '"';
 }
 
@@ -4454,23 +4462,81 @@ function initEventListeners() {
     };
   }
 
+  var _tfBuf = "", _tfTimer = null;
+  function _addQuickPriceLine(isAlert) {
+    if (!candleSeries || !window.LightweightCharts) return;
+    var p = (typeof lastCrosshairPrice === "number" && isFinite(lastCrosshairPrice)) ? lastCrosshairPrice : (latestBarData ? latestBarData.close : null);
+    if (p === null) return;
+    var line = candleSeries.createPriceLine({
+      price: p,
+      color: isAlert ? "#f59e0b" : "#3b82f6",
+      lineWidth: 1,
+      lineStyle: isAlert ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: isAlert ? "ALERT" : "LVL"
+    });
+    tvPriceLineHandles.push(line);
+  }
+  var btnMagnet = document.getElementById("btnMagnet");
+  if (btnMagnet) {
+    btnMagnet.onclick = function() {
+      magnetMode = !magnetMode;
+      btnMagnet.classList.toggle("active", magnetMode);
+    };
+  }
+  var chartLegendEl = document.getElementById("chartLegend");
+  if (chartLegendEl) {
+    var legMap = { legEma10: "ema10", legEma21: "ema21", legEma30: "ema30", legSma50: "sma50", legSma200: "sma200", legVwap: "vwap", legAvwap: "avwap", legRs: "rsLine" };
+    chartLegendEl.addEventListener("click", function(ev) {
+      if (ev.target && ev.target.closest && ev.target.closest("button")) return;
+      var pill = ev.target && ev.target.closest ? ev.target.closest(".legend-indicator") : null;
+      var key = pill && legMap[pill.id];
+      if (!key || !indicatorConfig) return;
+      indicatorConfig[key] = !indicatorConfig[key];
+      saveIndicatorConfig();
+      applyIndicatorVisibilities();
+    });
+  }
   window.addEventListener("keydown", function(e) {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-      e.preventDefault();
-      openSearch();
+    var k = e.key.toLowerCase();
+    if ((e.metaKey || e.ctrlKey) && k === "k") {
+      e.preventDefault(); openSearch();
     } else if (e.key === "Escape") {
       closeSearch();
       if (indicatorModal) indicatorModal.style.display = "none";
       if (fundamentalsModal) fundamentalsModal.style.display = "none";
       if (aiLensModal) aiLensModal.style.display = "none";
-      closeScreenerModal();
-      closeChatModal();
-    } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "j") {
-      e.preventDefault();
-      openChatModal();
-    } else if ((e.altKey && e.key.toLowerCase() === "s") || ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "s")) {
-      e.preventDefault();
-      toggleScreenerModal();
+      closeScreenerModal(); closeChatModal();
+      updateCrosshairLegend(latestBarData);
+    } else if ((e.metaKey || e.ctrlKey) && k === "j") {
+      e.preventDefault(); openChatModal();
+    } else if ((e.altKey && k === "s") || ((e.metaKey || e.ctrlKey) && e.shiftKey && k === "s")) {
+      e.preventDefault(); toggleScreenerModal();
+    } else if (e.altKey && k === "l") {
+      e.preventDefault(); setPriceScaleMode(currentPriceScaleMode === "log" ? "normal" : "log");
+    } else if (e.altKey && k === "p") {
+      e.preventDefault(); setPriceScaleMode(currentPriceScaleMode === "percent" ? "normal" : "percent");
+    } else if (e.altKey && k === "r") {
+      e.preventDefault(); setAutoScale(true); if (chart) chart.timeScale().fitContent();
+    } else if (e.altKey && k === "h") {
+      e.preventDefault(); _addQuickPriceLine(false);
+    } else if (e.altKey && k === "a") {
+      e.preventDefault(); _addQuickPriceLine(true);
+    } else if (!e.metaKey && !e.ctrlKey && !e.altKey) {
+      var tag = e.target && e.target.tagName;
+      var modalOpen = (searchModal && searchModal.style.display === "flex") || (indicatorModal && indicatorModal.style.display === "flex") || (chatModal && chatModal.style.display === "flex");
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || modalOpen) return;
+      if (e.key === "/") {
+        e.preventDefault(); if (typeof syncIndicatorCheckboxes === "function") syncIndicatorCheckboxes(); if (indicatorModal) indicatorModal.style.display = "flex";
+      } else if (/^[0-9]$/.test(e.key) || (_tfBuf && (k === "d" || k === "w"))) {
+        _tfBuf += e.key.toUpperCase(); clearTimeout(_tfTimer); _tfTimer = setTimeout(function() { _tfBuf = ""; }, 900);
+      } else if (e.key === "Enter" && _tfBuf) {
+        var tfTarget = ({ "1": "1m", "5": "5m", "15": "15m", "60": "1h", "D": "1D", "W": "1W" })[_tfBuf];
+        _tfBuf = "";
+        if (tfTarget) { var b = document.querySelector('.tf-btn[data-tf="' + tfTarget + '"]'); if (b) b.click(); }
+      } else if (/^[a-zA-Z]$/.test(e.key)) {
+        e.preventDefault(); openSearch(e.key.toUpperCase());
+      }
     }
   });
 
@@ -4592,6 +4658,10 @@ function initEventListeners() {
     btnClearDrawings.onclick = function() {
       drawings = [];
       drawingInProgress = null;
+      if (candleSeries && tvPriceLineHandles.length) {
+        for (var pi = 0; pi < tvPriceLineHandles.length; pi++) { try { candleSeries.removePriceLine(tvPriceLineHandles[pi]); } catch (e) {} }
+        tvPriceLineHandles = [];
+      }
       renderDrawingCanvas();
     };
   }
@@ -4608,7 +4678,7 @@ function initEventListeners() {
 
   window.addEventListener("resize", resizeDrawingCanvas);
 
-  function renderDrawingCanvas() {
+  renderDrawingCanvas = function() {
     if (!candlestickSeries && candleSeries) candlestickSeries = candleSeries;
     if (!drawingCanvas || !chart || !candlestickSeries) return;
     var ctx = drawingCanvas.getContext("2d");
@@ -4862,9 +4932,23 @@ function initEventListeners() {
       var rect = drawingCanvas.getBoundingClientRect();
       var x = e.clientX - rect.left;
       var y = e.clientY - rect.top;
-      var price = candlestickSeries.coordinateToPrice(y);
       var timeScale = chart.timeScale();
+      var price = candlestickSeries.coordinateToPrice(y);
       var time = timeScale.coordinateToTime(x);
+      if ((magnetMode || e.ctrlKey || e.metaKey) && currentRawBars && currentRawBars.length > 0 && timeScale.coordinateToLogical) {
+        var lIdx = Math.round(timeScale.coordinateToLogical(x));
+        if (isFinite(lIdx) && lIdx >= 0 && lIdx < currentRawBars.length) {
+          var sBar = currentRawBars[lIdx];
+          var ohlc = [sBar.open, sBar.high, sBar.low, sBar.close];
+          var bestDist = 24, bestP = price;
+          for (var oi = 0; oi < ohlc.length; oi++) {
+            var cy = candlestickSeries.priceToCoordinate(ohlc[oi]);
+            if (cy !== null && Math.abs(cy - y) < bestDist) { bestDist = Math.abs(cy - y); bestP = ohlc[oi]; }
+          }
+          price = bestP;
+          time = sBar.time;
+        }
+      }
 
       for (var k = drawings.length - 1; k >= 0; k--) {
         var rd = drawings[k];
@@ -4945,14 +5029,6 @@ function initEventListeners() {
               avwapConfig.manualAnchorTime = hm;
               saveAvwapConfig();
             }
-          }
-          var avRes = window.Indicators.calcAnchoredVWAP(currentRawBars, {
-            anchorMode: "Manual Date",
-            manualAnchor: time
-          });
-          if (vwapSeries && avRes.avwap.length > 0) {
-            vwapSeries.setData(avRes.avwap);
-            if (indicatorConfig) indicatorConfig.vwap = true;
           }
           if (indicatorConfig) indicatorConfig.avwap = true;
           saveIndicatorConfig();

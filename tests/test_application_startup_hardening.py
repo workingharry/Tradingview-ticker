@@ -151,15 +151,22 @@ class TestApplicationStartupHardening(unittest.TestCase):
             orig_desktop = os.environ.get("DESKTOP_MODE")
             orig_ssl = os.environ.get("SSL_CERT_FILE")
             try:
-                # Custom scan simulating home path
                 from server import load_dotenv_custom
-                # Ensure load_dotenv_custom ignores nonexistent CA files
-                self.assertFalse(os.path.exists("/nonexistent/cert.pem"))
+                os.environ.pop("SSL_CERT_FILE", None)
+                os.environ.pop("VALID_KEY", None)
+                load_dotenv_custom([fake_env])
+                self.assertNotEqual(os.environ.get("SSL_CERT_FILE"), "/nonexistent/cert.pem")
+                self.assertEqual(os.environ.get("VALID_KEY"), "test_val")
+                os.environ.pop("VALID_KEY", None)
             finally:
                 if orig_desktop:
                     os.environ["DESKTOP_MODE"] = orig_desktop
                 else:
                     os.environ.pop("DESKTOP_MODE", None)
+                if orig_ssl:
+                    os.environ["SSL_CERT_FILE"] = orig_ssl
+                else:
+                    os.environ.pop("SSL_CERT_FILE", None)
 
     def test_storage_database_corruption_fallback(self):
         """Validates that get_storage gracefully falls back to in-memory DB if file is corrupt."""

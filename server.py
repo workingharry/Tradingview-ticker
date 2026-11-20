@@ -77,6 +77,8 @@ def init_certifi_ca_bundle() -> Optional[str]:
     return None
 
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("tradingview.server")
 CA_BUNDLE_PATH: Optional[str] = init_certifi_ca_bundle()
 
 import httpx
@@ -98,9 +100,9 @@ from engine.screener import (
 )
 
 
-def load_dotenv_custom() -> List[str]:
+def load_dotenv_custom(paths: Optional[List[Path]] = None) -> List[str]:
     """Loads environment variables from .env files without external dependencies."""
-    candidate_paths = [
+    candidate_paths = paths if paths is not None else [
         Path.cwd() / ".env",
         Path(__file__).resolve().parent / ".env",
         Path.home() / ".env",
@@ -226,11 +228,7 @@ class YahooSessionManager:
         self._expires_at = 0.0
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
-logger = logging.getLogger("tradingview.server")
+# logger initialized before load_dotenv_custom()
 
 # Desktop mode runtime configuration
 _desktop_mode: bool = os.environ.get("DESKTOP_MODE", "").lower() in ("1", "true", "yes")
@@ -367,15 +365,18 @@ class DesktopAuthMiddleware(BaseHTTPMiddleware):
     """Enforces session token verification for REST endpoints when desktop mode is active."""
 
     async def dispatch(self, request: Request, call_next):
+        csp = "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com https://s3.tradingview.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* https://*.tradingview.com wss://*.tradingview.com; frame-src 'self' https://s.tradingview.com https://*.tradingview.com;"
         if not is_desktop_mode():
             response = await call_next(request)
             response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            response.headers.setdefault("Content-Security-Policy", csp)
             return response
 
         # Allow preflight CORS OPTIONS requests without auth
         if request.method == "OPTIONS":
             response = await call_next(request)
             response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            response.headers.setdefault("Content-Security-Policy", csp)
             return response
 
         # Allow unauthenticated health check probe and non-API routes (static files, index)
@@ -384,6 +385,7 @@ class DesktopAuthMiddleware(BaseHTTPMiddleware):
         if normalized_path == "/api/health" or not normalized_path.startswith("/api"):
             response = await call_next(request)
             response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            response.headers.setdefault("Content-Security-Policy", csp)
             return response
 
         token = extract_token_from_request(request)
@@ -1759,7 +1761,7 @@ def build_ai_agent_lens_payload(
             if abs(now_ts - last_ts) <= (7 * tf_seconds):
                 latest_is_live = (now_ts < (last_ts + tf_seconds))
             else:
-                latest_is_live = True
+                latest_is_live = False
     else:
         latest_is_live = bool(is_live)
 

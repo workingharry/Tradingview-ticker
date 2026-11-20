@@ -463,6 +463,9 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
+.chart-legend .legend-indicator, .chart-legend button { pointer-events: auto; cursor: pointer; }
+.chart-legend .legend-indicator.is-hidden { opacity: 0.35; text-decoration: line-through; }
+
 .legend-symbol {
   font-weight: 700;
   color: var(--text-bright);

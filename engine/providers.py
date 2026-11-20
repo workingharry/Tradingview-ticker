@@ -17,7 +17,7 @@ from typing import Dict, Any, List, Optional
 import httpx
 
 logger = logging.getLogger("tradingview.providers")
-_VALID_TICKER_RE = re.compile(r"^[A-Z0-9._\-\^=]{1,24}$")
+_VALID_TICKER_RE = re.compile(r"^(?!.*\.\.)[A-Z0-9\^][A-Z0-9._\-\^=]{0,23}$")
 
 
 class BaseMarketDataProvider(abc.ABC):
@@ -261,7 +261,6 @@ class PolygonDataProvider(BaseMarketDataProvider):
             "adjusted": "true",
             "sort": "desc",
             "limit": str(limit),
-            "apiKey": self.api_key,
         }
 
         should_close = False
@@ -271,7 +270,7 @@ class PolygonDataProvider(BaseMarketDataProvider):
             should_close = True
 
         try:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, headers={"Authorization": f"Bearer {self.api_key}"})
             if resp.status_code != 200:
                 logger.warning("Polygon API returned HTTP %s for %s", resp.status_code, ticker)
                 return []
@@ -347,7 +346,7 @@ class AlpacaDataProvider(BaseMarketDataProvider):
         raw_ticker = symbol.split(":")[-1] if ":" in symbol else symbol
         if not _VALID_TICKER_RE.match(raw_ticker.upper()):
             return []
-        ticker = raw_ticker.replace(".", "/")
+        ticker = raw_ticker.upper()  # Alpaca stock bars expect dotted symbols (BRK.B)
         alpaca_map = {
             "1m": "1Min",
             "5m": "5Min",

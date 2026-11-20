@@ -209,7 +209,11 @@ fn launch_sidecar(state: &AppState) -> Result<(u16, String), String> {
         for line_result in reader.lines() {
             match line_result {
                 Ok(line) => {
-                    log::info!("[Sidecar stdout] {}", line);
+                    if line.contains("TOKEN=") {
+                        log::info!("[Sidecar stdout] SERVER_READY (token redacted)");
+                    } else {
+                        log::info!("[Sidecar stdout] {}", line);
+                    }
                     if !handshake_sent {
                         if let Some((p, t)) = parse_handshake_line(&line) {
                             let _ = tx.send(Ok((p, t)));
@@ -400,12 +404,7 @@ pub fn run() {
             // 3. Configure the main webview window to target loopback endpoint with token
             if let Some(window) = app.get_webview_window("main") {
                 let target_url = format!("http://127.0.0.1:{}/?token={}&port={}", port, token, port);
-                log::info!("Navigating main webview to: {}", target_url);
-                let init_script = format!(
-                    "window.__DESKTOP_PORT__={}; window.__DESKTOP_TOKEN__='{}'; if (typeof window.initDesktopSession === 'function') {{ window.initDesktopSession({}, '{}'); }}",
-                    port, token, port, token
-                );
-                let _ = window.eval(&init_script);
+                log::info!("Navigating main webview to: http://127.0.0.1:{}/", port);
                 if let Ok(parsed_url) = target_url.parse::<Url>() {
                     let _ = window.navigate(parsed_url);
                 }

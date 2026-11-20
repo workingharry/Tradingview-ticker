@@ -75,6 +75,7 @@ class TestAiAgentLensAndRecovery(unittest.TestCase):
         # Latest bar (unconfirmed live candle) has an extreme spike that should NOT repaint confirmed metrics
         bars[-1]["close"] = 999.0
         bars[-1]["high"] = 1000.0
+        bars[-1]["unconfirmed"] = True
 
         payload = server.build_ai_agent_lens_payload(
             symbol="NASDAQ:AAPL",

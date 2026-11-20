@@ -1,6 +1,6 @@
 [package]
 name = "tradingview-terminal"
-version = "0.1.0"
+version = "1.0.0"
 description = "TradingView Real-Time Terminal macOS Desktop Application"
 authors = ["TradingView Terminal Team"]
 edition = "2021"

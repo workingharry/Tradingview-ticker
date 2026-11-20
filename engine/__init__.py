@@ -8,7 +8,10 @@ from .protocol import (
     encode_heartbeat_response,
 )
 from .aggregator import TickToBarAggregator, CandlestickBar
-from .client import TradingViewAsyncClient
+try:
+    from .client import TradingViewAsyncClient
+except ImportError:  # ponytail: allow stdlib submodules without websockets
+    TradingViewAsyncClient = None
 from .storage import Storage, SQLiteStorage, get_storage, close_storage
 from .providers import (
     BaseMarketDataProvider,

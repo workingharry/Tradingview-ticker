@@ -665,15 +665,18 @@ _storage_instance: Optional[Storage] = None
 _storage_singleton_lock = threading.Lock()
 
 
+_storage_requested_path: Optional[Path] = None
+
+
 def get_storage(db_path: Optional[Union[str, Path]] = None) -> Storage:
     """Returns thread-safe shared Storage instance."""
-    global _storage_instance
+    global _storage_instance, _storage_requested_path
     with _storage_singleton_lock:
         if db_path and str(db_path) == ":memory:":
             target_path = Path(":memory:")
         else:
             target_path = Path(db_path).expanduser().resolve() if db_path else get_default_db_path().resolve()
-        if _storage_instance is None or _storage_instance.is_closed or _storage_instance.db_path != target_path:
+        if _storage_instance is None or _storage_instance.is_closed or _storage_requested_path != target_path:
             if _storage_instance is not None and not _storage_instance.is_closed:
                 _storage_instance.close()
             try:
@@ -681,6 +684,7 @@ def get_storage(db_path: Optional[Union[str, Path]] = None) -> Storage:
             except (sqlite3.DatabaseError, sqlite3.OperationalError, sqlite3.IntegrityError) as db_err:
                 logger.error("Failed to initialize SQLite storage at %s: %s; falling back to in-memory database", target_path, db_err)
                 _storage_instance = Storage(db_path=":memory:")
+            _storage_requested_path = target_path
         return _storage_instance
 
 

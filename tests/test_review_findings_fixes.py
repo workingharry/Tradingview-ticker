@@ -36,7 +36,7 @@ class TestReviewFindingsFixes(unittest.TestCase):
         self.assertIn("clampAndSetVisibleRange", self.js)
         self.assertIn("earliest", self.js)
 
-    def test_r2_drawing_toolbar_removed(self):
+    def test_r2_drawing_toolbar_present(self):
         """Verifies R2: Drawing toolbar and overlay canvas exist with active tools."""
         self.assertIn('id="drawingToolbar"', self.html)
         self.assertIn('id="drawingCanvas"', self.html)
