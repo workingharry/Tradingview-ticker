@@ -7,6 +7,8 @@ automatic directory creation, and retention pruning.
 import sys
 import os
 import math
+import json
+import time
 import sqlite3
 import threading
 import logging
@@ -117,6 +119,9 @@ class Storage:
                     industry TEXT DEFAULT ''
                 );
                 """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_watchlist_sort_order ON watchlist(sort_order ASC);"
             )
             # Idempotent migration for existing SQLite databases lacking sector/industry
             cursor = self._conn.cursor()

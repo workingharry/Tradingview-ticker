@@ -9,7 +9,7 @@ Implements:
 """
 
 import asyncio
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 import math

@@ -141,15 +141,16 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         self.assertIn("closeBtnY", self.js)
         self.assertIn("isDraggingHandle", self.js)
 
-        # Forward anchor to avoid candlestick occlusion and body dragging
+        # Forward anchor to avoid candlestick occlusion and body dragging with offset preservation
         self.assertIn("left = Math.max(10, xCenter)", self.js)
         self.assertIn('handle: "body"', self.js)
+        self.assertIn("origAnchorX + (x -", self.js)
         self.assertIn(".cursor-move", self.css)
         self.assertIn(".cursor-ns-resize", self.css)
         self.assertIn(".cursor-pointer", self.css)
 
     def test_seam6_tradingview_widget_studies_and_distinct_colors(self):
-        """Seam 6: Scheme C configures 21, 30, 200 EMA with distinct colors and Compare study for RS."""
+        """Seam 6: Scheme C exclusively loads 21, 30, 200 EMA + Compare study with distinct colors."""
         # Compare study must be pushed for RS line
         self.assertIn("Compare@tv-basicstudies", self.js)
 
@@ -157,6 +158,12 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         self.assertIn('inputs: { length: 21 }', self.js)
         self.assertIn('inputs: { length: 30 }', self.js)
         self.assertIn('inputs: { length: 200 }', self.js)
+
+        # Negative assertions: Scheme C must NOT load AVWAP, 10 EMA, or 50 SMA in tvStudies
+        self.assertNotIn("Anchored VWAP@tv-basicstudies", self.js)
+        tv_studies_block = self.js[self.js.find("var tvStudies = []"):self.js.find("studies: tvStudies")]
+        self.assertNotIn("length: 10", tv_studies_block)
+        self.assertNotIn("length: 50", tv_studies_block)
 
         # Distinct EMA colors in studies_overrides and onChartReady
         self.assertIn('"moving average exponential.plot.color": "#a855f7"', self.js)

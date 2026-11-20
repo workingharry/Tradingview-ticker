@@ -1417,8 +1417,7 @@ function initChart() {
       resizeAllCharts();
     });
     resizeObserver.observe(chartContainer);
-  }
-  if (typeof window !== "undefined" && window.addEventListener) {
+  } else if (typeof window !== "undefined" && window.addEventListener) {
     window.addEventListener("resize", resizeAllCharts);
   }
 
@@ -1451,9 +1450,6 @@ function resizeAllCharts() {
       var sh = cEl.clientHeight;
       if (sw > 0 && sh > 0) {
         subCharts[p].chart.applyOptions({ width: sw, height: sh });
-        if (subCharts[p].chart.timeScale) {
-          subCharts[p].chart.timeScale().fitContent();
-        }
       }
     }
   }
@@ -1879,7 +1875,6 @@ function initTradingViewWidget(symbol) {
   if (indicatorConfig.ema30 !== false) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 30 } });
   if (indicatorConfig.sma200 !== false || indicatorConfig.ema200 !== false) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 200 } });
   if (indicatorConfig.rsLine !== false) tvStudies.push({ id: "Compare@tv-basicstudies", inputs: { symbol: toTradingViewRealtimeSymbol(rsBenchmarkTag || "SPY") } });
-  if (indicatorConfig.avwap) tvStudies.push({ id: "Anchored VWAP@tv-basicstudies" });
 
   if (typeof TradingView !== "undefined" && TradingView.widget) {
     try {
@@ -5487,7 +5482,16 @@ function initEventListeners() {
             isDraggingHandle.drawing.entryPrice = isDraggingHandle.origEntry + bDiff;
             isDraggingHandle.drawing.targetPrice = isDraggingHandle.origTarget + bDiff;
             isDraggingHandle.drawing.stopPrice = isDraggingHandle.origStop + bDiff;
-            if (timeScale && typeof timeScale.coordinateToTime === "function") {
+            if (timeScale && typeof timeScale.coordinateToTime === "function" && typeof timeScale.timeToCoordinate === "function") {
+              var origAnchorX = timeScale.timeToCoordinate(isDraggingHandle.origTime);
+              if (origAnchorX !== null && !isNaN(origAnchorX)) {
+                var newAnchorX = origAnchorX + (x - (isDraggingHandle.startX || x));
+                var newT = timeScale.coordinateToTime(newAnchorX);
+                if (newT !== null && newT !== undefined) {
+                  isDraggingHandle.drawing.time = newT;
+                }
+              }
+            } else if (timeScale && typeof timeScale.coordinateToTime === "function") {
               var newT = timeScale.coordinateToTime(x);
               if (newT !== null && newT !== undefined) {
                 isDraggingHandle.drawing.time = newT;

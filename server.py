@@ -90,7 +90,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from engine.aggregator import TickToBarAggregator, CandlestickBar
 from engine.client import TradingViewAsyncClient
-from engine.storage import Storage, get_storage, close_storage
+from engine.storage import get_storage, close_storage
 from engine.providers import PolygonDataProvider, AlpacaDataProvider
 from engine.screener import (
     ScreeningCriteria,
@@ -1087,7 +1087,6 @@ async def search_symbols(q: str = Query(default="")):
     query = q.strip().upper()
 
     # Build comprehensive local universe index (Momentum Universe + Watchlist + Popular Index)
-    from engine.screener import US_MOMENTUM_UNIVERSE
     combined_local: List[Dict[str, Any]] = list(POPULAR_SEARCH_INDEX)
     seen_ids = {item["id"] for item in combined_local}
 
