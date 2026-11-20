@@ -1922,6 +1922,18 @@ function initTradingViewWidget(symbol) {
   if (!tvWidgetContainer) return;
   tvWidgetContainer.innerHTML = "";
 
+  // Clear stale cached TradingView study properties so fresh distinct colors apply immediately
+  try {
+    var tvKeys = [];
+    for (var k = 0; k < localStorage.length; k++) {
+      var lk = localStorage.key(k);
+      if (lk && (lk.indexOf("tradingview") !== -1 || lk.indexOf("tv_chart") !== -1)) {
+        tvKeys.push(lk);
+      }
+    }
+    tvKeys.forEach(function(k) { localStorage.removeItem(k); });
+  } catch (e) {}
+
   var pairName = getSymbolDisplayName(symbol);
   if (legendSymbolEl) legendSymbolEl.textContent = pairName;
   if (omniboxDisplay) omniboxDisplay.textContent = pairName + " • " + (getSymbolItem(symbol) ? getSymbolItem(symbol).name : symbol);
@@ -1930,13 +1942,41 @@ function initTradingViewWidget(symbol) {
 
   var tvInterval = ({ "1m": "1", "5m": "5", "15m": "15", "1h": "60", "60m": "60", "1D": "D", "1W": "W" })[activeTimeframe] || "D";
 
-  // User specification: Scheme C TradingView widget exclusively loads 21 EMA, 30 EMA, 200 EMA.
+  // User specification: Scheme C TradingView widget exclusively loads 21 EMA, 30 EMA, 200 EMA with distinct colors.
   // SPDR S&P 500 Compare study removed from default view per user request.
   var tvStudies = [];
-  if (indicatorConfig.ema21 !== false) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 21 } });
-  if (indicatorConfig.ema30 !== false) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 30 } });
-  if (indicatorConfig.sma200 !== false || indicatorConfig.ema200 !== false) tvStudies.push({ id: "MAExp@tv-basicstudies", inputs: { length: 200 } });
-  if (indicatorConfig.tvCompareRs) tvStudies.push({ id: "Compare@tv-basicstudies", inputs: { symbol: toTradingViewRealtimeSymbol(rsBenchmarkTag || "SPY") } });
+  if (indicatorConfig.ema21 !== false) {
+    tvStudies.push({
+      id: "MAExp@tv-basicstudies",
+      inputs: { length: 21 },
+      override: { "plot.color": "#a855f7", "plot.linewidth": 2 },
+      overrides: { "plot.color": "#a855f7", "plot.linewidth": 2 }
+    });
+  }
+  if (indicatorConfig.ema30 !== false) {
+    tvStudies.push({
+      id: "MAExp@tv-basicstudies",
+      inputs: { length: 30 },
+      override: { "plot.color": "#f59e0b", "plot.linewidth": 2 },
+      overrides: { "plot.color": "#f59e0b", "plot.linewidth": 2 }
+    });
+  }
+  if (indicatorConfig.sma200 !== false || indicatorConfig.ema200 !== false) {
+    tvStudies.push({
+      id: "MAExp@tv-basicstudies",
+      inputs: { length: 200 },
+      override: { "plot.color": "#ec4899", "plot.linewidth": 2 },
+      overrides: { "plot.color": "#ec4899", "plot.linewidth": 2 }
+    });
+  }
+  if (indicatorConfig.tvCompareRs) {
+    tvStudies.push({
+      id: "Compare@tv-basicstudies",
+      inputs: { symbol: toTradingViewRealtimeSymbol(rsBenchmarkTag || "SPY") },
+      override: { "plot.color": "#3b82f6", "plot.linewidth": 2 },
+      overrides: { "plot.color": "#3b82f6", "plot.linewidth": 2 }
+    });
+  }
 
   if (typeof TradingView !== "undefined" && TradingView.widget) {
     try {
@@ -1962,16 +2002,27 @@ function initTradingViewWidget(symbol) {
           "volume.volume ma.length": 50,
           "volume.volume.color.0": "#ef4444",
           "volume.volume.color.1": "#26a69a",
+          "moving average exponential.0.plot.color": "#a855f7",
+          "moving average exponential.0.plot.linewidth": 2,
+          "moving average exponential.0.color": "#a855f7",
+          "moving average exponential.1.plot.color": "#f59e0b",
+          "moving average exponential.1.plot.linewidth": 2,
+          "moving average exponential.1.color": "#f59e0b",
+          "moving average exponential.2.plot.color": "#ec4899",
+          "moving average exponential.2.plot.linewidth": 2,
+          "moving average exponential.2.color": "#ec4899",
           "moving average exponential.plot.color": "#a855f7",
           "moving average exponential.plot.linewidth": 2,
-          "moving average.plot.color": "#eab308",
+          "moving average.0.plot.color": "#ec4899",
+          "moving average.0.plot.linewidth": 2,
+          "moving average.plot.color": "#ec4899",
           "moving average.plot.linewidth": 2,
           "vwap.plot.color": "#26a69a",
           "vwap.plot.linewidth": 2,
           "compare.plot.color": "#3b82f6",
           "compare.plot.linewidth": 2
         },
-        enabled_features: ["use_localstorage_for_settings"],
+        disabled_features: ["use_localstorage_for_settings"],
         container_id: "tvWidgetContainer"
       });
 

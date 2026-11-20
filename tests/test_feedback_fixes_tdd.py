@@ -167,6 +167,9 @@ class TestFeedbackFixesTDD(unittest.TestCase):
 
         # Distinct EMA colors in studies_overrides and onChartReady
         self.assertIn('"moving average exponential.plot.color": "#a855f7"', self.js)
+        self.assertIn('"moving average exponential.0.plot.color": "#a855f7"', self.js)
+        self.assertIn('"moving average exponential.1.plot.color": "#f59e0b"', self.js)
+        self.assertIn('"moving average exponential.2.plot.color": "#ec4899"', self.js)
         self.assertIn("onChartReady", self.js)
         self.assertIn("#a855f7", self.js)  # EMA 21 purple
         self.assertIn("#f59e0b", self.js)  # EMA 30 amber
@@ -275,7 +278,7 @@ class TestFeedbackFixesTDD(unittest.TestCase):
 
         # JS defaults tvCompareRs to false and only adds study when explicitly enabled
         self.assertIn("tvCompareRs: false", self.js)
-        self.assertIn("if (indicatorConfig.tvCompareRs) tvStudies.push", self.js)
+        self.assertIn("indicatorConfig.tvCompareRs", self.js)
         self.assertIn("chkTvCompareRs", self.js)
 
 
