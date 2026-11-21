@@ -1,5 +1,5 @@
 import assert from 'node:assert';
-import { calculatePositionMetrics } from '../src/chart/positionSizer.ts';
+import { calculatePositionMetrics } from '../frontend/src/chart/positionSizer.ts';
 
 console.log("Running Position Sizer Unit Tests...");
 

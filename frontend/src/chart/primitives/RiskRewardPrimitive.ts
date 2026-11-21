@@ -104,11 +104,33 @@ export class RiskRewardPrimitive implements ISeriesPrimitive<Time> {
       return;
     }
     const ts = this._chart.timeScale();
-    const xStart = ts.timeToCoordinate(this._state.startTime);
-    const xEnd = ts.timeToCoordinate(this._state.endTime);
+    let xStart = ts.timeToCoordinate(this._state.startTime);
+    let xEnd = ts.timeToCoordinate(this._state.endTime);
     const yEntry = this._series.priceToCoordinate(this._state.entryPrice);
     const yStop = this._series.priceToCoordinate(this._state.stopPrice);
     const yTarget = this._series.priceToCoordinate(this._state.targetPrice);
+
+    if (xStart !== null && xEnd === null) {
+      const startLogical = ts.coordinateToLogical(xStart);
+      if (startLogical !== null) {
+        xEnd = ts.logicalToCoordinate((startLogical + 20) as any);
+      }
+      if (xEnd === null) {
+        xEnd = (xStart + 160) as any;
+      }
+    } else if (xStart === null && xEnd !== null) {
+      const endLogical = ts.coordinateToLogical(xEnd);
+      if (endLogical !== null) {
+        xStart = ts.logicalToCoordinate((endLogical - 20) as any);
+      }
+      if (xStart === null) {
+        xStart = Math.max(10, xEnd - 160) as any;
+      }
+    } else if (xStart === null && xEnd === null) {
+      const width = ts.width();
+      xStart = Math.max(10, width - 260) as any;
+      xEnd = Math.max((xStart ?? 0) + 120, width - 60) as any;
+    }
 
     if (xStart === null || xEnd === null || yEntry === null || yStop === null || yTarget === null) {
       this._coords = null;

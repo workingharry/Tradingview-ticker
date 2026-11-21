@@ -234,6 +234,7 @@ class YahooSessionManager:
 _desktop_mode: bool = os.environ.get("DESKTOP_MODE", "").lower() in ("1", "true", "yes")
 _desktop_token: Optional[str] = os.environ.get("DESKTOP_TOKEN") or None
 _desktop_port: Optional[int] = None
+_dev_no_auth: bool = False
 if os.environ.get("DESKTOP_PORT"):
     try:
         _desktop_port = int(os.environ["DESKTOP_PORT"])
@@ -263,18 +264,24 @@ def get_desktop_port() -> Optional[int]:
 def set_desktop_mode(
     enabled: bool = True,
     token: Optional[str] = None,
-    port: Optional[int] = None
+    port: Optional[int] = None,
+    dev_no_auth: bool = False
 ) -> None:
-    """Configures desktop mode flag, session token, and bound port."""
-    global _desktop_mode, _desktop_token, _desktop_port
+    """Configures desktop mode flag, session token, bound port, and dev_no_auth override."""
+    global _desktop_mode, _desktop_token, _desktop_port, _dev_no_auth
     _desktop_mode = enabled
+    _dev_no_auth = dev_no_auth
     if enabled:
-        _desktop_token = token or _desktop_token or secrets.token_hex(16)
+        if dev_no_auth:
+            _desktop_token = ""
+        else:
+            _desktop_token = token or _desktop_token or secrets.token_hex(16)
         if port is not None:
             _desktop_port = port
     else:
         _desktop_token = None
         _desktop_port = None
+        _dev_no_auth = False
 
 
 @contextmanager
@@ -332,7 +339,7 @@ async def _parent_watchdog_loop(initial_ppid: int, interval: float = 2.0) -> Non
 
 def verify_token(token: Optional[str]) -> bool:
     """Verifies that the provided token matches the active desktop session token using constant-time comparison."""
-    if not is_desktop_mode():
+    if not is_desktop_mode() or _dev_no_auth:
         return True
     active_token = get_desktop_token()
     if not active_token or not token:
@@ -2592,15 +2599,16 @@ async def websocket_live_endpoint(websocket: WebSocket):
             await websocket.close(code=1008, reason="Unauthorized origin")
             return
 
-        token = websocket.query_params.get("token") or websocket.headers.get("x-session-token") or websocket.headers.get("x-terminal-token")
-        if not token:
-            auth_header = websocket.headers.get("authorization", "")
-            if auth_header.startswith("Bearer "):
-                token = auth_header[7:].strip()
-        if not verify_token(token):
-            logger.warning("Rejected unauthorized WebSocket connection: missing or invalid session token")
-            await websocket.close(code=1008, reason="Unauthorized: invalid or missing session token")
-            return
+        if not _dev_no_auth:
+            token = websocket.query_params.get("token") or websocket.headers.get("x-session-token") or websocket.headers.get("x-terminal-token")
+            if not token:
+                auth_header = websocket.headers.get("authorization", "")
+                if auth_header.startswith("Bearer "):
+                    token = auth_header[7:].strip()
+            if not verify_token(token):
+                logger.warning("Rejected unauthorized WebSocket connection: missing or invalid session token")
+                await websocket.close(code=1008, reason="Unauthorized: invalid or missing session token")
+                return
 
     await manager.connect(websocket)
     try:
@@ -2669,9 +2677,14 @@ if STATIC_DIR.exists():
 
 def start_parent_watchdog(server: Any) -> None:
     """Monitors standard input and signals uvicorn server to exit on EOF (parent process killed)."""
+    if not sys.stdin or not hasattr(sys.stdin, "read"):
+        logger.debug("sys.stdin is not available; parent watchdog disabled.")
+        return
     def _watch() -> None:
         try:
-            sys.stdin.read()
+            content = sys.stdin.read()
+            if content == "" and not getattr(server, "started", True):
+                logger.debug("Parent watchdog observed EOF before server completed startup.")
         except Exception as err:
             logger.debug("Parent watchdog stdin channel closed: %s", err)
         logger.info("Parent process EOF detected on stdin. Triggering server shutdown.")
@@ -2697,7 +2710,7 @@ def run_server(
     if desktop_mode or effective_port == 0:
         active_token = "" if dev_no_auth else (token or secrets.token_hex(16))
         sock, assigned_port = bind_loopback_socket(host=host, port=effective_port)
-        set_desktop_mode(enabled=True, token=active_token, port=assigned_port)
+        set_desktop_mode(enabled=True, token=active_token, port=assigned_port, dev_no_auth=dev_no_auth)
         logger.info("Starting server in desktop mode on %s:%d (dev_no_auth=%s)", host, assigned_port, dev_no_auth)
         config = uvicorn.Config(app, host=host, port=assigned_port, log_level="info")
         server = uvicorn.Server(config)

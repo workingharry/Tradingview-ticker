@@ -6,6 +6,7 @@ import type { Time } from 'lightweight-charts';
 let chartBundle: MultiPaneChartBundle | null = null;
 let currentSymbol = 'NVDA';
 let currentTimeframe = '1D';
+let currentBars: any[] = [];
 let liveSocket: WebSocket | null = null;
 
 async function initTerminal() {
@@ -59,6 +60,7 @@ async function loadHistory(symbol: string, timeframe: string) {
     const bars: any[] = Array.isArray(data) ? data : data?.bars || [];
 
     if (bars.length > 0) {
+      currentBars = bars;
       const candleData = bars.map((b: any) => ({
         time: normalizeTime(b.time),
         open: b.open,
@@ -94,19 +96,20 @@ async function loadHistory(symbol: string, timeframe: string) {
 function attachDemoRiskReward() {
   if (!chartBundle) return;
   const candleSeries = chartBundle.candleSeries;
-  const data = (candleSeries as any).data?.() || [];
 
   // Default price levels around current last price
-  const lastBar = data.length > 0 ? data[data.length - 1] : { time: Math.floor(Date.now() / 1000) as Time, close: 100 };
+  const lastBar = currentBars.length > 0 ? currentBars[currentBars.length - 1] : { time: Math.floor(Date.now() / 1000) as Time, close: 100 };
   const lastPrice = lastBar.close || 100;
   const entryPrice = Number(lastPrice.toFixed(2));
   const stopPrice = Number((entryPrice * 0.95).toFixed(2)); // 5% stop
   const targetPrice = Number((entryPrice * 1.15).toFixed(2)); // 15% target (3:1 R:R)
+  const startTime = normalizeTime(lastBar.time);
+  const endTime = (typeof startTime === 'number' ? (startTime + 86400 * 20) : startTime) as Time;
 
   const primitive = new RiskRewardPrimitive({
     id: `rr_${Date.now()}`,
-    startTime: lastBar.time,
-    endTime: (typeof lastBar.time === 'number' ? (lastBar.time + 86400 * 20) : lastBar.time) as Time,
+    startTime,
+    endTime,
     entryPrice,
     stopPrice,
     targetPrice,
@@ -136,9 +139,17 @@ async function connectWebSocket() {
     liveSocket.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
-        if (msg.type === 'bar' && msg.symbol === currentSymbol && chartBundle) {
+        const isMatch = msg.symbol === currentSymbol ||
+                        (typeof msg.symbol === 'string' && msg.symbol.endsWith(':' + currentSymbol)) ||
+                        (typeof currentSymbol === 'string' && currentSymbol.endsWith(':' + msg.symbol));
+        if (msg.type === 'bar' && isMatch && chartBundle) {
           const b = msg.bar;
           const barTime = normalizeTime(b.time);
+          if (currentBars.length > 0 && normalizeTime(currentBars[currentBars.length - 1].time) === barTime) {
+            currentBars[currentBars.length - 1] = b;
+          } else {
+            currentBars.push(b);
+          }
           chartBundle.candleSeries.update({
             time: barTime,
             open: b.open,

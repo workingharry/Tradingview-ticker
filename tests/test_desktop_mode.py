@@ -387,6 +387,22 @@ class TestDesktopModeAuthAndCORS(unittest.TestCase):
                 msg2 = ws2.receive_json()
                 self.assertEqual(msg2["type"], "status")
 
+    def test_desktop_mode_dev_no_auth_bypasses_token(self):
+        """Validates that dev_no_auth mode allows unauthenticated REST and WebSocket requests."""
+        set_desktop_mode(enabled=True, port=51234, dev_no_auth=True)
+        try:
+            self.assertTrue(verify_token(""))
+            self.assertTrue(verify_token(None))
+            with TestClient(app) as client:
+                resp = client.get("/api/symbols")
+                self.assertEqual(resp.status_code, 200)
+
+                with client.websocket_connect("/ws/live", headers={"Origin": "http://127.0.0.1:3000"}) as ws:
+                    msg = ws.receive_json()
+                    self.assertEqual(msg["type"], "status")
+        finally:
+            set_desktop_mode(enabled=True, token=self.test_token, port=51234, dev_no_auth=False)
+
 
 class TestDesktopModeSubprocessSmoke(unittest.TestCase):
     """End-to-end integration test spawning server.py in desktop mode as a child process."""
