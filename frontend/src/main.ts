@@ -1,8 +1,8 @@
 import { createMultiPaneChart, type MultiPaneChartBundle } from './chart/createMultiPaneChart';
-import { RiskRewardPrimitive } from './chart/primitives/RiskRewardPrimitive';
 import { apiFetch, LiveFeed, type LiveMessage, type FeedState } from './api/client';
 import { LRUPrefetchCache, normalizeTime, type ParsedHistoryData } from './cache/LRUPrefetchCache';
 import { CommandPalette } from './ui/CommandPalette';
+import { DrawingSyncEngine } from './chart/DrawingSyncEngine';
 import type { Time } from 'lightweight-charts';
 
 export const DEFAULT_WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMD', 'META', 'GOOGL', 'AMZN', 'SPY', 'QQQ', 'IWM', 'SMH'];
@@ -13,6 +13,7 @@ let currentTimeframe = '1D';
 let currentBars: any[] = [];
 let liveFeed: LiveFeed | null = null;
 let commandPalette: CommandPalette | null = null;
+let drawingSyncEngine: DrawingSyncEngine | null = null;
 let activeWatchlist: string[] = [...DEFAULT_WATCHLIST];
 
 // Concurrency guards for rapid symbol switching
@@ -31,6 +32,10 @@ async function initTerminal() {
   if (!container) return;
 
   chartBundle = createMultiPaneChart(container);
+
+  drawingSyncEngine = new DrawingSyncEngine({
+    getSeries: () => chartBundle?.candleSeries || null
+  });
 
   setupLiveFeed();
   setupCommandPalette();
@@ -93,6 +98,8 @@ function setupCommandPalette() {
         flipWatchlistSymbol(1);
       } else if (actionId === 'flip_prev') {
         flipWatchlistSymbol(-1);
+      } else if (actionId === 'clear_drawings') {
+        drawingSyncEngine?.clearAllDrawings();
       }
     }
   });
@@ -188,11 +195,13 @@ export async function switchSymbol(symbol: string, timeframe: string = currentTi
     applyChartData(cached);
     // Trigger speculative prefetch for adjacent watchlist neighbors
     speculativePrefetchNeighbors(cleanSymbol, timeframe);
+    await drawingSyncEngine?.loadDrawings(cleanSymbol);
     return;
   }
 
   // 2. Cache miss: Fetch via loadHistory with generation & abort guards
   await loadHistory(cleanSymbol, timeframe);
+  await drawingSyncEngine?.loadDrawings(cleanSymbol);
 
   // 3. Speculatively prefetch adjacent symbols
   speculativePrefetchNeighbors(cleanSymbol, timeframe);
@@ -339,8 +348,7 @@ function isSymbolMatch(msgSymbol?: string, targetSymbol?: string): boolean {
 }
 
 function attachDemoRiskReward() {
-  if (!chartBundle) return;
-  const candleSeries = chartBundle.candleSeries;
+  if (!chartBundle || !drawingSyncEngine) return;
 
   const lastBar = currentBars.length > 0 ? currentBars[currentBars.length - 1] : { time: Math.floor(Date.now() / 1000) as Time, close: 100 };
   const lastPrice = lastBar.close || 100;
@@ -350,7 +358,7 @@ function attachDemoRiskReward() {
   const startTime = normalizeTime(lastBar.time);
   const endTime = (typeof startTime === 'number' ? (startTime + 86400 * 20) : startTime) as Time;
 
-  const primitive = new RiskRewardPrimitive({
+  drawingSyncEngine.addRiskReward({
     id: `rr_${Date.now()}`,
     startTime,
     endTime,
@@ -361,16 +369,7 @@ function attachDemoRiskReward() {
     riskPercent: 1.0,
     maxAllocationPercent: 25.0,
     adr20Percent: 4.5
-  }, {
-    onChange: (state, metrics) => {
-      console.log('[RiskReward] Updated:', state.id, metrics);
-    },
-    onRemove: (id) => {
-      console.log('[RiskReward] Removed:', id);
-    }
   });
-
-  candleSeries.attachPrimitive(primitive);
 }
 
 window.addEventListener('DOMContentLoaded', initTerminal);

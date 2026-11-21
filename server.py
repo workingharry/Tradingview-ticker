@@ -82,7 +82,7 @@ logger = logging.getLogger("tradingview.server")
 CA_BUNDLE_PATH: Optional[str] = init_certifi_ca_bundle()
 
 import httpx
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Body, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Body, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -2587,6 +2587,50 @@ async def save_preferences_endpoint(payload: Dict[str, Any] = Body(default={})):
     clean_payload = payload if isinstance(payload, dict) else {}
     storage.save_preferences(clean_payload)
     return {"status": "ok", "preferences": storage.get_preferences()}
+
+
+@app.get("/api/drawings")
+async def get_drawings_endpoint(symbol: str = Query(..., description="Target stock ticker symbol")):
+    """Returns stored drawings for a given symbol."""
+    storage = get_storage()
+    clean_sym = symbol.strip().upper() if symbol else ""
+    drawings = storage.get_drawings(clean_sym)
+    return {"status": "ok", "symbol": clean_sym, "drawings": drawings}
+
+
+@app.post("/api/drawings")
+async def save_drawing_endpoint(payload: Dict[str, Any] = Body(...)):
+    """Saves or updates a user drawing with revision and ownership checks."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload, expected JSON object")
+    if not payload.get("id") or not payload.get("symbol"):
+        raise HTTPException(status_code=422, detail="Missing required fields 'id' or 'symbol'")
+
+    storage = get_storage()
+    try:
+        saved_record = storage.save_drawing(payload)
+        return {"status": "ok", "drawing": saved_record}
+    except ValueError as val_err:
+        raise HTTPException(status_code=409, detail=str(val_err))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to persist drawing to SQLite: {exc}")
+
+
+@app.delete("/api/drawings/{drawing_id}")
+async def delete_drawing_endpoint(drawing_id: str):
+    """Deletes a drawing by ID."""
+    storage = get_storage()
+    deleted = storage.delete_drawing(drawing_id, soft_delete=True)
+    return {"status": "ok", "id": drawing_id, "deleted": deleted}
+
+
+@app.delete("/api/drawings")
+async def clear_drawings_endpoint(symbol: str = Query(..., description="Symbol whose drawings will be cleared")):
+    """Clears all drawings for a symbol."""
+    storage = get_storage()
+    clean_sym = symbol.strip().upper() if symbol else ""
+    count = storage.clear_drawings(clean_sym)
+    return {"status": "ok", "symbol": clean_sym, "cleared_count": count}
 
 
 @app.websocket("/ws/live")

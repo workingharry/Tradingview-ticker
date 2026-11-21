@@ -174,6 +174,31 @@ class Storage:
                 );
                 """
             )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS drawings (
+                    id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    pane_id TEXT NOT NULL DEFAULT 'candle',
+                    tool_type TEXT NOT NULL,
+                    data_json TEXT NOT NULL,
+                    timeframe_scope TEXT NOT NULL DEFAULT 'ALL',
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    is_deleted INTEGER NOT NULL DEFAULT 0
+                );
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_drawings_symbol ON drawings(symbol, is_deleted);"
+            )
+            # Idempotent migration for existing SQLite databases lacking revision
+            cursor = self._conn.cursor()
+            cursor.execute("PRAGMA table_info(drawings);")
+            drawing_cols = {str(row[1]).lower() for row in cursor.fetchall()}
+            if "revision" not in drawing_cols:
+                self._conn.execute("ALTER TABLE drawings ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;")
             self._conn.commit()
 
     @property
@@ -662,6 +687,177 @@ class Storage:
                 )
             self._conn.commit()
             return True
+
+    def save_drawing(self, drawing: Dict[str, Any]) -> Dict[str, Any]:
+        """Persists or updates a user drawing keyed by symbol with revision control."""
+        if self._closed:
+            raise RuntimeError("Cannot write to closed storage")
+        if not isinstance(drawing, dict) or not drawing.get("id") or not drawing.get("symbol"):
+            raise ValueError("Drawing must include non-empty 'id' and 'symbol'")
+
+        drawing_id = str(drawing["id"]).strip()
+        symbol = str(drawing["symbol"]).strip().upper()
+        if not drawing_id or not symbol:
+            raise ValueError("Drawing 'id' and 'symbol' cannot be blank")
+
+        pane_id = str(drawing.get("pane_id", "candle")).strip()
+        tool_type = str(drawing.get("tool_type", "risk_reward")).strip()
+        timeframe_scope = str(drawing.get("timeframe_scope", "ALL")).strip()
+
+        raw_data = drawing.get("data") if "data" in drawing else drawing.get("data_json", {})
+        data_json = json.dumps(raw_data, ensure_ascii=False) if isinstance(raw_data, (dict, list)) else str(raw_data or "{}")
+
+        now = int(time.time())
+        created_at = int(drawing.get("created_at") or now)
+        client_revision = int(drawing["revision"]) if "revision" in drawing and drawing["revision"] is not None else None
+        is_restore = bool(drawing.get("is_restore", False))
+
+        with self._lock:
+            # Check existing record for symbol immutability, tombstone protection, and revision concurrency
+            cur = self._conn.cursor()
+            cur.execute("SELECT symbol, revision, is_deleted FROM drawings WHERE id = ?;", (drawing_id,))
+            row = cur.fetchone()
+
+            if row:
+                existing_sym, existing_rev, existing_deleted = row[0], int(row[1]), int(row[2])
+                if existing_sym != symbol:
+                    raise ValueError(f"Drawing '{drawing_id}' is owned by symbol '{existing_sym}', cannot reassign to '{symbol}'")
+
+                if existing_deleted and not is_restore:
+                    raise ValueError(f"Drawing '{drawing_id}' is deleted (tombstone) and cannot be modified by standard save")
+
+                if client_revision is not None and client_revision < existing_rev:
+                    raise ValueError(f"Revision conflict for drawing '{drawing_id}': client={client_revision}, current={existing_rev}")
+
+                new_revision = existing_rev + 1
+                self._conn.execute(
+                    """
+                    UPDATE drawings
+                    SET pane_id = ?, tool_type = ?, data_json = ?, timeframe_scope = ?, revision = ?, updated_at = ?, is_deleted = 0
+                    WHERE id = ? AND symbol = ?;
+                    """,
+                    (pane_id, tool_type, data_json, timeframe_scope, new_revision, now, drawing_id, symbol)
+                )
+            else:
+                new_revision = client_revision if client_revision and client_revision > 0 else 1
+                self._conn.execute(
+                    """
+                    INSERT INTO drawings (id, symbol, pane_id, tool_type, data_json, timeframe_scope, revision, created_at, updated_at, is_deleted)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0);
+                    """,
+                    (drawing_id, symbol, pane_id, tool_type, data_json, timeframe_scope, new_revision, created_at, now)
+                )
+
+            self._conn.commit()
+            return {
+                "id": drawing_id,
+                "symbol": symbol,
+                "pane_id": pane_id,
+                "tool_type": tool_type,
+                "timeframe_scope": timeframe_scope,
+                "revision": new_revision,
+                "created_at": created_at,
+                "updated_at": now,
+                "is_deleted": False
+            }
+
+    def get_drawings(self, symbol: str, include_deleted: bool = False) -> List[Dict[str, Any]]:
+        """Retrieves drawings for a given symbol."""
+        if self._closed:
+            raise RuntimeError("Cannot read from closed storage")
+        if not symbol:
+            return []
+
+        clean_symbol = symbol.strip().upper()
+        with self._lock:
+            cursor = self._conn.cursor()
+            if include_deleted:
+                cursor.execute(
+                    """
+                    SELECT id, symbol, pane_id, tool_type, data_json, timeframe_scope, revision, created_at, updated_at, is_deleted
+                    FROM drawings
+                    WHERE symbol = ?
+                    ORDER BY created_at ASC;
+                    """,
+                    (clean_symbol,)
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT id, symbol, pane_id, tool_type, data_json, timeframe_scope, revision, created_at, updated_at, is_deleted
+                    FROM drawings
+                    WHERE symbol = ? AND is_deleted = 0
+                    ORDER BY created_at ASC;
+                    """,
+                    (clean_symbol,)
+                )
+            rows = cursor.fetchall()
+
+        results = []
+        for r in rows:
+            try:
+                parsed_data = json.loads(r[4])
+            except Exception:
+                parsed_data = {}
+            results.append({
+                "id": r[0],
+                "symbol": r[1],
+                "pane_id": r[2],
+                "tool_type": r[3],
+                "data": parsed_data,
+                "timeframe_scope": r[5],
+                "revision": r[6],
+                "created_at": r[7],
+                "updated_at": r[8],
+                "is_deleted": bool(r[9])
+            })
+        return results
+
+    def delete_drawing(self, drawing_id: str, soft_delete: bool = True, symbol: Optional[str] = None) -> bool:
+        """Deletes a drawing by ID (soft-delete tombstone with revision bump by default)."""
+        if self._closed:
+            raise RuntimeError("Cannot write to closed storage")
+        if not drawing_id:
+            return False
+
+        clean_id = str(drawing_id).strip()
+        clean_sym = symbol.strip().upper() if symbol else None
+        now = int(time.time())
+        with self._lock:
+            if soft_delete:
+                if clean_sym:
+                    cursor = self._conn.execute(
+                        "UPDATE drawings SET is_deleted = 1, revision = revision + 1, updated_at = ? WHERE id = ? AND symbol = ? AND is_deleted = 0;",
+                        (now, clean_id, clean_sym)
+                    )
+                else:
+                    cursor = self._conn.execute(
+                        "UPDATE drawings SET is_deleted = 1, revision = revision + 1, updated_at = ? WHERE id = ? AND is_deleted = 0;",
+                        (now, clean_id)
+                    )
+            else:
+                if clean_sym:
+                    cursor = self._conn.execute("DELETE FROM drawings WHERE id = ? AND symbol = ?;", (clean_id, clean_sym))
+                else:
+                    cursor = self._conn.execute("DELETE FROM drawings WHERE id = ?;", (clean_id,))
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def clear_drawings(self, symbol: str) -> int:
+        """Removes or tombstones all drawings for a symbol."""
+        if self._closed:
+            raise RuntimeError("Cannot write to closed storage")
+        if not symbol:
+            return 0
+        clean_symbol = symbol.strip().upper()
+        now = int(time.time())
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE drawings SET is_deleted = 1, updated_at = ? WHERE symbol = ? AND is_deleted = 0;",
+                (now, clean_symbol)
+            )
+            self._conn.commit()
+            return cursor.rowcount
 
     def close(self) -> None:
         """Closes the underlying SQLite connection idempotently with WAL flush."""

@@ -250,6 +250,14 @@ export class CommandPalette {
     });
 
     items.push({
+      id: 'action_clear_drawings',
+      title: 'Clear All Drawings on Current Symbol',
+      subtitle: 'Remove all saved lines and risk/reward boxes for current ticker',
+      category: 'Action',
+      onSelect: () => this.onAction('clear_drawings')
+    });
+
+    items.push({
       id: 'action_fit_content',
       title: 'Fit Chart Content / Reset Zoom',
       subtitle: 'Fit all visible candles to window',

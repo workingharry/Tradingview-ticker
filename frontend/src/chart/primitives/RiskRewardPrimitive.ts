@@ -67,6 +67,14 @@ export class RiskRewardPrimitive implements ISeriesPrimitive<Time> {
     this._paneView = new RiskRewardPaneView(this);
   }
 
+  public getId(): string {
+    return this._state.id;
+  }
+
+  public getState(): RiskRewardState {
+    return { ...this._state };
+  }
+
   public attached(param: SeriesAttachedParameter<Time>): void {
     this._chart = param.chart;
     this._series = param.series;
@@ -126,9 +134,9 @@ export class RiskRewardPrimitive implements ISeriesPrimitive<Time> {
         xStart = Math.max(10, xEnd - 160) as any;
       }
     } else if (xStart === null && xEnd === null) {
-      const width = ts.width();
-      xStart = Math.max(10, width - 260) as any;
-      xEnd = Math.max((xStart ?? 0) + 120, width - 60) as any;
+      // Both timestamps are outside currently loaded bar range; do not render ghost overlay
+      this._coords = null;
+      return;
     }
 
     if (xStart === null || xEnd === null || yEntry === null || yStop === null || yTarget === null) {
