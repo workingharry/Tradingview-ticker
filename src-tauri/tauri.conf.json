@@ -4,7 +4,10 @@
   "version": "1.0.0",
   "identifier": "com.tradingview.terminal",
   "build": {
-    "frontendDist": "../static"
+    "beforeDevCommand": "npm run dev:web",
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeBuildCommand": "npm run build:fe",
+    "frontendDist": "../frontend/dist"
   },
   "app": {
     "withGlobalTauri": true,

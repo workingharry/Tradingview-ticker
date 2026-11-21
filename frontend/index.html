@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Momentum Swing Terminal</title>
+  <link rel="stylesheet" href="./src/styles/main.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="topBar">
+      <div class="logo-zone">
+        <span class="logo-text">MOMENTUM<span class="accent">TERMINAL</span></span>
+        <span class="badge">v1.1.0</span>
+      </div>
+      <div class="symbol-zone">
+        <input id="symbolInput" type="text" value="NVDA" placeholder="Symbol (e.g. NVDA, AAPL)" autocomplete="off" />
+        <div class="timeframe-buttons">
+          <button class="tf-btn" data-tf="15m">15m</button>
+          <button class="tf-btn" data-tf="1h">1h</button>
+          <button class="tf-btn active" data-tf="1D">1D</button>
+          <button class="tf-btn" data-tf="1W">1W</button>
+        </div>
+      </div>
+      <div class="actions-zone">
+        <button id="btnAttachRR" class="action-btn" title="Attach Risk/Reward Box (Shift+R)">Risk/Reward</button>
+        <div id="statusDot" class="status-dot connected" title="System Ready"></div>
+      </div>
+    </header>
+
+    <main id="mainContainer">
+      <div id="chartContainer"></div>
+    </main>
+  </div>
+  <script type="module" src="./src/main.ts"></script>
+</body>
+</html>

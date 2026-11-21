@@ -11,6 +11,7 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+frontend/dist/
 downloads/
 eggs/
 .eggs/
@@ -18,6 +19,7 @@ lib/
 lib64/
 parts/
 sdist/
+frontend/dist/
 var/
 wheels/
 share/python-wheels/
@@ -179,4 +181,5 @@ src-tauri/target/
 src-tauri/bin/server*
 src-tauri/bin/server-sidecar/
 dist/
+frontend/dist/
 build/

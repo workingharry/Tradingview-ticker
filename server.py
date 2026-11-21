@@ -346,7 +346,7 @@ def extract_token_from_request(request: Request) -> Optional[str]:
     if query_token and query_token.strip():
         return query_token.strip()
 
-    header_token = request.headers.get("x-session-token")
+    header_token = request.headers.get("x-session-token") or request.headers.get("x-terminal-token")
     if header_token and header_token.strip():
         return header_token.strip()
 
@@ -2592,7 +2592,7 @@ async def websocket_live_endpoint(websocket: WebSocket):
             await websocket.close(code=1008, reason="Unauthorized origin")
             return
 
-        token = websocket.query_params.get("token") or websocket.headers.get("x-session-token")
+        token = websocket.query_params.get("token") or websocket.headers.get("x-session-token") or websocket.headers.get("x-terminal-token")
         if not token:
             auth_header = websocket.headers.get("authorization", "")
             if auth_header.startswith("Bearer "):
@@ -2667,11 +2667,25 @@ if STATIC_DIR.exists():
     app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="root_static")
 
 
+def start_parent_watchdog(server: Any) -> None:
+    """Monitors standard input and signals uvicorn server to exit on EOF (parent process killed)."""
+    def _watch() -> None:
+        try:
+            sys.stdin.read()
+        except Exception as err:
+            logger.debug("Parent watchdog stdin channel closed: %s", err)
+        logger.info("Parent process EOF detected on stdin. Triggering server shutdown.")
+        server.should_exit = True
+    threading.Thread(target=_watch, name="parent-eof-watchdog", daemon=True).start()
+
+
 def run_server(
     host: str = "127.0.0.1",
     port: Optional[int] = None,
     desktop_mode: bool = False,
-    token: Optional[str] = None
+    token: Optional[str] = None,
+    dev_no_auth: bool = False,
+    watch_stdin: bool = False
 ) -> None:
     """Launches the server with dynamic ephemeral socket binding if port=0 or desktop mode."""
     import uvicorn
@@ -2681,12 +2695,14 @@ def run_server(
         effective_port = 0 if desktop_mode else 8000
 
     if desktop_mode or effective_port == 0:
-        active_token = token or secrets.token_hex(16)
+        active_token = "" if dev_no_auth else (token or secrets.token_hex(16))
         sock, assigned_port = bind_loopback_socket(host=host, port=effective_port)
         set_desktop_mode(enabled=True, token=active_token, port=assigned_port)
-        logger.info("Starting server in desktop mode on %s:%d", host, assigned_port)
+        logger.info("Starting server in desktop mode on %s:%d (dev_no_auth=%s)", host, assigned_port, dev_no_auth)
         config = uvicorn.Config(app, host=host, port=assigned_port, log_level="info")
         server = uvicorn.Server(config)
+        if watch_stdin:
+            start_parent_watchdog(server)
         try:
             server.run(sockets=[sock])
         finally:
@@ -2706,6 +2722,16 @@ if __name__ == "__main__":
         "--desktop-mode",
         action="store_true",
         help="Enable macOS desktop mode with token authentication and ephemeral port"
+    )
+    parser.add_argument(
+        "--dev-no-auth",
+        action="store_true",
+        help="Disable session token authentication for local development"
+    )
+    parser.add_argument(
+        "--watch-stdin",
+        action="store_true",
+        help="Monitor stdin and terminate server upon EOF (prevents orphan processes)"
     )
     parser.add_argument(
         "--host",
@@ -2731,5 +2757,7 @@ if __name__ == "__main__":
         host=args.host,
         port=args.port,
         desktop_mode=is_desktop,
-        token=args.token
+        token=args.token,
+        dev_no_auth=args.dev_no_auth,
+        watch_stdin=args.watch_stdin
     )

@@ -1,13 +1,34 @@
 {
-  "name": "tradingview-terminal",
-  "version": "1.0.0",
-  "description": "TradingView Real-Time Terminal macOS Desktop Application",
+  "name": "momentum-swing-terminal",
+  "version": "1.1.0",
+  "description": "Momentum Swing Terminal macOS Desktop Application",
+  "private": true,
+  "type": "module",
   "scripts": {
-    "tauri": "tauri",
+    "dev:fe": "vite --config frontend/vite.config.ts frontend",
+    "dev:be": "python3 server.py --desktop-mode --port 8000 --dev-no-auth",
+    "dev:web": "concurrently -k -n BE,FE -c cyan,magenta \"npm run dev:be\" \"npm run dev:fe\"",
+    "typecheck": "tsc -p frontend/tsconfig.json --noEmit",
+    "test:fe": "vitest run --config frontend/vite.config.ts",
+    "test:be": "python3 -m pytest -q",
+    "build:fe": "npm run typecheck && vite build --config frontend/vite.config.ts frontend",
     "build:sidecar": "python3 scripts/build_sidecar.py --tauri-bin-dir src-tauri/bin",
-    "build:desktop": "npm run build:sidecar && npx tauri build --bundles app && python3 scripts/build_sidecar.py --sign-app \"src-tauri/target/release/bundle/macos/TradingView Terminal.app\" --package-dmg \"src-tauri/target/release/bundle/dmg/TradingView Terminal_1.0.0_aarch64.dmg\""
+    "build:desktop": "npm run build:sidecar && npx tauri build --bundles app && python3 scripts/build_sidecar.py --sign-app \"src-tauri/target/release/bundle/macos/TradingView Terminal.app\" --package-dmg \"src-tauri/target/release/bundle/dmg/TradingView Terminal_1.0.0_aarch64.dmg\"",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "npm run build:fe && npm run build:sidecar && tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.2.0",
+    "@tauri-apps/plugin-notification": "^2.2.0",
+    "lightweight-charts": "^5.3.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.12.4"
+    "@tauri-apps/cli": "^2.2.0",
+    "@types/node": "^22.0.0",
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0",
+    "vitest": "^2.1.0"
   }
 }
