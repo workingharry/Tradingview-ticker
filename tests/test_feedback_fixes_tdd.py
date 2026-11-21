@@ -335,6 +335,28 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         self.assertIn("min-width: 0", self.css)
         self.assertIn("overflow: hidden", self.css)
 
+    def test_seam17_mtf_bar_rollover_and_resource_lifecycle(self):
+        """Seam 17: MTF live bar bucket calculation, bar rollover, price validation, and sub-pane resource lifecycle."""
+        # 1. Price validation: rejects <= 0, NaN, and non-finite numbers
+        self.assertIn("function isValidPrice(v)", self.js)
+        self.assertIn('typeof v === "number" && !isNaN(v) && isFinite(v) && v > 0', self.js)
+        self.assertIn("if (!isValidPrice(price)) return;", self.js)
+
+        # 2. MTF candle bucketing and rollover on bucketTime > lb.time
+        self.assertIn("var bucketTime = Math.floor(barTime / step) * step;", self.js)
+        self.assertIn("if (bucketTime === lb.time)", self.js)
+        self.assertIn("else if (bucketTime > lb.time)", self.js)
+        self.assertIn("subCharts[pId].series.update(newCandle);", self.js)
+        self.assertIn("scObj.lastBar = newCandle;", self.js)
+
+        # 3. Sub-chart ResizeObserver lifecycle stored in subObj.ro
+        self.assertIn("subObj.ro = ro;", self.js)
+        self.assertIn("ro.observe(container);", self.js)
+
+        # 4. Resource teardown: ro.disconnect() and iframe.src = 'about:blank'
+        self.assertIn("subCharts[paneNum].ro.disconnect", self.js)
+        self.assertIn('iframes[i].src = "about:blank"', self.js)
+
 
 if __name__ == "__main__":
     unittest.main()

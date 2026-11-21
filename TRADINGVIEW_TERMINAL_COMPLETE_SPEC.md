@@ -20,19 +20,22 @@
 
 ## 1. 系統概述與產品願景
 
-### 1.1 產品定位
-**TradingView Terminal** 是一套專為專業波段交易者、動能交易者與量化分析師量身打造的高效能桌面金融終端。採用現代化跨平臺架構，將超輕量級的原生客戶端效能與華爾街級的市場深度數據無縫整合，兼具 **低延遲高訊噪比**、**零冗餘高自訂性** 與 **離線隱私安全**。
+### 1.1 產品定位：圖表優先極簡量化終端 (Chart-First Minimal Quantitative Terminal)
+**TradingView Terminal** 是一套專為專業波段交易者、動能交易者與量化分析師量身打造的高效能**圖表優先極簡量化桌面金融終端（Chart-First Minimal Quantitative Terminal）**。本系統摒棄傳統看盤軟體臃腫、冗餘雜訊與廣告資訊的束縛，以純粹的行情走勢、量化技術信號與低延遲響應為核心，將超輕量級的原生桌面客戶端效能與多源市場深度數據無縫整合，兼具 **低延遲高訊噪比**、**零冗餘極致視野**、**極速啟動 (< 500ms)** 與 **離線資料隱私安全**。
 
 ### 1.2 雙引擎架構範式 (Dual-Engine Paradigm)
-終端提供兩種核心繪圖引擎，使用者可隨時無縫切換：
-- **方案 A（Lightweight Charts 自研引擎）**：
-  - 基於 TradingView Lightweight Charts 核心，具備毫秒級 Canvas 渲染、低 CPU/GPU 佔用。
-  - 深度整合自研 Pine 指標計算引擎（動態 EMA 10/21/30/200、SMA 50/200、VWAP、Anchored VWAP、RS 相對強度、ATR/ADR 動態 HUD）。
-  - 支援毫秒級測量尺（Ruler）、多空盈虧比預估盒（Risk/Reward Box）、水平磁吸支撐壓力線等自訂互動圖層。
-- **方案 C（TradingView 官方進階組件）**：
-  - 整合 TradingView 官方雲端 Charting Widget，直接串接 Cboe One 官方即時美股報價。
-  - 保留 TradingView 官方完整歷史 K 線數據、時間框架切換器與原生技術指標生態。
-  - 在多圖分屏（1x2、2x2、MTF）下實現**多組件引擎一致性（Engine Uniformity）**，子圖全部採用專屬 TradingView 實例並套用統一色彩覆寫。
+終端提供兩種定位明確、協同互補的繪圖引擎範式，使用者可隨時無縫切換：
+- **方案 A（Lightweight Charts 自研引擎 - 核心原生量化引擎 Primary Quantitative Engine）**：
+  - **核心定位**：終端的主要量化工作馬（Primary Engine），負責實時高頻行情監控、向量化技術指標運算與高精度交易互動。
+  - **技術特性**：基於 TradingView Lightweight Charts 核心，透過高性能 Canvas 雙緩衝機制進行毫秒級渲染，CPU 與 GPU 佔用率極低，記憶體開銷小於 80MB。
+  - **量化指標中樞**：深度整合自研 Pine 指標計算引擎（動態 EMA 10/21/30/200、SMA 50/200、VWAP、Anchored VWAP、RS 相對強度、ATR/ADR 動態 HUD）。
+  - **原生互動圖層**：支援毫秒級測量尺（Ruler）、多空盈虧比預估盒（Risk/Reward Box）、水平磁吸支撐壓力線（Magnet Snap S/R）等自訂交互圖層。
+  - **高頻防抖推播**：無縫支援後端 WebSocket 有界佇列（`drop-oldest`）串流與多週期（MTF）就地更新防污染機制。
+- **方案 C（TradingView 官方進階組件 - 外部參照檢視視圖 External Reference View）**：
+  - **核心定位**：輔助與對照的外部參照檢視視圖（External Reference View），供交易員進行宏觀走勢校準、官方數據交叉驗證與多角度對照。
+  - **技術特性**：整合 TradingView 官方雲端 Charting Widget，直接串接 Cboe One 官方即時美股報價。
+  - **生態覆蓋**：保留 TradingView 官方完整歷史 K 線數據、時間框架切換器與原生技術指標生態。
+  - **多圖一致性**：在多圖分屏（1x2、2x2、MTF）下實現**多組件引擎一致性（Engine Uniformity）**，子圖全部採用專屬 TradingView 實例並套用統一色彩覆寫（EMA 21 紫色、EMA 30 橙色、EMA 200 粉色）。
 
 ---
 
@@ -87,7 +90,7 @@
 1. **SQLite 永續性自選股與拖曳排序**：
    - 自選股清單完整永續化於本機 SQLite 資料庫，支援滑鼠原生拖曳排序（HTML5 Drag & Drop）。
 2. **防死灰復燃種子防護 (Anti-Resurrect Seed Guard)**：
-   - 使用者主動刪除的股票代號將被永久標記，系統重啟時絕不強制以預設清單（如 NVDA、TSLA）覆蓋使用者的刪除決定。
+   - 透過 `preferences` 資料表中的 `watchlist_seeded` 旗標進行初始化狀態隔離。首次啟動時自動灌入預設標的；當使用者主動清空或刪除標的後，系統持久化保留 `watchlist_seeded` 狀態，重啟時絕不覆蓋使用者的刪除與自訂決定。
 3. **智能選股 (Smart Screener)**：
    - 預設多種機構級選股策略（Minervini VCP 波動收縮、52週新高突破、強勢動能跳空、高相對強度等）。
 4. **AI Lens 財報與動能解構**：
@@ -107,8 +110,8 @@ flowchart TD
         IndicatorsJS["static/indicators.js\n(高效數學向量運算: EMA, SMA, VWAP, AVWAP, RS, ADR)"]
         
         subgraph EngineLayer["雙繪圖引擎層"]
-            EngineA["方案 A: Lightweight Charts\n(Canvas 雙緩衝 / 自研繪圖層 / 毫秒級 K 線)"]
-            EngineC["方案 C: TradingView 官方 Widget\n(Cboe One 官方即時串流 / 官方指標 / 多分屏子組件)"]
+            EngineA["方案 A: Lightweight Charts (核心原生量化引擎)\n(Canvas 雙緩衝 / 自研繪圖層 / 毫秒級 K 線)"]
+            EngineC["方案 C: TradingView 官方 Widget (外部參照檢視視圖)\n(Cboe One 官方即時串流 / 官方指標 / 多分屏對照)"]
         end
 
         AppJS --> EngineA
@@ -205,67 +208,288 @@ def init_certifi_ca_bundle() -> Optional[str]:
 ```
 
 ### 4.2 SQLite 交易偏好與自選股防死灰復燃儲存 (`engine/storage.py`)
-採用 SQLite WAL（Write-Ahead Logging）高並發架構，分離使用者偏好與系統快取：
+後端採用 SQLite WAL（Write-Ahead Logging）高並發架構，數據儲存於 macOS 標準 Application Support 目錄中，具備忙碌逾時容錯（`busy_timeout=5000`）與初始化狀態隔離保護：
+
+1. **路徑解析機制 (Application Support Path Resolution)**：
+   - 預設儲存目錄為 `~/Library/Application Support/com.tradingview.terminal/terminal.sqlite`。
+   - 支援透過環境變數 `TERMINAL_DB_PATH` 動態覆寫，並在單元測試（pytest/unittest）中自動回退至獨立暫存檔，確保生產環境與測試資料安全隔離。
+   - 實例化時自動遞迴建立父目錄（`mkdir(parents=True, exist_ok=True)`）。
+2. **高並發連線參數 (SQLite Concurrency PRAGMAs)**：
+   - `PRAGMA journal_mode=WAL;`：啟用預寫式日誌，支援多讀單寫非阻塞並發。
+   - `PRAGMA busy_timeout=5000;`：遭遇寫鎖爭用時自動等待最多 5,000 毫秒，徹底避免 `sqlite3.OperationalError: database is locked`。
+   - `PRAGMA synchronous=NORMAL;`：兼顧磁碟寫入效能與崩潰安全。
+   - 執行緒安全：採用 `threading.RLock()` 配合 `timeout=5.0` 與 `check_same_thread=False`。
+3. **自選股防死灰復燃防護 (Watchlist Seed Guard)**：
+   - 透過 `preferences` 表中的 `key = 'watchlist_seeded'` 旗標進行初始化狀態判斷。
+   - 僅在 `watchlist` 為空且 `watchlist_seeded` 尚未寫入時，才灌入 `DEFAULT_WATCHLIST_SEEDS` 並標記 `watchlist_seeded = 'true'`。
+   - 當使用者手動呼叫 `remove_watchlist_item` 刪除標的（`DELETE FROM watchlist WHERE id = ?;`）或清空清單時，`preferences` 中的 `watchlist_seeded` 標記持續保留；後續重啟讀取 `get_watchlist()` 時絕不重新灌入預設標的，徹底根除已刪除股票死灰復燃的缺陷。
 
 ```python
-class StorageEngine:
-    def __init__(self, db_path: Path):
-        self.db_path = db_path
-        self._init_db()
+DEFAULT_STORAGE_DIR = Path.home() / "Library" / "Application Support" / "com.tradingview.terminal"
+DEFAULT_STORAGE_PATH = DEFAULT_STORAGE_DIR / "terminal.sqlite"
 
-    def _init_db(self):
-        with self._connect() as conn:
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("PRAGMA synchronous=NORMAL;")
-            # 使用者介面偏好表
-            conn.execute("""
+
+def get_default_db_path() -> Path:
+    """Resolves target SQLite database file path from environment or default app support dir."""
+    env_path = os.environ.get("TERMINAL_DB_PATH")
+    if env_path and env_path.strip():
+        return Path(env_path.strip()).expanduser().resolve()
+    if "pytest" in sys.modules or "unittest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST"):
+        import tempfile
+        return (Path(tempfile.gettempdir()) / "tradingview_test_terminal.sqlite").resolve()
+    return DEFAULT_STORAGE_PATH.resolve()
+
+
+class Storage:
+    """SQLite-backed persistent store for historical OHLCV candlestick bars and preferences."""
+
+    def __init__(self, db_path: Optional[Union[str, Path]] = None) -> None:
+        if db_path and str(db_path) == ":memory:":
+            self.db_path = Path(":memory:")
+            self._is_memory = True
+        else:
+            self.db_path = Path(db_path).expanduser().resolve() if db_path else get_default_db_path()
+            self._is_memory = False
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self._lock = threading.RLock()
+        self._closed = False
+        self._conn = sqlite3.connect(
+            ":memory:" if self._is_memory else str(self.db_path),
+            timeout=5.0,
+            check_same_thread=False
+        )
+
+        with self._lock:
+            if not self._is_memory:
+                self._conn.execute("PRAGMA journal_mode=WAL;")
+                self._conn.execute("PRAGMA busy_timeout=5000;")
+                self._conn.execute("PRAGMA synchronous=NORMAL;")
+            # 初始化 bars, watchlist, preferences 表結構
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS watchlist (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    exchange TEXT NOT NULL,
+                    pair TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    sector TEXT DEFAULT '',
+                    industry TEXT DEFAULT ''
+                );
+            """)
+            self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS preferences (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
-                    updated_at REAL NOT NULL
+                    updated_at INTEGER NOT NULL
                 );
             """)
-            # 自選股狀態表 (含 is_deleted 墓碑標記，杜絕重啟重新填充)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS watchlist (
-                    symbol TEXT PRIMARY KEY,
-                    display_order INTEGER NOT NULL,
-                    is_deleted INTEGER DEFAULT 0,
-                    created_at REAL NOT NULL
-                );
-            """)
+            self._conn.commit()
 
-    def remove_from_watchlist(self, symbol: str) -> bool:
-        """主動刪除標的，寫入墓碑標記，防止預設清單死灰復燃。"""
-        with self._connect() as conn:
-            conn.execute("""
-                UPDATE watchlist SET is_deleted = 1, display_order = -1 
-                WHERE symbol = ?;
-            """, (symbol,))
-            return True
+    def get_watchlist(self) -> List[Dict[str, Any]]:
+        """Returns the persisted watchlist. Auto-seeds defaults on first initialization only via watchlist_seeded guard."""
+        if self._closed:
+            raise RuntimeError("Cannot read from closed storage")
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT id, name, exchange, pair, type, sort_order, sector, industry FROM watchlist ORDER BY sort_order ASC, rowid ASC;")
+            rows = cursor.fetchall()
+            if not rows:
+                cursor.execute("SELECT value FROM preferences WHERE key = 'watchlist_seeded';")
+                seeded_row = cursor.fetchone()
+                if not seeded_row:
+                    for item in DEFAULT_WATCHLIST_SEEDS:
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO watchlist (id, name, exchange, pair, type, sort_order, sector, industry) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+                            (item["id"], item["name"], item["exchange"], item["pair"], item["type"], item.get("sort_order", 0), item.get("sector", ""), item.get("industry", ""))
+                        )
+                    now = int(time.time())
+                    cursor.execute(
+                        "INSERT INTO preferences (key, value, updated_at) VALUES ('watchlist_seeded', 'true', ?) ON CONFLICT(key) DO UPDATE SET value='true', updated_at=excluded.updated_at;",
+                        (now,)
+                    )
+                    self._conn.commit()
+                    cursor.execute("SELECT id, name, exchange, pair, type, sort_order, sector, industry FROM watchlist ORDER BY sort_order ASC, rowid ASC;")
+                    rows = cursor.fetchall()
+            return [{"id": str(r[0]), "name": str(r[1]), "exchange": str(r[2]), "pair": str(r[3]), "type": str(r[4]), "sort_order": int(r[5]), "sector": str(r[6] or ""), "industry": str(r[7] or "")} for r in rows]
+
+    def remove_watchlist_item(self, symbol_id: str) -> bool:
+        """Removes a symbol from the persistent watchlist table without resurrecting defaults."""
+        if self._closed:
+            raise RuntimeError("Cannot write to closed storage")
+        if not symbol_id:
+            return False
+        clean_id = str(symbol_id).strip().upper()
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("DELETE FROM watchlist WHERE id = ?;", (clean_id,))
+            deleted = cursor.rowcount > 0
+            self._conn.commit()
+            return deleted
 ```
 
 ### 4.3 WebSocket 行情廣播器與有界丟棄佇列 (`server.py`)
+在即時高頻行情架構下，為了防止慢客戶端（Slow Consumer）或 UI 暫時性渲染停頓引發記憶體緩衝區爆炸（Buffer Bloat），系統於 `server.py` 實作了基於有界佇列的非同步廣播池與嚴格連線安全驗證：
+
+1. **每客戶端獨立有界佇列 (Per-Client Bounded Queues)**：
+   - 每個連線建立專屬的 `asyncio.Queue(maxsize=100)`。
+   - 非阻塞廣播時，當佇列已滿（`q.full()`），立即透過 `q.get_nowait()` 淘汰最舊的數據幀（Drop-Oldest Strategy），確保推播即時性並杜絕記憶體洩漏。
+   - 支援跨執行緒安全調用：若在非同步主迴圈之外發布行情，自動調用 `loop.call_soon_threadsafe(_push)`。
+2. **專屬寫入協程 (Dedicated Client Writer Task)**：
+   - 每個 WebSocket 連線配置一個獨立的 `client_writer` 協程，透過 `await queue.get()` 非阻塞消費，並在發送前以 `await asyncio.sleep(0)` 協同讓渡控制權。
+   - 當客戶端斷線或協程取消時，自動清理其佇列與事件迴圈參照。
+3. **連線安全檢查與生命週期管控 (Origin & Token Validation / Lifecycle)**：
+   - 在桌面模式（`is_desktop_mode()`）下，嚴格檢驗連線 Origin（僅允許 127.0.0.1、localhost 與 Tauri IPC 來源）與連線 Token（支援 Query Param、`x-session-token` 或 Bearer Authorization 標頭）。未通過者即刻以 WebSocket Code 1008 關閉。
+   - 讀寫任務並行管理：使用 `asyncio.wait([writer_task, reader_task], return_when=asyncio.FIRST_COMPLETED)`，任一任務終止時自動取消並釋放剩餘任務。
+
 ```python
 class ConnectionManager:
-    """非同步 WebSocket 連線管理器，支援有界佇列與過期資料自動淘汰。"""
+    """Manages active WebSocket client connections with per-client bounded queues and drop-oldest strategy."""
+
     def __init__(self, max_queue_size: int = 100):
-        self.active_connections: List[WebSocket] = []
         self.max_queue_size = max_queue_size
+        self.client_queues: Dict[WebSocket, asyncio.Queue] = {}
+        self.client_loops: Dict[WebSocket, asyncio.AbstractEventLoop] = {}
 
-    async def broadcast(self, message: dict):
-        payload = json.dumps(message)
-        dead_sockets = []
-        for connection in self.active_connections:
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        queue = asyncio.Queue(maxsize=self.max_queue_size)
+        self.client_queues[websocket] = queue
+        try:
+            self.client_loops[websocket] = asyncio.get_running_loop()
+        except RuntimeError as loop_err:
+            logger.debug("Failed to acquire running loop for websocket: %s", loop_err)
+
+    def disconnect(self, websocket: WebSocket) -> None:
+        if websocket in self.client_queues:
+            del self.client_queues[websocket]
+        if websocket in self.client_loops:
+            del self.client_loops[websocket]
+
+    def broadcast_nowait(self, message: Dict[str, Any]) -> None:
+        """Non-blocking drop-oldest broadcast to all connected client queues."""
+        for ws, queue in list(self.client_queues.items()):
+            loop = self.client_loops.get(ws) or getattr(queue, "_loop", None)
+
+            def _push(q=queue, m=message):
+                if q.full():
+                    try:
+                        q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        logger.debug("Broadcaster queue already drained.")
+                try:
+                    q.put_nowait(m)
+                except asyncio.QueueFull:
+                    logger.debug("Broadcaster queue full; message dropped.")
+
+            if loop and loop.is_running():
+                try:
+                    current_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    current_loop = None
+                if current_loop is loop:
+                    _push()
+                else:
+                    loop.call_soon_threadsafe(_push)
+            else:
+                _push()
+
+    async def broadcast(self, message: Dict[str, Any]) -> None:
+        """Awaitable broadcast wrapper for async callers and testing."""
+        self.broadcast_nowait(message)
+
+    async def client_writer(self, websocket: WebSocket) -> None:
+        """Dedicated writer task for a single WebSocket connection."""
+        queue = self.client_queues.get(websocket)
+        if not queue:
+            return
+        try:
+            while True:
+                await asyncio.sleep(0)
+                msg = await queue.get()
+                await websocket.send_json(msg)
+                queue.task_done()
+        except (WebSocketDisconnect, asyncio.CancelledError):
+            logger.debug("Client writer disconnected")
+        except Exception as e:
+            logger.debug("Client writer error on %s: %s", websocket, e)
+        finally:
+            self.disconnect(websocket)
+
+    async def close_all(self) -> None:
+        """Gracefully closes all active client connections during server shutdown."""
+        for ws in list(self.client_queues.keys()):
             try:
-                # 非阻塞發送，若緩衝區溢位則跳過舊數據保證終端不卡頓
-                await asyncio.wait_for(connection.send_text(payload), timeout=0.05)
-            except (asyncio.TimeoutError, Exception):
-                dead_sockets.append(connection)
+                await ws.close(code=1001, reason="Server shutting down")
+            except Exception as e:
+                logger.debug("Client websocket close error: %s", e)
+        self.client_queues.clear()
+        self.client_loops.clear()
 
-        for dead in dead_sockets:
-            if dead in self.active_connections:
-                self.active_connections.remove(dead)
+
+@app.websocket("/ws/live")
+async def websocket_live_endpoint(websocket: WebSocket):
+    """Real-time multiplexed quote, bar, and status stream with origin/token authentication and bounded queues."""
+    if is_desktop_mode():
+        origin = websocket.headers.get("origin")
+        if not is_allowed_origin(origin):
+            logger.warning("Rejected WebSocket connection from unauthorized origin: %s", origin)
+            await websocket.close(code=1008, reason="Unauthorized origin")
+            return
+
+        token = websocket.query_params.get("token") or websocket.headers.get("x-session-token")
+        if not token:
+            auth_header = websocket.headers.get("authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:].strip()
+        if not verify_token(token):
+            logger.warning("Rejected unauthorized WebSocket connection: missing or invalid session token")
+            await websocket.close(code=1008, reason="Unauthorized: invalid or missing session token")
+            return
+
+    await manager.connect(websocket)
+    try:
+        await websocket.send_json({"type": "status", "status": current_status})
+        # 推送快取之最新行情報價...
+
+        async def client_reader():
+            try:
+                while True:
+                    await websocket.receive_text()
+            except (WebSocketDisconnect, asyncio.CancelledError):
+                logger.debug("Client reader disconnected cleanly")
+            except Exception as e:
+                logger.debug("Client reader error: %s", e)
+
+        writer_coro = manager.client_writer(websocket)
+        writer_task = asyncio.create_task(writer_coro)
+        reader_coro = client_reader()
+        reader_task = asyncio.create_task(reader_coro)
+
+        done, pending = await asyncio.wait(
+            [writer_task, reader_task],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        for t in done:
+            try:
+                t.result()
+            except (asyncio.CancelledError, WebSocketDisconnect):
+                logger.debug("Task terminated on disconnect")
+            except Exception as e:
+                logger.debug("WebSocket task ended with: %s", e)
+        for t in pending:
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                logger.debug("Pending task cancelled")
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        logger.debug("Live endpoint disconnected")
+    except Exception as e:
+        logger.warning("Live WebSocket endpoint encountered an error: %s", e)
+    finally:
+        manager.disconnect(websocket)
 ```
 
 ---
@@ -478,7 +702,7 @@ function handleLiveBar(symbol, bar) {
 
 ## 6. TDD 規格與 16 道防禦閘門
 
-全系統遵循極限驅動開發（TDD）原則，在 [tests/test_feedback_fixes_tdd.py](file:///Users/harryng/Downloads/AI%20gen%20auto%20tool/Stock%20website/tests/test_feedback_fixes_tdd.py) 建立了 16 道回歸防禦邊界：
+全系統遵循極限驅動開發（TDD）原則，在 [tests/test_feedback_fixes_tdd.py](tests/test_feedback_fixes_tdd.py) 建立了 16 道回歸防禦邊界：
 
 | 縫隙編號 (Seam) | 測試驗收名稱 | 核心公共介面斷言 | 防護目標 |
 | :--- | :--- | :--- | :--- |
@@ -488,7 +712,7 @@ function handleLiveBar(symbol, bar) {
 | **Seam 4** | `test_seam4_drawing_toolbar_isolation_and_ruler` | `#btnMagnet`, `#drawingToolbar`, `ruler` | 驗證繪圖工具圖層隔離與測量尺精確性 |
 | **Seam 5** | `test_seam5_risk_reward_box_non_obstructing` | `.risk-reward-close-btn` | 驗證盈虧比計算盒具備專屬關閉按鈕且不遮蔽圖表 |
 | **Seam 6** | `test_seam6_tradingview_widget_studies` | `studies_overrides`, `EMA colors` | 驗證方案 C 組件指標自訂色（紫/橙/粉）精準注入 |
-| **Seam 7** | `test_seam7_watchlist_seed_guard_on_deletion` | `is_deleted = 1` 墓碑標記 | 驗證被刪除之自選股絕不在重啟後死灰復燃 |
+| **Seam 7** | `test_seam7_watchlist_seed_guard_on_deletion` | `preferences.watchlist_seeded` 防死灰復燃旗標 | 驗證被刪除之自選股絕不在重啟後死灰復燃 |
 | **Seam 8** | `test_seam8_indicator_horizontal_price_lines_disabled` | `priceLineVisible: false` | 關閉各均線之水平價格延伸線，還原圖表乾淨視野 |
 | **Seam 9** | `test_seam9_legend_collapse_and_visibility_toggle` | `#btnToggleLegend`, `legend.collapsed` | 驗證左上方技術指標圖例之一鍵折疊收納功能 |
 | **Seam 10** | `test_seam10_ai_copilot_removed` | `aiCopilotBtn` 徹底移除 | 依使用者指示移除頂部冗餘 AI Copilot 按鈕 |

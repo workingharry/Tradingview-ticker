@@ -37,6 +37,13 @@
     }
     if (subCharts[paneNum]) {
       try {
+        if (subCharts[paneNum].ro && typeof subCharts[paneNum].ro.disconnect === "function") {
+          subCharts[paneNum].ro.disconnect();
+        }
+      } catch (e) {
+        console.warn("[disposeSubPane] ro.disconnect() error for pane " + paneNum, e);
+      }
+      try {
         if (subCharts[paneNum].chart && typeof subCharts[paneNum].chart.remove === "function") {
           subCharts[paneNum].chart.remove();
         }
@@ -57,6 +64,18 @@
     }
     var container = document.getElementById("splitChart" + paneNum);
     if (container) {
+      try {
+        var iframes = container.querySelectorAll("iframe");
+        for (var i = 0; i < iframes.length; i++) {
+          try {
+            iframes[i].src = "about:blank";
+          } catch (iframeErr) {
+            console.warn("[disposeSubPane] iframe cleanup error for pane " + paneNum, iframeErr);
+          }
+        }
+      } catch (e) {
+        console.warn("[disposeSubPane] iframes lookup error for pane " + paneNum, e);
+      }
       container.innerHTML = "";
     }
   }
@@ -221,8 +240,26 @@
       ema21: ema21Series,
       ema30: ema30Series,
       ema200: ema200Series,
-      lastBar: null
+      lastBar: null,
+      ro: null
     };
+    if (typeof ResizeObserver !== "undefined") {
+      try {
+        var ro = new ResizeObserver(function(entries) {
+          if (!entries || entries.length === 0) return;
+          if (gen !== paneGen[paneNum] || subCharts[paneNum] !== subObj) return;
+          var sw = container.clientWidth;
+          var sh = container.clientHeight;
+          if (sw > 0 && sh > 0 && subObj.chart) {
+            subObj.chart.applyOptions({ width: sw, height: sh });
+          }
+        });
+        ro.observe(container);
+        subObj.ro = ro;
+      } catch (roErr) {
+        console.warn("[loadSubChart] ResizeObserver init error for pane " + paneNum, roErr);
+      }
+    }
     subCharts[paneNum] = subObj;
 
     var ac = null;
@@ -1028,6 +1065,13 @@
 // ==========================================================================
 // Safe Numerical Helpers
 // ==========================================================================
+
+function isValidPrice(v) {
+  return typeof v === "number" && !isNaN(v) && isFinite(v) && v > 0;
+}
+if (typeof window !== "undefined") {
+  window.isValidPrice = isValidPrice;
+}
 
 function safeNum(val, fallback) {
   if (fallback === undefined) fallback = 0;
@@ -2692,15 +2736,18 @@ function handleLiveBar(symbol, bar) {
   if (isHistoryLoading) return;
   if (symbol !== activeSymbol || !candleSeries || !bar) return;
 
+  var price = safeNum(bar.close);
+  if (!isValidPrice(price)) return;
+
   var barTime = normalizeBarTime(bar.time);
   var open = safeNum(bar.open);
   var high = safeNum(bar.high);
   var low = safeNum(bar.low);
-  var close = safeNum(bar.close);
+  var close = price;
   var volume = safeNum(bar.volume);
 
   if (barTime <= 0) return;
-  if (isNaN(open) || isNaN(high) || isNaN(low) || isNaN(close) || close <= 0) return;
+  if (isNaN(open) || isNaN(high) || isNaN(low) || !isValidPrice(close)) return;
 
   var tfSec = TF_SECONDS[activeTimeframe] || 60;
   var lastRawBar = (currentRawBars.length > 0) ? currentRawBars[currentRawBars.length - 1] : null;
@@ -2834,22 +2881,48 @@ function handleLiveBar(symbol, bar) {
         var scObj = subCharts[pId];
         var scTf = paneTimeframes[pId] || "1D";
         if (scTf === activeTimeframe) {
-          subCharts[pId].series.update({
+          var sameBar = {
             time: barTime,
             open: open,
             high: high,
             low: low,
             close: close
-          });
-          scObj.lastBar = { time: barTime, open: open, high: high, low: low, close: close };
+          };
+          subCharts[pId].series.update(sameBar);
+          scObj.lastBar = sameBar;
         } else if (scObj.lastBar) {
           var lb = scObj.lastBar;
-          lb.high = Math.max(lb.high, high, close);
-          lb.low = Math.min(lb.low, low, close);
-          lb.close = close;
-          subCharts[pId].series.update(lb);
+          var isDateString = (typeof lb.time === "string" && (lb.time.indexOf("-") !== -1 || isNaN(Number(lb.time)))) ||
+                             (typeof lb.time === "object" && lb.time !== null && lb.time.year !== undefined);
+          if (isDateString) {
+            lb.high = Math.max(lb.high, price);
+            lb.low = Math.min(lb.low, price);
+            lb.close = price;
+            subCharts[pId].series.update(lb);
+          } else {
+            var step = TF_SECONDS[scTf] || 60;
+            var bucketTime = Math.floor(barTime / step) * step;
+            if (bucketTime === lb.time) {
+              lb.high = Math.max(lb.high, price);
+              lb.low = Math.min(lb.low, price);
+              lb.close = price;
+              subCharts[pId].series.update(lb);
+            } else if (bucketTime > lb.time) {
+              var newCandle = {
+                time: bucketTime,
+                open: price,
+                high: price,
+                low: price,
+                close: price
+              };
+              scObj.lastBar = newCandle;
+              subCharts[pId].series.update(newCandle);
+            }
+          }
         }
-      } catch (subErr) {}
+      } catch (subErr) {
+        console.warn("[handleLiveBar] sub-chart update error for pane " + pId, subErr);
+      }
     }
   }
 }
