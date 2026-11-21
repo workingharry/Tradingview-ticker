@@ -11,6 +11,14 @@ export interface ChartSyncParticipant {
   chart: IChartApi;
   series: ISeriesApi<SeriesType, Time>;
   getBars: () => Array<{ time: Time; close?: number }>;
+  symbol?: string;
+  syncPrice?: boolean; // When false or when symbols differ, crosshair aligns to bar close instead of foreign price
+}
+
+export interface FloorBarResult {
+  time: any;
+  index: number;
+  close?: number;
 }
 
 export function normalizeToUtcSec(time: any): number {
@@ -31,26 +39,41 @@ export function normalizeToUtcSec(time: any): number {
 }
 
 /**
- * Binary search to find the floor bar time (highest timestamp <= targetSec).
- * Essential for aligning higher timeframes (1h, 1D) with lower timeframes (15m).
+ * Binary search to find the floor bar (highest timestamp <= targetSec).
+ * Returns O(1) floor result with index and close price without subsequent array scans.
  */
-export function findFloorBarTime(bars: Array<{ time: any }>, targetSec: number): any {
+export function findFloorBar(bars: Array<{ time: any; close?: number }>, targetSec: number): FloorBarResult | null {
   if (!bars || bars.length === 0 || targetSec <= 0) return null;
   let low = 0;
   let high = bars.length - 1;
-  let best: any = null;
+  let bestIndex = -1;
 
   while (low <= high) {
     const mid = (low + high) >> 1;
     const barSec = normalizeToUtcSec(bars[mid].time);
     if (barSec <= targetSec) {
-      best = bars[mid].time;
+      bestIndex = mid;
       low = mid + 1;
     } else {
       high = mid - 1;
     }
   }
-  return best;
+
+  if (bestIndex === -1) return null;
+  const bestBar = bars[bestIndex];
+  return {
+    time: bestBar.time,
+    index: bestIndex,
+    close: bestBar.close
+  };
+}
+
+/**
+ * Backward-compatible helper returning solely the Time of the floor bar.
+ */
+export function findFloorBarTime(bars: Array<{ time: any; close?: number }>, targetSec: number): any {
+  const res = findFloorBar(bars, targetSec);
+  return res ? res.time : null;
 }
 
 export class CrosshairSyncManager {
@@ -134,21 +157,29 @@ export class CrosshairSyncManager {
 
         try {
           const bars = p.getBars();
-          const floorTime = findFloorBarTime(bars, sourceUtcSec);
+          const floor = findFloorBar(bars, sourceUtcSec);
 
-          if (floorTime !== null) {
-            // If source price is valid, align crosshair at source price, otherwise use matching bar close
-            let targetPrice = sourcePrice;
-            if (targetPrice === null || isNaN(targetPrice)) {
-              const matchedBar = bars.find((b) => b.time === floorTime);
-              targetPrice = matchedBar?.close ?? 100;
+          if (floor !== null) {
+            // Multi-ticker / decoupled crosshair protection:
+            // When symbols differ or syncPrice === false, align to the target instrument's native bar close
+            const isDifferentSymbol = Boolean(
+              sourceParticipant?.symbol && p.symbol && sourceParticipant.symbol !== p.symbol
+            );
+            const decouplePrice = p.syncPrice === false || isDifferentSymbol;
+
+            let targetPrice: number;
+            if (decouplePrice || sourcePrice === null || isNaN(sourcePrice)) {
+              targetPrice = floor.close ?? 100;
+            } else {
+              targetPrice = sourcePrice;
             }
-            p.chart.setCrosshairPosition(targetPrice, floorTime, p.series);
+
+            p.chart.setCrosshairPosition(targetPrice, floor.time, p.series);
           } else {
             p.chart.clearCrosshairPosition();
           }
         } catch {
-          // Ignore sync errors on busy/resizing charts
+          // Ignore disposed chart error
         }
       }
     } finally {

@@ -60,6 +60,7 @@ describe('positionSizer', () => {
     expect(res.shares).toBe(0);
     expect(res.actualRiskDollars).toBe(0);
     expect(res.adrStatus).toBe('none');
+    expect(res.reason).toBe('entry_equals_stop');
   });
 
   it('strictly caps shares to maxAllocationPercent to prevent overleveraged blowup', () => {
@@ -108,5 +109,107 @@ describe('positionSizer', () => {
     expect(res.valid).toBe(true);
     expect(res.adrStatus).toBe('wide');
     expect(res.adrMultiplier).toBe(2.0);
+  });
+
+  // --- Adversarial & Boundary Validation Tests ---
+
+  it('rejects NaN or non-finite inputs without polluting outputs', () => {
+    const res = calculatePositionMetrics({
+      accountSize: NaN,
+      riskPercent: 1.0,
+      maxAllocationPercent: 25.0,
+      entryPrice: 100,
+      stopPrice: 95,
+      targetPrice: 110,
+      adr20Percent: 4.0
+    });
+    expect(res.valid).toBe(false);
+    expect(res.shares).toBe(0);
+    expect(res.reason).toBe('invalid_inputs');
+
+    const res2 = calculatePositionMetrics({
+      accountSize: 100000,
+      riskPercent: NaN,
+      maxAllocationPercent: 25.0,
+      entryPrice: 100,
+      stopPrice: 95,
+      targetPrice: 110,
+      adr20Percent: 4.0
+    });
+    expect(res2.valid).toBe(false);
+    expect(res2.shares).toBe(0);
+    expect(res2.reason).toBe('invalid_inputs');
+  });
+
+  it('rejects negative or zero riskPercent / maxAllocationPercent', () => {
+    const res = calculatePositionMetrics({
+      accountSize: 100000,
+      riskPercent: -1.0,
+      maxAllocationPercent: 25.0,
+      entryPrice: 100,
+      stopPrice: 95,
+      targetPrice: 110,
+      adr20Percent: 4.0
+    });
+    expect(res.valid).toBe(false);
+    expect(res.reason).toBe('invalid_inputs');
+
+    const resZero = calculatePositionMetrics({
+      accountSize: 100000,
+      riskPercent: 0,
+      maxAllocationPercent: 25.0,
+      entryPrice: 100,
+      stopPrice: 95,
+      targetPrice: 110,
+      adr20Percent: 4.0
+    });
+    expect(resZero.valid).toBe(false);
+    expect(resZero.reason).toBe('invalid_inputs');
+  });
+
+  it('rejects inverted target price direction (Long target <= entry)', () => {
+    const res = calculatePositionMetrics({
+      accountSize: 100000,
+      riskPercent: 1.0,
+      maxAllocationPercent: 25.0,
+      entryPrice: 100,
+      stopPrice: 95,
+      targetPrice: 98, // Inverted: Target below entry on LONG!
+      adr20Percent: 4.0
+    });
+    expect(res.valid).toBe(false);
+    expect(res.side).toBe('LONG');
+    expect(res.reason).toBe('target_below_or_equal_entry');
+  });
+
+  it('rejects inverted target price direction (Short target >= entry)', () => {
+    const res = calculatePositionMetrics({
+      accountSize: 100000,
+      riskPercent: 1.0,
+      maxAllocationPercent: 25.0,
+      entryPrice: 100,
+      stopPrice: 105,
+      targetPrice: 102, // Inverted: Target above entry on SHORT!
+      adr20Percent: 4.0
+    });
+    expect(res.valid).toBe(false);
+    expect(res.side).toBe('SHORT');
+    expect(res.reason).toBe('target_above_or_equal_entry');
+  });
+
+  it('marks valid=false when calculated shares is zero due to insufficient risk budget', () => {
+    const res = calculatePositionMetrics({
+      accountSize: 500,           // Very small account
+      riskPercent: 0.5,           // $2.50 max risk dollars
+      maxAllocationPercent: 25.0,
+      entryPrice: 100,
+      stopPrice: 90,              // $10 risk per share -> rawRiskShares = floor(2.5/10) = 0!
+      targetPrice: 130,
+      adr20Percent: 4.0
+    });
+    expect(res.valid).toBe(false);
+    expect(res.shares).toBe(0);
+    expect(res.actualRiskDollars).toBe(0);
+    expect(res.reason).toBe('zero_shares_insufficient_budget');
   });
 });

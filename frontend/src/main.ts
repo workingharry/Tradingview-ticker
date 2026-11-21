@@ -1,13 +1,17 @@
 import { createMultiPaneChart, type MultiPaneChartBundle } from './chart/createMultiPaneChart';
 import { RiskRewardPrimitive } from './chart/primitives/RiskRewardPrimitive';
-import { apiFetch, openLiveWebSocket } from './api/client';
+import { apiFetch, LiveFeed, type LiveMessage, type FeedState } from './api/client';
 import type { Time } from 'lightweight-charts';
 
 let chartBundle: MultiPaneChartBundle | null = null;
 let currentSymbol = 'NVDA';
 let currentTimeframe = '1D';
 let currentBars: any[] = [];
-let liveSocket: WebSocket | null = null;
+let liveFeed: LiveFeed | null = null;
+
+// Concurrency guards for rapid symbol switching
+let currentLoadGen = 0;
+let activeAbortController: AbortController | null = null;
 
 async function initTerminal() {
   const container = document.getElementById('chartContainer');
@@ -15,8 +19,8 @@ async function initTerminal() {
 
   chartBundle = createMultiPaneChart(container);
 
+  setupLiveFeed();
   await loadHistory(currentSymbol, currentTimeframe);
-  connectWebSocket();
 
   // Attach button events
   const btnRR = document.getElementById('btnAttachRR');
@@ -53,10 +57,98 @@ async function initTerminal() {
   });
 }
 
+function updateStatusDot(state: FeedState) {
+  const dot = document.getElementById('statusDot');
+  if (!dot) return;
+  if (state === 'open') {
+    dot.className = 'status-dot connected';
+  } else if (state === 'connecting' || state === 'reconnecting') {
+    dot.className = 'status-dot connecting';
+  } else {
+    dot.className = 'status-dot';
+  }
+}
+
+function setupLiveFeed() {
+  if (liveFeed) {
+    liveFeed.stop();
+  }
+
+  liveFeed = new LiveFeed({
+    path: '/ws/live',
+    onStateChange: (state) => {
+      updateStatusDot(state);
+    },
+    onGap: (gap) => {
+      console.warn('[LiveFeed] Bar gap detected:', gap);
+      // Re-fetch latest history to heal gap if it affects current symbol
+      if (isSymbolMatch(gap.symbol, currentSymbol)) {
+        loadHistory(currentSymbol, currentTimeframe);
+      }
+    }
+  });
+
+  liveFeed.subscribe((msg: LiveMessage) => {
+    if (msg.type === 'bar' && msg.bar && chartBundle && isSymbolMatch(msg.symbol, currentSymbol)) {
+      const b = msg.bar;
+      const barTime = normalizeTime(b.time);
+
+      if (currentBars.length > 0 && normalizeTime(currentBars[currentBars.length - 1].time) === barTime) {
+        currentBars[currentBars.length - 1] = b;
+      } else {
+        currentBars.push(b);
+      }
+
+      chartBundle.candleSeries.update({
+        time: barTime,
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close
+      });
+
+      chartBundle.volumeSeries.update({
+        time: barTime,
+        value: b.volume || 0,
+        color: b.close >= b.open ? 'rgba(34, 197, 94, 0.45)' : 'rgba(239, 68, 68, 0.45)'
+      });
+    }
+  });
+
+  liveFeed.start();
+}
+
+function isSymbolMatch(msgSymbol?: string, targetSymbol?: string): boolean {
+  if (!msgSymbol || !targetSymbol) return false;
+  const s1 = msgSymbol.toUpperCase();
+  const s2 = targetSymbol.toUpperCase();
+  if (s1 === s2) return true;
+  if (s1.endsWith(':' + s2) || s2.endsWith(':' + s1)) return true;
+  return false;
+}
+
 async function loadHistory(symbol: string, timeframe: string) {
   if (!chartBundle) return;
+
+  // 1. Abort any previous in-flight request for a superseded symbol
+  if (activeAbortController) {
+    activeAbortController.abort();
+  }
+  const controller = new AbortController();
+  activeAbortController = controller;
+  const loadGen = ++currentLoadGen;
+
   try {
-    const data = await apiFetch<any>(`/api/history?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=300`);
+    const data = await apiFetch<any>(
+      `/api/history?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=300`,
+      { signal: controller.signal }
+    );
+
+    // 2. Generation guard: If a newer symbol was requested while this fetch was in flight, discard response
+    if (loadGen !== currentLoadGen) {
+      return;
+    }
+
     const bars: any[] = Array.isArray(data) ? data : data?.bars || [];
 
     if (bars.length > 0) {
@@ -78,7 +170,7 @@ async function loadHistory(symbol: string, timeframe: string) {
       chartBundle.candleSeries.setData(candleData);
       chartBundle.volumeSeries.setData(volumeData);
 
-      // Simple mock/seed RS line for demonstrative multi-pane view
+      // Demonstrative RS line
       const firstClose = candleData[0].close || 1;
       const rsData = candleData.map((b: any) => ({
         time: b.time,
@@ -88,8 +180,16 @@ async function loadHistory(symbol: string, timeframe: string) {
 
       chartBundle.chart.timeScale().fitContent();
     }
-  } catch (err) {
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      // Intentionally aborted due to rapid symbol switch
+      return;
+    }
     console.error('[loadHistory] Failed to load history for', symbol, err);
+  } finally {
+    if (activeAbortController === controller) {
+      activeAbortController = null;
+    }
   }
 }
 
@@ -97,7 +197,6 @@ function attachDemoRiskReward() {
   if (!chartBundle) return;
   const candleSeries = chartBundle.candleSeries;
 
-  // Default price levels around current last price
   const lastBar = currentBars.length > 0 ? currentBars[currentBars.length - 1] : { time: Math.floor(Date.now() / 1000) as Time, close: 100 };
   const lastPrice = lastBar.close || 100;
   const entryPrice = Number(lastPrice.toFixed(2));
@@ -127,54 +226,6 @@ function attachDemoRiskReward() {
   });
 
   candleSeries.attachPrimitive(primitive);
-}
-
-async function connectWebSocket() {
-  try {
-    liveSocket = await openLiveWebSocket('/ws/live');
-    liveSocket.onopen = () => {
-      const dot = document.getElementById('statusDot');
-      if (dot) dot.className = 'status-dot connected';
-    };
-    liveSocket.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        const isMatch = msg.symbol === currentSymbol ||
-                        (typeof msg.symbol === 'string' && msg.symbol.endsWith(':' + currentSymbol)) ||
-                        (typeof currentSymbol === 'string' && currentSymbol.endsWith(':' + msg.symbol));
-        if (msg.type === 'bar' && isMatch && chartBundle) {
-          const b = msg.bar;
-          const barTime = normalizeTime(b.time);
-          if (currentBars.length > 0 && normalizeTime(currentBars[currentBars.length - 1].time) === barTime) {
-            currentBars[currentBars.length - 1] = b;
-          } else {
-            currentBars.push(b);
-          }
-          chartBundle.candleSeries.update({
-            time: barTime,
-            open: b.open,
-            high: b.high,
-            low: b.low,
-            close: b.close
-          });
-          chartBundle.volumeSeries.update({
-            time: barTime,
-            value: b.volume || 0,
-            color: b.close >= b.open ? 'rgba(34, 197, 94, 0.45)' : 'rgba(239, 68, 68, 0.45)'
-          });
-        }
-      } catch (e) {
-        console.warn('[WS] Parse error', e);
-      }
-    };
-    liveSocket.onclose = () => {
-      const dot = document.getElementById('statusDot');
-      if (dot) dot.className = 'status-dot';
-      setTimeout(connectWebSocket, 3000);
-    };
-  } catch (err) {
-    console.warn('[WS] Connection failed', err);
-  }
 }
 
 function normalizeTime(t: any): Time {

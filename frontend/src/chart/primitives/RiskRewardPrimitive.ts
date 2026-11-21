@@ -44,6 +44,9 @@ export interface RiskRewardCallbacks {
 }
 
 export class RiskRewardPrimitive implements ISeriesPrimitive<Time> {
+  // Shared drag counter across all primitive instances to prevent premature unlock
+  private static _activeDragCount = 0;
+
   private _state: RiskRewardState;
   private _callbacks: RiskRewardCallbacks;
   private _chart: IChartApi | null = null;
@@ -54,6 +57,7 @@ export class RiskRewardPrimitive implements ISeriesPrimitive<Time> {
   private _coords: LayoutCoords | null = null;
   private _metrics: PositionSizerMetrics;
   private _activeDrag: DragHandle = null;
+  private _hasInteractionLock = false;
   private _paneView: RiskRewardPaneView;
 
   constructor(initialState: RiskRewardState, callbacks: RiskRewardCallbacks = {}) {
@@ -70,9 +74,6 @@ export class RiskRewardPrimitive implements ISeriesPrimitive<Time> {
     this._container = this._chart.chartElement();
 
     this._container.addEventListener('pointerdown', this._onPointerDown);
-    window.addEventListener('pointermove', this._onPointerMove);
-    window.addEventListener('pointerup', this._onPointerUp);
-    window.addEventListener('pointercancel', this._onPointerUp);
     this.updateAllViews();
   }
 
@@ -80,9 +81,7 @@ export class RiskRewardPrimitive implements ISeriesPrimitive<Time> {
     if (this._container) {
       this._container.removeEventListener('pointerdown', this._onPointerDown);
     }
-    window.removeEventListener('pointermove', this._onPointerMove);
-    window.removeEventListener('pointerup', this._onPointerUp);
-    window.removeEventListener('pointercancel', this._onPointerUp);
+    this._removeWindowDragListeners();
     this._unlockChartInteraction();
 
     this._chart = null;
@@ -211,21 +210,61 @@ export class RiskRewardPrimitive implements ISeriesPrimitive<Time> {
     }
 
     this._activeDrag = handle;
-    // 關鍵：拖曳控制線期間鎖定圖表捲動與縮放
-    this._chart?.applyOptions({ handleScroll: false, handleScale: false });
+    this._attachWindowDragListeners();
+    this._lockChartInteraction();
   };
+
+  private _attachWindowDragListeners(): void {
+    window.addEventListener('pointermove', this._onPointerMove);
+    window.addEventListener('pointerup', this._onPointerUp);
+    window.addEventListener('pointercancel', this._onPointerUp);
+  }
+
+  private _removeWindowDragListeners(): void {
+    window.removeEventListener('pointermove', this._onPointerMove);
+    window.removeEventListener('pointerup', this._onPointerUp);
+    window.removeEventListener('pointercancel', this._onPointerUp);
+  }
 
   private _onPointerMove = (e: PointerEvent): void => {
     if (!this._activeDrag || !this._series) return;
     const pt = this._getLocalPoint(e);
     if (!pt) return;
 
-    const nextPrice = this._series.coordinateToPrice(pt.y);
-    if (nextPrice === null || !Number.isFinite(nextPrice) || nextPrice <= 0) return;
+    const rawPrice = this._series.coordinateToPrice(pt.y);
+    if (rawPrice === null || !Number.isFinite(rawPrice) || rawPrice <= 0) return;
 
-    if (this._activeDrag === 'entry') this._state.entryPrice = nextPrice;
-    else if (this._activeDrag === 'stop') this._state.stopPrice = nextPrice;
-    else if (this._activeDrag === 'target') this._state.targetPrice = nextPrice;
+    const nextPrice = Number(rawPrice.toFixed(2));
+    const minDelta = 0.01;
+
+    // Bounds check to strictly avoid price inversion and preserve trade side integrity
+    const isLong = this._state.entryPrice >= this._state.stopPrice;
+
+    if (this._activeDrag === 'entry') {
+      if (isLong) {
+        // Long: stopPrice < entryPrice < targetPrice
+        this._state.entryPrice = Math.max(this._state.stopPrice + minDelta, Math.min(this._state.targetPrice - minDelta, nextPrice));
+      } else {
+        // Short: targetPrice < entryPrice < stopPrice
+        this._state.entryPrice = Math.max(this._state.targetPrice + minDelta, Math.min(this._state.stopPrice - minDelta, nextPrice));
+      }
+    } else if (this._activeDrag === 'stop') {
+      if (isLong) {
+        // Long: stopPrice < entryPrice
+        this._state.stopPrice = Math.min(this._state.entryPrice - minDelta, nextPrice);
+      } else {
+        // Short: stopPrice > entryPrice
+        this._state.stopPrice = Math.max(this._state.entryPrice + minDelta, nextPrice);
+      }
+    } else if (this._activeDrag === 'target') {
+      if (isLong) {
+        // Long: targetPrice > entryPrice
+        this._state.targetPrice = Math.max(this._state.entryPrice + minDelta, nextPrice);
+      } else {
+        // Short: targetPrice < entryPrice
+        this._state.targetPrice = Math.min(this._state.entryPrice - minDelta, nextPrice);
+      }
+    }
 
     this._metrics = calculatePositionMetrics(this._state);
     this.updateAllViews();
@@ -235,12 +274,29 @@ export class RiskRewardPrimitive implements ISeriesPrimitive<Time> {
   private _onPointerUp = (): void => {
     if (!this._activeDrag) return;
     this._activeDrag = null;
+    this._removeWindowDragListeners();
     this._unlockChartInteraction();
     this._callbacks.onChange?.({ ...this._state }, this._metrics);
   };
 
+  private _lockChartInteraction(): void {
+    if (!this._hasInteractionLock) {
+      this._hasInteractionLock = true;
+      if (RiskRewardPrimitive._activeDragCount === 0) {
+        this._chart?.applyOptions({ handleScroll: false, handleScale: false });
+      }
+      RiskRewardPrimitive._activeDragCount++;
+    }
+  }
+
   private _unlockChartInteraction(): void {
-    this._chart?.applyOptions({ handleScroll: true, handleScale: true });
+    if (this._hasInteractionLock) {
+      this._hasInteractionLock = false;
+      RiskRewardPrimitive._activeDragCount = Math.max(0, RiskRewardPrimitive._activeDragCount - 1);
+      if (RiskRewardPrimitive._activeDragCount === 0) {
+        this._chart?.applyOptions({ handleScroll: true, handleScale: true });
+      }
+    }
   }
 }
 
@@ -336,7 +392,7 @@ class RiskRewardRenderer implements IPrimitivePaneRenderer {
       const capTag = m.cappedByAllocation ? ' [CAP]' : '';
       const label = m.valid
         ? `${m.side} | R:R ${m.rrRatio.toFixed(2)} | ${m.shares} 股 (${m.allocationPercent.toFixed(1)}%${capTag})${adrTag}`
-        : '無效價位（Entry = Stop）';
+        : '無效價位';
 
       const hudColor =
         m.adrStatus === 'wide' ? '#f87171' :

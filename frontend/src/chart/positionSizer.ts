@@ -21,28 +21,99 @@ export interface PositionSizerMetrics {
   rrRatio: number;
   adrMultiplier: number | null;
   adrStatus: 'tight' | 'ok' | 'wide' | 'none';
+  reason?: string;
 }
 
 export function calculatePositionMetrics(input: PositionSizerInput): PositionSizerMetrics {
   const { accountSize, riskPercent, maxAllocationPercent, entryPrice, stopPrice, targetPrice, adr20Percent } = input;
-  const side: 'LONG' | 'SHORT' = entryPrice >= stopPrice ? 'LONG' : 'SHORT';
-  const riskPerShare = Math.abs(entryPrice - stopPrice);
 
+  // 1. Strict finite & positive numerical validation
   if (
     !Number.isFinite(accountSize) || accountSize <= 0 ||
+    !Number.isFinite(riskPercent) || riskPercent <= 0 ||
+    !Number.isFinite(maxAllocationPercent) || maxAllocationPercent <= 0 ||
     !Number.isFinite(entryPrice) || entryPrice <= 0 ||
     !Number.isFinite(stopPrice) || stopPrice <= 0 ||
-    !Number.isFinite(riskPerShare) || riskPerShare < 1e-6
+    !Number.isFinite(targetPrice) || targetPrice <= 0
   ) {
     return {
-      valid: false, side, riskPerShare: 0, stopPercent: 0, shares: 0,
-      positionValue: 0, allocationPercent: 0, actualRiskDollars: 0,
-      cappedByAllocation: false, rrRatio: 0, adrMultiplier: null, adrStatus: 'none'
+      valid: false,
+      side: 'LONG',
+      riskPerShare: 0,
+      stopPercent: 0,
+      shares: 0,
+      positionValue: 0,
+      allocationPercent: 0,
+      actualRiskDollars: 0,
+      cappedByAllocation: false,
+      rrRatio: 0,
+      adrMultiplier: null,
+      adrStatus: 'none',
+      reason: 'invalid_inputs'
     };
   }
 
-  const maxRiskDollars = accountSize * (Math.max(0, riskPercent) / 100);
-  const maxPositionDollars = accountSize * (Math.max(0, maxAllocationPercent) / 100);
+  // 2. Division by zero / indistinguishable price check
+  const riskPerShare = Math.abs(entryPrice - stopPrice);
+  if (riskPerShare < 1e-6) {
+    return {
+      valid: false,
+      side: 'LONG',
+      riskPerShare: 0,
+      stopPercent: 0,
+      shares: 0,
+      positionValue: 0,
+      allocationPercent: 0,
+      actualRiskDollars: 0,
+      cappedByAllocation: false,
+      rrRatio: 0,
+      adrMultiplier: null,
+      adrStatus: 'none',
+      reason: 'entry_equals_stop'
+    };
+  }
+
+  const side: 'LONG' | 'SHORT' = entryPrice > stopPrice ? 'LONG' : 'SHORT';
+
+  // 3. Trade direction & target alignment validation
+  if (side === 'LONG' && targetPrice <= entryPrice) {
+    return {
+      valid: false,
+      side,
+      riskPerShare,
+      stopPercent: (riskPerShare / entryPrice) * 100,
+      shares: 0,
+      positionValue: 0,
+      allocationPercent: 0,
+      actualRiskDollars: 0,
+      cappedByAllocation: false,
+      rrRatio: 0,
+      adrMultiplier: null,
+      adrStatus: 'none',
+      reason: 'target_below_or_equal_entry'
+    };
+  }
+  if (side === 'SHORT' && targetPrice >= entryPrice) {
+    return {
+      valid: false,
+      side,
+      riskPerShare,
+      stopPercent: (riskPerShare / entryPrice) * 100,
+      shares: 0,
+      positionValue: 0,
+      allocationPercent: 0,
+      actualRiskDollars: 0,
+      cappedByAllocation: false,
+      rrRatio: 0,
+      adrMultiplier: null,
+      adrStatus: 'none',
+      reason: 'target_above_or_equal_entry'
+    };
+  }
+
+  // 4. Position sizing math
+  const maxRiskDollars = accountSize * (riskPercent / 100);
+  const maxPositionDollars = accountSize * (maxAllocationPercent / 100);
 
   const rawRiskShares = Math.floor(maxRiskDollars / riskPerShare);
   const maxAllocShares = Math.floor(maxPositionDollars / entryPrice);
@@ -57,12 +128,32 @@ export function calculatePositionMetrics(input: PositionSizerInput): PositionSiz
   const rewardPerShare = side === 'LONG' ? (targetPrice - entryPrice) : (entryPrice - targetPrice);
   const rrRatio = rewardPerShare / riskPerShare;
 
-  const adrMultiplier = adr20Percent > 0 ? stopPercent / adr20Percent : null;
+  const safeAdr = Number.isFinite(adr20Percent) && adr20Percent > 0 ? adr20Percent : null;
+  const adrMultiplier = safeAdr ? stopPercent / safeAdr : null;
   let adrStatus: 'tight' | 'ok' | 'wide' | 'none' = 'none';
   if (adrMultiplier !== null) {
     if (adrMultiplier < 0.5) adrStatus = 'tight';
     else if (adrMultiplier > 1.5) adrStatus = 'wide';
     else adrStatus = 'ok';
+  }
+
+  // 5. Zero-shares check (insufficient capital or fractional share not supported)
+  if (shares <= 0) {
+    return {
+      valid: false,
+      side,
+      riskPerShare,
+      stopPercent,
+      shares: 0,
+      positionValue: 0,
+      allocationPercent: 0,
+      actualRiskDollars: 0,
+      cappedByAllocation,
+      rrRatio,
+      adrMultiplier,
+      adrStatus,
+      reason: 'zero_shares_insufficient_budget'
+    };
   }
 
   return {
