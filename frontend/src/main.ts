@@ -1,17 +1,30 @@
 import { createMultiPaneChart, type MultiPaneChartBundle } from './chart/createMultiPaneChart';
 import { RiskRewardPrimitive } from './chart/primitives/RiskRewardPrimitive';
 import { apiFetch, LiveFeed, type LiveMessage, type FeedState } from './api/client';
+import { LRUPrefetchCache, normalizeTime, type ParsedHistoryData } from './cache/LRUPrefetchCache';
+import { CommandPalette } from './ui/CommandPalette';
 import type { Time } from 'lightweight-charts';
+
+export const DEFAULT_WATCHLIST = ['NVDA', 'TSLA', 'AAPL', 'MSFT', 'AMD', 'META', 'GOOGL', 'AMZN', 'SPY', 'QQQ', 'IWM', 'SMH'];
 
 let chartBundle: MultiPaneChartBundle | null = null;
 let currentSymbol = 'NVDA';
 let currentTimeframe = '1D';
 let currentBars: any[] = [];
 let liveFeed: LiveFeed | null = null;
+let commandPalette: CommandPalette | null = null;
+let activeWatchlist: string[] = [...DEFAULT_WATCHLIST];
 
 // Concurrency guards for rapid symbol switching
 let currentLoadGen = 0;
 let activeAbortController: AbortController | null = null;
+
+// High performance LRU cache for instant (<50ms) symbol flipping
+const prefetchCache = new LRUPrefetchCache({
+  capacity: 60,
+  ttlMs: 300_000, // 5 minutes TTL
+  maxPrefetchConcurrency: 2
+});
 
 async function initTerminal() {
   const container = document.getElementById('chartContainer');
@@ -20,19 +33,26 @@ async function initTerminal() {
   chartBundle = createMultiPaneChart(container);
 
   setupLiveFeed();
-  await loadHistory(currentSymbol, currentTimeframe);
+  setupCommandPalette();
+  setupKeyboardNavigation();
+
+  await switchSymbol(currentSymbol, currentTimeframe);
 
   // Attach button events
   const btnRR = document.getElementById('btnAttachRR');
   btnRR?.addEventListener('click', attachDemoRiskReward);
+
+  const btnPalette = document.getElementById('btnCommandPalette');
+  btnPalette?.addEventListener('click', () => {
+    commandPalette?.open();
+  });
 
   const symbolInput = document.getElementById('symbolInput') as HTMLInputElement | null;
   symbolInput?.addEventListener('keydown', async (e) => {
     if (e.key === 'Enter') {
       const val = symbolInput.value.trim().toUpperCase();
       if (val && val !== currentSymbol) {
-        currentSymbol = val;
-        await loadHistory(currentSymbol, currentTimeframe);
+        await switchSymbol(val, currentTimeframe);
       }
     }
   });
@@ -40,11 +60,8 @@ async function initTerminal() {
   const tfButtons = document.querySelectorAll('.tf-btn');
   tfButtons.forEach((btn) => {
     btn.addEventListener('click', async () => {
-      tfButtons.forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
       const tf = btn.getAttribute('data-tf') || '1D';
-      currentTimeframe = tf;
-      await loadHistory(currentSymbol, currentTimeframe);
+      await switchTimeframe(tf);
     });
   });
 
@@ -55,6 +72,200 @@ async function initTerminal() {
       attachDemoRiskReward();
     }
   });
+}
+
+function setupCommandPalette() {
+  commandPalette = new CommandPalette({
+    symbols: activeWatchlist,
+    timeframes: ['15m', '1h', '1D', '1W'],
+    onSelectSymbol: (symbol) => {
+      switchSymbol(symbol, currentTimeframe);
+    },
+    onSelectTimeframe: (tf) => {
+      switchTimeframe(tf);
+    },
+    onAction: (actionId) => {
+      if (actionId === 'attach_rr') {
+        attachDemoRiskReward();
+      } else if (actionId === 'fit_content') {
+        chartBundle?.chart.timeScale().fitContent();
+      } else if (actionId === 'flip_next') {
+        flipWatchlistSymbol(1);
+      } else if (actionId === 'flip_prev') {
+        flipWatchlistSymbol(-1);
+      }
+    }
+  });
+}
+
+function setupKeyboardNavigation() {
+  window.addEventListener('keydown', (e) => {
+    // Skip if Command Palette is open
+    if (commandPalette && commandPalette.isOpen()) {
+      return;
+    }
+
+    // Skip if user is actively typing in an input or textarea
+    const activeEl = document.activeElement;
+    if (
+      activeEl instanceof HTMLInputElement ||
+      activeEl instanceof HTMLTextAreaElement ||
+      (activeEl as HTMLElement)?.isContentEditable
+    ) {
+      return;
+    }
+
+    // Keyboard fast symbol flipper
+    if (e.code === 'Space') {
+      e.preventDefault();
+      flipWatchlistSymbol(e.shiftKey ? -1 : 1);
+    } else if (e.code === 'ArrowDown') {
+      e.preventDefault();
+      flipWatchlistSymbol(1);
+    } else if (e.code === 'ArrowUp') {
+      e.preventDefault();
+      flipWatchlistSymbol(-1);
+    }
+  });
+}
+
+export function flipWatchlistSymbol(direction: 1 | -1): void {
+  if (activeWatchlist.length === 0) return;
+
+  const currentIdx = activeWatchlist.findIndex(
+    (s) => s.toUpperCase() === currentSymbol.toUpperCase()
+  );
+
+  let nextIdx: number;
+  if (currentIdx === -1) {
+    nextIdx = 0;
+  } else {
+    nextIdx = (currentIdx + direction + activeWatchlist.length) % activeWatchlist.length;
+  }
+
+  const targetSymbol = activeWatchlist[nextIdx];
+  switchSymbol(targetSymbol, currentTimeframe);
+}
+
+export async function switchTimeframe(tf: string): Promise<void> {
+  if (tf === currentTimeframe) return;
+
+  currentTimeframe = tf;
+
+  const tfButtons = document.querySelectorAll('.tf-btn');
+  tfButtons.forEach((btn) => {
+    if (btn.getAttribute('data-tf') === tf) {
+      btn.classList.add('active');
+    } else {
+      btn.classList.remove('active');
+    }
+  });
+
+  await loadHistory(currentSymbol, currentTimeframe);
+}
+
+export async function switchSymbol(symbol: string, timeframe: string = currentTimeframe): Promise<void> {
+  const cleanSymbol = symbol.trim().toUpperCase();
+  if (!cleanSymbol) return;
+
+  currentSymbol = cleanSymbol;
+
+  // Sync symbol input display
+  const symbolInput = document.getElementById('symbolInput') as HTMLInputElement | null;
+  if (symbolInput && symbolInput.value.toUpperCase() !== cleanSymbol) {
+    symbolInput.value = cleanSymbol;
+  }
+
+  // Add to active watchlist if not already present
+  if (!activeWatchlist.includes(cleanSymbol)) {
+    activeWatchlist.push(cleanSymbol);
+    commandPalette?.updateSymbols(activeWatchlist);
+  }
+
+  // 1. Check synchronous LRU cache for <50ms zero-latency rendering
+  const cached = prefetchCache.get(cleanSymbol, timeframe);
+  if (cached) {
+    applyChartData(cached);
+    // Trigger speculative prefetch for adjacent watchlist neighbors
+    speculativePrefetchNeighbors(cleanSymbol, timeframe);
+    return;
+  }
+
+  // 2. Cache miss: Fetch via loadHistory with generation & abort guards
+  await loadHistory(cleanSymbol, timeframe);
+
+  // 3. Speculatively prefetch adjacent symbols
+  speculativePrefetchNeighbors(cleanSymbol, timeframe);
+}
+
+function speculativePrefetchNeighbors(symbol: string, timeframe: string): void {
+  const idx = activeWatchlist.findIndex((s) => s.toUpperCase() === symbol.toUpperCase());
+  if (idx === -1 || activeWatchlist.length <= 1) return;
+
+  const len = activeWatchlist.length;
+  const next1 = activeWatchlist[(idx + 1) % len];
+  const next2 = activeWatchlist[(idx + 2) % len];
+  const prev1 = activeWatchlist[(idx - 1 + len) % len];
+
+  prefetchCache.prefetch([next1, next2, prev1], timeframe, currentLoadGen, fetchHistoryBars);
+}
+
+async function fetchHistoryBars(symbol: string, timeframe: string, signal?: AbortSignal): Promise<any[]> {
+  const data = await apiFetch<any>(
+    `/api/history?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=300`,
+    { signal }
+  );
+  return Array.isArray(data) ? data : data?.bars || [];
+}
+
+function applyChartData(parsed: ParsedHistoryData): void {
+  if (!chartBundle) return;
+
+  currentBars = parsed.bars;
+  chartBundle.candleSeries.setData(parsed.candleData);
+  chartBundle.volumeSeries.setData(parsed.volumeData);
+  chartBundle.rsSeries.setData(parsed.rsData);
+  chartBundle.chart.timeScale().fitContent();
+}
+
+async function loadHistory(symbol: string, timeframe: string) {
+  if (!chartBundle) return;
+
+  // 1. Abort any previous in-flight request for a superseded symbol
+  if (activeAbortController) {
+    activeAbortController.abort();
+  }
+  const controller = new AbortController();
+  activeAbortController = controller;
+  const loadGen = ++currentLoadGen;
+
+  try {
+    const parsed = await prefetchCache.load(
+      symbol,
+      timeframe,
+      fetchHistoryBars,
+      controller.signal
+    );
+
+    // 2. Generation guard: If a newer symbol was requested while this fetch was in flight, discard response
+    if (loadGen !== currentLoadGen) {
+      return;
+    }
+
+    if (parsed.candleData.length > 0) {
+      applyChartData(parsed);
+    }
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      // Intentionally aborted due to rapid symbol switch
+      return;
+    }
+    console.error('[loadHistory] Failed to load history for', symbol, err);
+  } finally {
+    if (activeAbortController === controller) {
+      activeAbortController = null;
+    }
+  }
 }
 
 function updateStatusDot(state: FeedState) {
@@ -127,72 +338,6 @@ function isSymbolMatch(msgSymbol?: string, targetSymbol?: string): boolean {
   return false;
 }
 
-async function loadHistory(symbol: string, timeframe: string) {
-  if (!chartBundle) return;
-
-  // 1. Abort any previous in-flight request for a superseded symbol
-  if (activeAbortController) {
-    activeAbortController.abort();
-  }
-  const controller = new AbortController();
-  activeAbortController = controller;
-  const loadGen = ++currentLoadGen;
-
-  try {
-    const data = await apiFetch<any>(
-      `/api/history?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=300`,
-      { signal: controller.signal }
-    );
-
-    // 2. Generation guard: If a newer symbol was requested while this fetch was in flight, discard response
-    if (loadGen !== currentLoadGen) {
-      return;
-    }
-
-    const bars: any[] = Array.isArray(data) ? data : data?.bars || [];
-
-    if (bars.length > 0) {
-      currentBars = bars;
-      const candleData = bars.map((b: any) => ({
-        time: normalizeTime(b.time),
-        open: b.open,
-        high: b.high,
-        low: b.low,
-        close: b.close
-      }));
-
-      const volumeData = bars.map((b: any) => ({
-        time: normalizeTime(b.time),
-        value: b.volume || 0,
-        color: b.close >= b.open ? 'rgba(34, 197, 94, 0.45)' : 'rgba(239, 68, 68, 0.45)'
-      }));
-
-      chartBundle.candleSeries.setData(candleData);
-      chartBundle.volumeSeries.setData(volumeData);
-
-      // Demonstrative RS line
-      const firstClose = candleData[0].close || 1;
-      const rsData = candleData.map((b: any) => ({
-        time: b.time,
-        value: Number(((b.close / firstClose) * 100).toFixed(2))
-      }));
-      chartBundle.rsSeries.setData(rsData);
-
-      chartBundle.chart.timeScale().fitContent();
-    }
-  } catch (err: any) {
-    if (err?.name === 'AbortError') {
-      // Intentionally aborted due to rapid symbol switch
-      return;
-    }
-    console.error('[loadHistory] Failed to load history for', symbol, err);
-  } finally {
-    if (activeAbortController === controller) {
-      activeAbortController = null;
-    }
-  }
-}
-
 function attachDemoRiskReward() {
   if (!chartBundle) return;
   const candleSeries = chartBundle.candleSeries;
@@ -226,13 +371,6 @@ function attachDemoRiskReward() {
   });
 
   candleSeries.attachPrimitive(primitive);
-}
-
-function normalizeTime(t: any): Time {
-  if (typeof t === 'number') {
-    return (t > 1e11 ? Math.floor(t / 1000) : t) as Time;
-  }
-  return t as Time;
 }
 
 window.addEventListener('DOMContentLoaded', initTerminal);
