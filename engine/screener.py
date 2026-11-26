@@ -10,10 +10,11 @@ Implements:
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import logging
 import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from engine.market_time import last_completed_session_date, NY_TZ
 
 logger = logging.getLogger("tradingview.screener")
 
@@ -59,6 +60,293 @@ US_MOMENTUM_UNIVERSE: List[Dict[str, str]] = [
     {"id": "NASDAQ:QQQ", "symbol": "QQQ", "name": "Invesco QQQ Trust", "sector": "Index ETF"},
     {"id": "AMEX:IWM", "symbol": "IWM", "name": "iShares Russell 2000 ETF", "sector": "Index ETF"},
 ]
+
+
+STOCK_THEME_DEFINITIONS: Dict[str, Dict[str, str]] = {
+    "ai_semis": {"name_en": "AI & Semiconductors", "name_zh": "AI 與半導體"},
+    "cloud_cyber": {"name_en": "Cloud & Cybersecurity", "name_zh": "雲端與資安"},
+    "mega_platforms": {"name_en": "Tech Giants & Platforms", "name_zh": "科技巨頭與平台"},
+    "industrials_defense": {"name_en": "Industrials & Defense", "name_zh": "工業與國防"},
+    "healthcare_biotech": {"name_en": "Healthcare & Biotech", "name_zh": "醫療與生技"},
+    "financials_payments": {"name_en": "Financials & Payments", "name_zh": "金融與支付"},
+    "consumer_growth": {"name_en": "Consumer & Growth", "name_zh": "消費與成長"},
+    "index_etf": {"name_en": "Index ETFs", "name_zh": "大盤指數 ETF"},
+    "other": {"name_en": "Other Watchlist", "name_zh": "其他自選"},
+}
+
+STOCK_THEME_MAP: Dict[str, str] = {
+    # ai_semis (AI & Semiconductors)
+    "NVDA": "ai_semis", "NASDAQ:NVDA": "ai_semis",
+    "AMD": "ai_semis", "NASDAQ:AMD": "ai_semis",
+    "AVGO": "ai_semis", "NASDAQ:AVGO": "ai_semis",
+    "ARM": "ai_semis", "NASDAQ:ARM": "ai_semis",
+    "QCOM": "ai_semis", "NASDAQ:QCOM": "ai_semis",
+    "SMCI": "ai_semis", "NASDAQ:SMCI": "ai_semis",
+    "ANET": "ai_semis", "NYSE:ANET": "ai_semis",
+    # cloud_cyber (Cloud & Cybersecurity)
+    "CRWD": "cloud_cyber", "NASDAQ:CRWD": "cloud_cyber",
+    "PANW": "cloud_cyber", "NASDAQ:PANW": "cloud_cyber",
+    "NET": "cloud_cyber", "NYSE:NET": "cloud_cyber",
+    "SNOW": "cloud_cyber", "NYSE:SNOW": "cloud_cyber",
+    "MDB": "cloud_cyber", "NASDAQ:MDB": "cloud_cyber",
+    "PLTR": "cloud_cyber", "NASDAQ:PLTR": "cloud_cyber",
+    "APP": "cloud_cyber", "NASDAQ:APP": "cloud_cyber",
+    # mega_platforms (Tech Giants & Platforms)
+    "AAPL": "mega_platforms", "NASDAQ:AAPL": "mega_platforms",
+    "MSFT": "mega_platforms", "NASDAQ:MSFT": "mega_platforms",
+    "GOOGL": "mega_platforms", "NASDAQ:GOOGL": "mega_platforms",
+    "GOOG": "mega_platforms", "NASDAQ:GOOG": "mega_platforms",
+    "META": "mega_platforms", "NASDAQ:META": "mega_platforms",
+    "AMZN": "mega_platforms", "NASDAQ:AMZN": "mega_platforms",
+    # industrials_defense (Industrials & Defense)
+    "FAST": "industrials_defense", "NASDAQ:FAST": "industrials_defense",
+    "AXON": "industrials_defense", "NASDAQ:AXON": "industrials_defense",
+    "UBER": "industrials_defense", "NYSE:UBER": "industrials_defense",
+    # healthcare_biotech (Healthcare & Biotech)
+    "MRNA": "healthcare_biotech", "NASDAQ:MRNA": "healthcare_biotech",
+    "ISRG": "healthcare_biotech", "NASDAQ:ISRG": "healthcare_biotech",
+    "LLY": "healthcare_biotech", "NYSE:LLY": "healthcare_biotech",
+    # financials_payments (Financials & Payments)
+    "V": "financials_payments", "NYSE:V": "financials_payments",
+    "MA": "financials_payments", "NYSE:MA": "financials_payments",
+    "JPM": "financials_payments", "NYSE:JPM": "financials_payments",
+    "GS": "financials_payments", "NYSE:GS": "financials_payments",
+    # consumer_growth (Consumer & Growth)
+    "TSLA": "consumer_growth", "NASDAQ:TSLA": "consumer_growth",
+    "CELH": "consumer_growth", "NASDAQ:CELH": "consumer_growth",
+    "DUOL": "consumer_growth", "NASDAQ:DUOL": "consumer_growth",
+    "CART": "consumer_growth", "NASDAQ:CART": "consumer_growth",
+    "CRI": "consumer_growth", "NYSE:CRI": "consumer_growth",
+    "CAST": "consumer_growth", "NASDAQ:CAST": "consumer_growth",
+    "PRCH": "consumer_growth", "NASDAQ:PRCH": "consumer_growth",
+    # index_etf (Index ETFs)
+    "SPY": "index_etf", "AMEX:SPY": "index_etf",
+    "QQQ": "index_etf", "NASDAQ:QQQ": "index_etf",
+    "IWM": "index_etf", "AMEX:IWM": "index_etf",
+    "DIA": "index_etf", "NYSE:DIA": "index_etf",
+}
+
+
+def build_theme_heatmap(
+    items_with_metrics: Sequence[Any],
+    benchmark_change_pct: float = 0.0,
+) -> List[Dict[str, Any]]:
+    """Pure aggregation function grouping stock candidate metrics into themes.
+
+    Sorts themes by avg_change_pct descending, and items within each theme by change_pct descending.
+    Guarantees null/inf safety and zero division guards.
+    """
+    theme_buckets: Dict[str, List[Dict[str, Any]]] = {}
+
+    for item in items_with_metrics:
+        if isinstance(item, dict):
+            sym = str(item.get("symbol") or item.get("id") or "").upper()
+            sym_id = str(item.get("id") or sym)
+            name = str(item.get("name") or sym)
+            close = _safe_float(item.get("close"), 0.0)
+            change_pct = _safe_float(item.get("change_pct"), 0.0)
+            rs_rating = int(item.get("rs_rating") if item.get("rs_rating") is not None else 50)
+            vol_ratio = _safe_float(item.get("volume_ratio_50"), 1.0)
+            stage2 = bool(item.get("stage2", False))
+            sector = str(item.get("sector") or "")
+        else:
+            sym = str(getattr(item, "symbol", "") or getattr(item, "id", "")).upper()
+            sym_id = str(getattr(item, "id", sym))
+            name = str(getattr(item, "name", sym))
+            close = _safe_float(getattr(item, "close", 0.0), 0.0)
+            change_pct = _safe_float(getattr(item, "change_pct", 0.0), 0.0)
+            rs_rating = int(getattr(item, "rs_rating", 50) if getattr(item, "rs_rating", None) is not None else 50)
+            vol_ratio = _safe_float(getattr(item, "volume_ratio_50", 1.0), 1.0)
+            stage2 = bool(getattr(item, "stage2", False))
+            sector = str(getattr(item, "sector", ""))
+
+        clean_item = {
+            "id": sym_id,
+            "symbol": sym.split(":")[-1] if ":" in sym else sym,
+            "name": name,
+            "close": round(close, 2),
+            "change_pct": round(change_pct, 2),
+            "rs_rating": max(1, min(99, rs_rating)),
+            "volume_ratio_50": round(vol_ratio, 2),
+            "stage2": stage2,
+            "no_data": bool(item.get("no_data") if isinstance(item, dict) else getattr(item, "no_data", False)),
+        }
+
+        # Resolve theme
+        theme_id = STOCK_THEME_MAP.get(sym) or STOCK_THEME_MAP.get(sym_id)
+        if not theme_id:
+            sec_lower = sector.lower()
+            if "semi" in sec_lower:
+                theme_id = "ai_semis"
+            elif "tech" in sec_lower or "software" in sec_lower:
+                theme_id = "cloud_cyber"
+            elif "health" in sec_lower or "bio" in sec_lower:
+                theme_id = "healthcare_biotech"
+            elif "industr" in sec_lower:
+                theme_id = "industrials_defense"
+            elif "finan" in sec_lower:
+                theme_id = "financials_payments"
+            elif "consumer" in sec_lower:
+                theme_id = "consumer_growth"
+            elif "etf" in sec_lower:
+                theme_id = "index_etf"
+            else:
+                theme_id = "other"
+
+        if theme_id not in theme_buckets:
+            theme_buckets[theme_id] = []
+        theme_buckets[theme_id].append(clean_item)
+
+    result_themes: List[Dict[str, Any]] = []
+    for t_id, t_items in theme_buckets.items():
+        if not t_items:
+            continue
+        t_items.sort(key=lambda x: x["change_pct"], reverse=True)
+        valid_items = [x for x in t_items if not x.get("no_data")]
+        n_valid = len(valid_items)
+        avg_chg = sum(x["change_pct"] for x in valid_items) / n_valid if n_valid > 0 else 0.0
+        avg_rs = sum(x["rs_rating"] for x in valid_items) / n_valid if n_valid > 0 else 50.0
+        avg_vol = sum(x["volume_ratio_50"] for x in valid_items) / n_valid if n_valid > 0 else 1.0
+        adv = sum(1 for x in valid_items if x["change_pct"] > 0)
+        n = len(t_items)
+
+        meta = STOCK_THEME_DEFINITIONS.get(t_id, {"name_en": t_id.replace("_", " ").title(), "name_zh": t_id})
+
+        result_themes.append({
+            "id": t_id,
+            "name_en": meta["name_en"],
+            "name_zh": meta["name_zh"],
+            "avg_change_pct": round(avg_chg, 2),
+            "avg_rs_rating": round(avg_rs, 1),
+            "avg_vol_ratio": round(avg_vol, 2),
+            "advancing": adv,
+            "total": n,
+            "items": t_items,
+        })
+
+    result_themes.sort(key=lambda x: x["avg_change_pct"], reverse=True)
+    return result_themes
+
+
+def _extract_bar_as_of_and_stale(bars: Sequence[Dict[str, Any]]) -> Tuple[str, bool]:
+    """Extracts the NY ISO date of the last bar and checks if data is stale (< last_completed_session_date)."""
+    if not bars:
+        return "", True
+    last_bar = bars[-1]
+    t_val = last_bar.get("time")
+    bar_date = None
+    data_as_of = ""
+    if isinstance(t_val, (int, float)):
+        try:
+            dt = datetime.fromtimestamp(t_val, tz=NY_TZ)
+            bar_date = dt.date()
+            data_as_of = bar_date.isoformat()
+        except Exception:
+            pass
+    elif isinstance(t_val, str):
+        data_as_of = t_val[:10]
+        try:
+            bar_date = datetime.strptime(data_as_of, "%Y-%m-%d").date()
+        except Exception:
+            pass
+
+    comp_date = last_completed_session_date()
+    data_stale = (bar_date < comp_date) if bar_date else True
+    return data_as_of, data_stale
+
+
+def _round_sig_figs(val: float, sig_figs: int = 4) -> float:
+    """Rounds float values: 2 decimals if |val| >= 1, otherwise preserves 4 significant digits."""
+    if val == 0.0 or not math.isfinite(val):
+        return 0.0
+    if abs(val) >= 1.0:
+        return round(val, 2)
+    return float(f"{val:.{sig_figs}g}")
+
+
+async def fetch_heatmap_universe(
+    universe: List[Dict[str, Any]],
+    storage_obj: Any,
+    benchmark_bars: List[Dict[str, Any]],
+    fetch_func: Any,
+    max_concurrency: int = 8,
+) -> List[Dict[str, Any]]:
+    """Fetches and evaluates daily metrics for all candidates in the universe without screening dropouts."""
+    sem = asyncio.Semaphore(max_concurrency)
+
+    async def _eval_one(item: Dict[str, Any]) -> Dict[str, Any]:
+        sym_id = item.get("id") or item.get("symbol") or ""
+        clean_sym = sym_id.strip().upper()
+        if ":" not in clean_sym:
+            clean_sym = f"NASDAQ:{clean_sym}"
+        ticker = clean_sym.split(":")[-1]
+
+        bars: List[Dict[str, Any]] = []
+        if storage_obj:
+            try:
+                bars = storage_obj.get_bars(clean_sym, "1D", limit=300)
+            except Exception:
+                bars = []
+
+        if fetch_func:
+            async with sem:
+                try:
+                    remote = await fetch_func(clean_sym, timeframe="1D")
+                    if remote:
+                        bars = remote
+                except Exception as err:
+                    logger.debug("Heatmap remote fetch notice for %s: %s", clean_sym, err)
+
+        data_as_of, data_stale = _extract_bar_as_of_and_stale(bars)
+
+        if not bars:
+            return {
+                "id": clean_sym,
+                "symbol": ticker,
+                "name": item.get("name") or ticker,
+                "close": 0.0,
+                "change_pct": 0.0,
+                "rs_rating": 50,
+                "volume_ratio_50": 1.0,
+                "stage2": False,
+                "sector": item.get("sector", ""),
+                "data_as_of": data_as_of,
+                "data_stale": data_stale,
+                "no_data": True,
+            }
+
+        stage_info = evaluate_canslim_stage(bars)
+        rs_rating = calculate_canslim_rs_rating(bars, benchmark_bars) if benchmark_bars else 50
+
+        last_bar = bars[-1]
+        close = stage_info.get("close") or _safe_float(last_bar.get("close"), 0.0)
+        chg = stage_info.get("change_pct", 0.0)
+        vol_ratio = stage_info.get("volume_ratio_50", 1.0)
+
+        return {
+            "id": clean_sym,
+            "symbol": ticker,
+            "name": item.get("name") or ticker,
+            "close": close,
+            "change_pct": chg,
+            "rs_rating": rs_rating,
+            "volume_ratio_50": vol_ratio,
+            "stage2": bool(stage_info.get("stage2", False)),
+            "sector": item.get("sector", ""),
+            "data_as_of": data_as_of,
+            "data_stale": data_stale,
+            "no_data": False,
+        }
+
+    tasks = [_eval_one(it) for it in universe]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    out: List[Dict[str, Any]] = []
+    for r in results:
+        if isinstance(r, dict):
+            out.append(r)
+        elif isinstance(r, Exception):
+            logger.debug("Heatmap eval exception: %s", r)
+    return out
 
 
 @dataclass
@@ -329,14 +617,14 @@ def calculate_atr_toolkit(
         suggested_shares = int(math.floor(risk_dollar / stop_distance))
 
     return {
-        "atr": round(latest_atr, 2),
+        "atr": _round_sig_figs(latest_atr, 4),
         "atr_pct": round(latest_atr_pct, 2),
         "atr_percentile": round(atr_percentile, 1),
         "is_squeeze": is_squeeze,
         "is_breakout": is_breakout,
         "expansion_ratio": round(expansion_ratio, 2),
         "suggested_shares": suggested_shares,
-        "stop_distance": round(stop_distance, 2)
+        "stop_distance": _round_sig_figs(stop_distance, 4)
     }
 
 
@@ -494,6 +782,7 @@ def evaluate_canslim_stage(
         "power_trend": False,
         "trend_regime": "NEUTRAL",
         "close": 0.0,
+        "change_pct": 0.0,
         "sma50": None,
         "sma200": None,
         "ema10": None,
@@ -505,16 +794,26 @@ def evaluate_canslim_stage(
         "volume_ratio_50": 1.0,
         "revenue_yoy": None
     }
-    if not bars or len(bars) < 20:
+    if not bars:
         return result
 
-    closes = [_safe_float(b.get("close")) for b in bars]
-    highs = [_safe_float(b.get("high"), closes[i]) for i, b in enumerate(bars)]
-    lows = [_safe_float(b.get("low"), closes[i]) for i, b in enumerate(bars)]
-    volumes = [_safe_float(b.get("volume")) for b in bars]
+    closes = [_safe_float(b.get("close") if isinstance(b, dict) else getattr(b, "close", 0.0)) for b in bars]
+    if not closes:
+        return result
 
     c = closes[-1]
     result["close"] = round(c, 2)
+    if len(closes) >= 2:
+        prev_c = closes[-2]
+        if prev_c > 0:
+            result["change_pct"] = round(((c - prev_c) / prev_c) * 100.0, 2)
+
+    if len(bars) < 20:
+        return result
+
+    highs = [_safe_float(b.get("high") if isinstance(b, dict) else getattr(b, "high", closes[i]), closes[i]) for i, b in enumerate(bars)]
+    lows = [_safe_float(b.get("low") if isinstance(b, dict) else getattr(b, "low", closes[i]), closes[i]) for i, b in enumerate(bars)]
+    volumes = [_safe_float(b.get("volume") if isinstance(b, dict) else getattr(b, "volume", 0.0)) for b in bars]
 
     # 52-week High & Low (up to 252 bars)
     h_win = highs[-252:] if len(highs) > 252 else highs
@@ -637,11 +936,13 @@ async def scan_symbol_candidate(
         except Exception:
             bars = []
 
-    if len(bars) < 252 and fetch_func:
+    # S1-01: When fetch_func is provided, always ask it for the latest bars.
+    # fetch_func (fetch_universal_history) applies the S1-02 freshness rules, so this does not hammer remote APIs.
+    if fetch_func:
         async with semaphore:
             try:
                 remote_bars = await fetch_func(clean_sym, timeframe="1D")
-                if remote_bars and len(remote_bars) > len(bars):
+                if remote_bars:
                     bars = remote_bars
             except Exception as fetch_err:
                 logger.debug("Screener remote fetch notice for %s: %s", clean_sym, fetch_err)
@@ -714,11 +1015,11 @@ async def scan_symbol_candidate(
 
     # 24H Price change calculation
     last_c = stage_info["close"]
-    prev_c = _safe_float(bars[-2].get("close")) if len(bars) >= 2 else last_c
-    chg_pct = round(((last_c - prev_c) / prev_c) * 100.0, 2) if prev_c > 0 else 0.0
+    chg_pct = stage_info.get("change_pct", 0.0)
 
     has_prefix = sym_info.get("has_prefix", (":" in (sym_info.get("id") or "")))
     export_symbol = clean_sym if has_prefix else ticker
+    data_as_of, data_stale = _extract_bar_as_of_and_stale(bars)
 
     return {
         "id": clean_sym,
@@ -744,7 +1045,9 @@ async def scan_symbol_candidate(
         "stop_distance": atr_info["stop_distance"],
         "revenue_yoy": stage_info.get("revenue_yoy") or "N/A",
         "has_prefix": has_prefix,
-        "export_symbol": export_symbol
+        "export_symbol": export_symbol,
+        "data_as_of": data_as_of,
+        "data_stale": data_stale
     }
 
 

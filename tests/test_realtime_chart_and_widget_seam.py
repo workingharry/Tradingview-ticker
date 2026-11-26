@@ -71,7 +71,7 @@ class TestRealtimeChartAndWidgetSeam(unittest.TestCase):
     def test_history_loading_initializes_last_bar_time_and_object(self):
         """Verifies that loadHistory initializes lastBarTime and lastBarObj from uniqueBars."""
         load_hist_match = re.search(
-            r"currentRawBars\s*=\s*uniqueBars;([\s\S]*?)renderChartData\s*\(uniqueBars\);",
+            r"currentRawBars\s*=\s*uniqueBars;([\s\S]*?)renderChartData\s*\(\s*uniqueBars\b[^\n]*\)\s*;",
             self.app_js_content
         )
         self.assertIsNotNone(load_hist_match, "loadHistory must set currentRawBars and call renderChartData")

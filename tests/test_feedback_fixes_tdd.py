@@ -256,20 +256,19 @@ class TestFeedbackFixesTDD(unittest.TestCase):
 
     def test_seam12_analysis_and_screener_buttons_hidden_by_default(self):
         """Seam 12: Fundamentals, AI Lens, and Screener buttons are removed/hidden by default from top header."""
-        # HTML elements have style="display: none;" by default
+        # Fundamentals & AI Lens buttons are hidden by default; Screener remains visible on toolbar
         self.assertIn('id="fundamentalsBtn" style="display: none;"', self.html)
         self.assertIn('id="aiLensBtn" style="display: none;"', self.html)
-        self.assertIn('id="screenerBtn" style="display: none;"', self.html)
+        self.assertIn('id="screenerBtn"', self.html)
         self.assertIn('id="chkShowAnalysisTools"', self.html)
 
         # JS defaults showAnalysisTools to false and binds controls
         self.assertIn("showAnalysisTools: false", self.js)
         self.assertIn("chkShowAnalysisTools", self.js)
 
-        # CSS hides them with display: none !important by default
+        # CSS hides fundamentals and AI Lens with display: none !important by default
         self.assertIn("#fundamentalsBtn", self.css)
         self.assertIn("#aiLensBtn", self.css)
-        self.assertIn("#screenerBtn", self.css)
 
     def test_seam13_tradingview_spy_compare_removed_by_default(self):
         """Seam 13: TradingView SPDR S&P 500 comparison study overlay is removed by default from Scheme C."""
@@ -342,8 +341,9 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         self.assertIn('typeof v === "number" && !isNaN(v) && isFinite(v) && v > 0', self.js)
         self.assertIn("if (!isValidPrice(price)) return;", self.js)
 
-        # 2. MTF candle bucketing and rollover on bucketTime > lb.time
-        self.assertIn("var bucketTime = Math.floor(barTime / step) * step;", self.js)
+        # 2. MTF candle bucketing (NY-session-aware computeLiveBucket) and rollover on bucketTime > lb.time
+        self.assertIn("var subPlacement = computeLiveBucket({", self.js)
+        self.assertIn("var bucketTime = subPlacement.time;", self.js)
         self.assertIn("if (bucketTime === lb.time)", self.js)
         self.assertIn("else if (bucketTime > lb.time)", self.js)
         self.assertIn("subCharts[pId].series.update(newCandle);", self.js)

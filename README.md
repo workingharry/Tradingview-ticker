@@ -53,8 +53,8 @@ npm run tauri:dev
 ## Testing
 
 ```bash
-# Python 後端與整合測試（排除需連網之 e2e/stress 及外部缺少 skill 的測試檔）
-.venv/bin/python -m pytest -q --ignore=tests/test_e2e_live.py --ignore=tests/stress_websocket.py --ignore=tests/test_gemini_api_copilot.py -rs
+# Python 後端與整合測試（排除需連網之 e2e 與 stress 測試）
+.venv/bin/python -m pytest -q --ignore=tests/test_e2e_live.py --ignore=tests/stress_websocket.py -rs
 
 # TypeScript 型別檢查與 Vitest 單元測試（frontend/src）
 npm run typecheck

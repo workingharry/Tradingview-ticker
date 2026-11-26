@@ -93,6 +93,9 @@ Object.defineProperty(MockElement.prototype, 'innerHTML', {{
 MockElement.prototype.appendChild = function(child) {{ this.children.push(child); }};
 MockElement.prototype.setAttribute = function(k, v) {{ this.attributes[k] = String(v); }};
 MockElement.prototype.getAttribute = function(k) {{ return this.attributes[k]; }};
+MockElement.prototype.addEventListener = function() {{}};
+MockElement.prototype.removeEventListener = function() {{}};
+MockElement.prototype.querySelectorAll = function() {{ return []; }};
 
 var document = {{
   getElementById: function(id) {{
@@ -104,6 +107,7 @@ var document = {{
 }};
 var window = {{
   addEventListener: function() {{}},
+  removeEventListener: function() {{}},
   location: {{ protocol: 'http:', host: 'localhost:8000' }}
 }};
 var AbortController = function() {{

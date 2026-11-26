@@ -167,6 +167,99 @@
   }
 
   /**
+   * RS Line New High Markers (Blue Dot / RS New High before Price)
+   * Signals institutional accumulation when RS makes a new high while price has not yet broken out.
+   * @param {Array<{time: number, open: number, high: number, low: number, close: number}>} targetBars
+   * @param {Array<{time: number, close: number}>} benchmarkBars
+   * @param {Object} [options]
+   * @param {number} [options.lookback=252]
+   * @param {number} [options.minWarmup=50]
+   * @param {number} [options.cooldown=5]
+   * @returns {Array<{time: number, position: string, color: string, shape: string, text: string, type: string}>}
+   */
+  function calcRsNewHighMarkers(targetBars, benchmarkBars, options) {
+    if (!Array.isArray(targetBars) || !Array.isArray(benchmarkBars) || !targetBars.length || !benchmarkBars.length) {
+      return [];
+    }
+    var opts = options || {};
+    var lookback = typeof opts.lookback === "number" && opts.lookback > 0 ? opts.lookback : 252;
+    var minWarmup = typeof opts.minWarmup === "number" && opts.minWarmup > 0 ? opts.minWarmup : 50;
+    var cooldown = typeof opts.cooldown === "number" && opts.cooldown > 0 ? opts.cooldown : 5;
+
+    if (targetBars === benchmarkBars) return [];
+
+    var rs = calcRelativeStrength(targetBars, benchmarkBars);
+    if (!rs || rs.length < minWarmup) return [];
+
+    var isConstant = true;
+    var firstVal = rs[0].value;
+    for (var c = 1; c < Math.min(rs.length, 30); c++) {
+      if (Math.abs(rs[c].value - firstVal) > 1e-4) {
+        isConstant = false;
+        break;
+      }
+    }
+    if (isConstant && Math.abs(firstVal - 100) < 1e-3) {
+      return [];
+    }
+
+    var targetMap = Object.create(null);
+    for (var t = 0; t < targetBars.length; t++) {
+      var tb = targetBars[t];
+      if (tb && typeof tb.time === "number") {
+        targetMap[tb.time] = tb;
+      }
+    }
+
+    var markers = [];
+    var lastMarkerIdx = -9999;
+
+    for (var i = minWarmup; i < rs.length; i++) {
+      var curRs = rs[i].value;
+      var curTime = rs[i].time;
+      var curBar = targetMap[curTime];
+      if (!curBar || typeof curBar.close !== "number") continue;
+
+      var windowSize = Math.min(lookback, i);
+      var maxPriorRs = -Infinity;
+      var maxPriorHigh = -Infinity;
+
+      for (var w = 1; w <= windowSize; w++) {
+        var priorIdx = i - w;
+        if (rs[priorIdx].value > maxPriorRs) {
+          maxPriorRs = rs[priorIdx].value;
+        }
+        var pBar = targetMap[rs[priorIdx].time];
+        if (pBar) {
+          var pHigh = typeof pBar.high === "number" ? pBar.high : pBar.close;
+          if (pHigh > maxPriorHigh) {
+            maxPriorHigh = pHigh;
+          }
+        }
+      }
+
+      var isRsNewHigh = curRs > maxPriorRs;
+      var isPriceNotAtHigh = curBar.close < maxPriorHigh;
+
+      if (isRsNewHigh && isPriceNotAtHigh) {
+        if (i - lastMarkerIdx >= cooldown) {
+          markers.push({
+            time: curTime,
+            position: "aboveBar",
+            color: "#2962ff",
+            shape: "circle",
+            text: "RS NH",
+            type: "rs_before_price"
+          });
+          lastMarkerIdx = i;
+        }
+      }
+    }
+
+    return markers;
+  }
+
+  /**
    * Relative Strength Index (RSI)
    * @param {Array<{time: number, close: number}>} bars
    * @param {number} period
@@ -288,14 +381,54 @@
    * @param {Array<{time: number, high: number, low: number, close: number, volume: number}>} bars
    * @returns {Array<{time: number, value: number}>}
    */
-  function calcVWAP(bars) {
+  var _vwapDayFmtCache = {};
+  function _vwapSessionDayKey(epochSec, tz) {
+    var t = Number(epochSec);
+    if (!isFinite(t) || t <= 0) return "";
+    if (t > 1e11) t = Math.floor(t / 1000);
+    var zone = tz || "America/New_York";
+    try {
+      var fmt = _vwapDayFmtCache[zone];
+      if (!fmt) {
+        fmt = new Intl.DateTimeFormat("en-CA", {
+          timeZone: zone,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit"
+        });
+        _vwapDayFmtCache[zone] = fmt;
+      }
+      return fmt.format(new Date(t * 1000));
+    } catch (e) {
+      return new Date(t * 1000).toISOString().slice(0, 10);
+    }
+  }
+
+  function calcVWAP(bars, options) {
     if (!Array.isArray(bars) || !bars.length) return [];
+    var opts = (options && typeof options === "object") ? options : {};
+    var tf = opts.timeframe ? String(opts.timeframe) : "";
+    var isIntradayTf = tf === "1m" || tf === "5m" || tf === "15m" || tf === "1h" || tf === "60m";
+    var shouldReset = opts.resetDaily !== undefined ? Boolean(opts.resetDaily) : isIntradayTf;
+    var symUpper = opts.symbol ? String(opts.symbol).toUpperCase() : "";
+    var isCrypto = symUpper.indexOf("BINANCE:") === 0 || symUpper.indexOf("USDT") !== -1 || symUpper.indexOf("BUSD") !== -1;
+    var tz = opts.timeZone || (isCrypto ? "UTC" : "America/New_York");
+
     var result = [];
     var cumVol = 0;
     var cumVolPrice = 0;
+    var lastDayKey = null;
 
     for (var i = 0; i < bars.length; i++) {
       var b = bars[i];
+      if (shouldReset) {
+        var dayKey = _vwapSessionDayKey(b.time, tz);
+        if (dayKey && dayKey !== lastDayKey) {
+          cumVol = 0;
+          cumVolPrice = 0;
+          lastDayKey = dayKey;
+        }
+      }
       var high = safeNum(b.high, safeNum(b.close));
       var low = safeNum(b.low, safeNum(b.close));
       var close = safeNum(b.close);
@@ -957,6 +1090,7 @@
     calcEMA,
     calcVolumeSMA,
     calcRelativeStrength,
+    calcRsNewHighMarkers,
     calcRsRating,
     calcRSI,
     calcBollingerBands,

@@ -63,8 +63,13 @@ export function createMultiPaneChart(container: HTMLElement): MultiPaneChartBund
     color: '#38bdf8',
     lineWidth: 2,
     title: 'RS vs SPY',
-    priceLineVisible: false
+    priceLineVisible: false,
+    priceFormat: { type: 'price', precision: 2, minMove: 0.01 }
   }, 2);
+  rsSeries.priceScale().applyOptions({
+    autoScale: true,
+    scaleMargins: { top: 0.12, bottom: 0.12 }
+  });
 
   // 透過 IPaneApi 設定相對伸展權重（65% / 15% / 20%）
   const panes = chart.panes();

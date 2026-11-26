@@ -166,7 +166,7 @@ class TestStockScreenerEngine(unittest.TestCase):
         self.assertEqual(score_short_parity, 50)
 
     def test_screener_remote_backfill_when_short_cache(self):
-        """Verifies that if local DB cache has < 252 bars, fetch_func is invoked to backfill 252+ bars."""
+        """Verifies fetch_func is invoked to backfill a short cache, and (S1-01) also when the cache already has 252+ bars."""
         mock_storage = MagicMock()
         mock_storage.get_bars.return_value = self.target_bars[:50]
         mock_storage.get_fundamental_report.return_value = None
@@ -196,7 +196,9 @@ class TestStockScreenerEngine(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["symbol"], "TSLA")
 
-        # When storage already has >= 252 bars, fetch_func should NOT be called
+        # S1-01 (第 1 段): a long cache can still be stale, so fetch_func MUST be called even with >= 252 bars.
+        # fetch_func applies the S1-02 freshness rules, so this does not cause extra remote calls when data is fresh.
+        # (Previously this asserted assert_not_called(), which encoded the stale-data bug.)
         mock_storage.get_bars.return_value = self.target_bars
         mock_fetch.reset_mock()
 
@@ -208,7 +210,7 @@ class TestStockScreenerEngine(unittest.TestCase):
             fetch_func=mock_fetch,
             max_concurrency=2
         ))
-        mock_fetch.assert_not_called()
+        mock_fetch.assert_called_once_with("NASDAQ:TSLA", timeframe="1D")
         self.assertEqual(len(results_cached), 1)
 
     @patch("server.call_gemini_generate", new_callable=AsyncMock)

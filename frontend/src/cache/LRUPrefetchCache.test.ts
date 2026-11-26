@@ -194,11 +194,74 @@ describe('LRUPrefetchCache & Data Normalization', () => {
     cache.set('NVDA', '1D', dummy());
     cache.set('NVDA', '15m', dummy());
     cache.set('AAPL', '1D', dummy());
+    cache.set('NASDAQ:MSFT', '1D', dummy());
 
-    cache.invalidate((sym) => sym === 'NVDA');
+    cache.invalidate((sym) => sym === 'NVDA' || sym === 'NASDAQ:MSFT');
 
     expect(cache.has('NVDA', '1D')).toBe(false);
     expect(cache.has('NVDA', '15m')).toBe(false);
+    expect(cache.has('NASDAQ:MSFT', '1D')).toBe(false);
     expect(cache.has('AAPL', '1D')).toBe(true);
+  });
+
+  it('computes real RS against benchmark via parallel fetch and timestamp alignment', async () => {
+    const mockFetch = vi.fn().mockImplementation(async (sym: string) => {
+      if (sym === 'AMEX:SPY') {
+        return [
+          { time: 100, open: 500, high: 505, low: 495, close: 500, volume: 1000 },
+          { time: 200, open: 500, high: 510, low: 498, close: 500, volume: 1000 }
+        ];
+      }
+      return [
+        { time: 100, open: 100, high: 105, low: 95, close: 100, volume: 500 },
+        { time: 150, open: 105, high: 112, low: 104, close: 110, volume: 600 }, // carry-forward to t=100 SPY
+        { time: 200, open: 110, high: 126, low: 109, close: 125, volume: 700 }
+      ];
+    });
+
+    const data = await cache.load('NVDA', '1D', mockFetch, undefined, 'AMEX:SPY');
+
+    expect(data.rsData).toEqual([
+      { time: 100, value: 20 },
+      { time: 150, value: 22 },
+      { time: 200, value: 25 }
+    ]);
+    expect(data.benchmarkClose).toBe(500);
+    expect(cache.has('AMEX:SPY', '1D')).toBe(true);
+  });
+
+  it('generates constant 100 RS series when target is its own benchmark without redundant fetch', async () => {
+    const mockFetch = vi.fn().mockResolvedValue([
+      { time: 100, open: 500, high: 505, low: 495, close: 500, volume: 1000 },
+      { time: 200, open: 505, high: 515, low: 502, close: 510, volume: 1200 }
+    ]);
+
+    // Loading SPY with benchmark AMEX:SPY (self-benchmark equivalence)
+    const data = await cache.load('SPY', '1D', mockFetch, undefined, 'AMEX:SPY');
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch).toHaveBeenCalledWith('SPY', '1D');
+    expect(data.rsData).toEqual([
+      { time: 100, value: 100 },
+      { time: 200, value: 100 }
+    ]);
+    expect(data.benchmarkClose).toBe(510);
+    expect(cache.has('SPY', '1D')).toBe(true);
+  });
+
+  it('does not poison cache if benchmark fetch fails', async () => {
+    const mockFetch = vi.fn().mockImplementation(async (sym: string) => {
+      if (sym === 'AMEX:SPY') {
+        throw new Error('Network error');
+      }
+      return [
+        { time: 100, open: 100, high: 105, low: 95, close: 100, volume: 500 }
+      ];
+    });
+
+    const data = await cache.load('TSLA', '1D', mockFetch, undefined, 'AMEX:SPY');
+    expect(data.bars).toHaveLength(1);
+    // Cache entry for TSLA should not be retained so subsequent requests retry benchmark fetch
+    expect(cache.has('TSLA', '1D')).toBe(false);
   });
 });

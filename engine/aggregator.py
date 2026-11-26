@@ -7,7 +7,7 @@ resilient seeding and out-of-order tick protection.
 
 from dataclasses import dataclass, asdict
 from collections import deque
-from typing import Dict, List, Optional, Callable, Any
+from typing import Dict, List, Optional, Callable, Any, Tuple
 import time
 import math
 import logging
@@ -45,6 +45,9 @@ class TickToBarAggregator:
         self.current_bars: Dict[str, CandlestickBar] = {}
         self.bar_history: Dict[str, deque] = {}
         self.last_cumulative_volume: Dict[str, float] = {}
+        self.market_clocks: Dict[str, Tuple[int, float]] = {}
+        self.last_closed_bucket: Dict[str, int] = {}
+        self.bar_start_times: Dict[str, int] = {}
 
     def seed_history(self, symbol: str, bars: List[Dict[str, Any]]) -> None:
         """
@@ -88,8 +91,19 @@ class TickToBarAggregator:
                 merged_by_time[t] = live_bar
 
         sorted_bars = [merged_by_time[t] for t in sorted(merged_by_time.keys())]
-        self.bar_history[symbol] = deque(sorted_bars[:-1], maxlen=self.max_history)
-        self.current_bars[symbol] = sorted_bars[-1]
+        last_closed = self.last_closed_bucket.get(symbol)
+        if last_closed is not None and sorted_bars and last_closed >= sorted_bars[-1].time:
+            self.bar_history[symbol] = deque(sorted_bars, maxlen=self.max_history)
+            self.current_bars.pop(symbol, None)
+            self.bar_start_times.pop(symbol, None)
+        else:
+            self.bar_history[symbol] = deque(sorted_bars[:-1], maxlen=self.max_history)
+            self.current_bars[symbol] = sorted_bars[-1]
+            self.bar_start_times[symbol] = sorted_bars[-1].time
+            if len(sorted_bars) >= 2:
+                prev_closed = sorted_bars[-2].time
+                if last_closed is None or prev_closed > last_closed:
+                    self.last_closed_bucket[symbol] = prev_closed
 
     def process_tick(
         self,
@@ -97,6 +111,7 @@ class TickToBarAggregator:
         price: Optional[float],
         cumulative_volume: Optional[float] = None,
         tick_time: Optional[int] = None,
+        arrival_time: Optional[float] = None,
     ) -> Optional[CandlestickBar]:
         """
         Processes an incoming tick.
@@ -107,12 +122,20 @@ class TickToBarAggregator:
         - Drops stale/out-of-order ticks that belong to previous windows.
         - Safely isolates callbacks (on_bar_completed, on_bar_update) so subscriber exceptions never corrupt or stall active bar aggregation.
         """
+        if arrival_time is None:
+            arrival_time = time.time()
+
         if tick_time is None or tick_time <= 0:
             tick_time = int(time.time())
 
         # Normalize millisecond timestamps to seconds
         if tick_time > 10_000_000_000:
             tick_time = tick_time // 1000
+
+        # Update market clock only if quote time advances
+        last_clock = self.market_clocks.get(symbol)
+        if last_clock is None or tick_time > last_clock[0]:
+            self.market_clocks[symbol] = (tick_time, arrival_time)
 
         if symbol not in self.bar_history:
             self.bar_history[symbol] = deque(maxlen=self.max_history)
@@ -123,6 +146,12 @@ class TickToBarAggregator:
             if prev_vol is not None and cumulative_volume >= prev_vol:
                 volume_delta = round(cumulative_volume - prev_vol, 8)
             self.last_cumulative_volume[symbol] = cumulative_volume
+
+        bucket_time = tick_time - (tick_time % self.timeframe_seconds)
+
+        # Drop late ticks belonging to already closed buckets (preserving volume baseline above)
+        if symbol in self.last_closed_bucket and bucket_time <= self.last_closed_bucket[symbol]:
+            return self.current_bars.get(symbol)
 
         # Validate price: must be finite, non-null, and positive (> 0.0)
         is_valid_price = False
@@ -147,7 +176,6 @@ class TickToBarAggregator:
                         logger.error("Error in on_bar_update callback for %s: %s", symbol, e, exc_info=True)
             return current_bar
 
-        bucket_time = tick_time - (tick_time % self.timeframe_seconds)
         current_bar = self.current_bars.get(symbol)
 
         if current_bar is None or bucket_time > current_bar.time:
@@ -155,6 +183,7 @@ class TickToBarAggregator:
                 # Defense in depth: prevent appending duplicate timestamp to bar_history
                 if not self.bar_history[symbol] or self.bar_history[symbol][-1].time != current_bar.time:
                     self.bar_history[symbol].append(current_bar)
+                self.last_closed_bucket[symbol] = current_bar.time
                 if self.on_bar_completed:
                     try:
                         self.on_bar_completed(symbol, current_bar)
@@ -170,6 +199,9 @@ class TickToBarAggregator:
                 volume=round(volume_delta, 8),
             )
             self.current_bars[symbol] = new_bar
+            # Bar start = bucket start (not the first tick's time), so a quiet symbol's bar
+            # closes at bucket end + grace instead of up to one full timeframe late.
+            self.bar_start_times[symbol] = bucket_time
             if self.on_bar_update:
                 try:
                     self.on_bar_update(symbol, new_bar)
@@ -195,11 +227,82 @@ class TickToBarAggregator:
     def get_current_bar(self, symbol: str) -> Optional[CandlestickBar]:
         return self.current_bars.get(symbol)
 
+    def close_due_bars(
+        self,
+        now_wall: Optional[float] = None,
+        grace_seconds: float = 2.0,
+    ) -> List[Tuple[str, CandlestickBar]]:
+        """Closes active candlestick bars whose market clock has elapsed timeframe plus grace.
+        Returns list of closed (symbol, bar) tuples.
+        """
+        if now_wall is None:
+            now_wall = time.time()
+
+        closed: List[Tuple[str, CandlestickBar]] = []
+        for symbol, current_bar in list(self.current_bars.items()):
+            if symbol not in self.market_clocks:
+                continue
+            last_quote_time, recv_wall = self.market_clocks[symbol]
+            market_clock = last_quote_time + (now_wall - recv_wall)
+
+            bar_start = self.bar_start_times.get(symbol, current_bar.time)
+            if market_clock >= bar_start + self.timeframe_seconds + grace_seconds:
+                if symbol not in self.bar_history:
+                    self.bar_history[symbol] = deque(maxlen=self.max_history)
+                if not self.bar_history[symbol] or self.bar_history[symbol][-1].time != current_bar.time:
+                    self.bar_history[symbol].append(current_bar)
+                self.last_closed_bucket[symbol] = current_bar.time
+                self.current_bars.pop(symbol, None)
+                self.bar_start_times.pop(symbol, None)
+
+                closed.append((symbol, current_bar))
+
+                if self.on_bar_completed:
+                    try:
+                        self.on_bar_completed(symbol, current_bar)
+                    except (Exception, asyncio.CancelledError) as e:
+                        logger.error("Error in on_bar_completed callback for %s: %s", symbol, e, exc_info=True)
+
+        return closed
+
+    def replace_history_bar(self, symbol: str, bar_data: Any) -> bool:
+        """Replaces a closed bar in bar_history whose timestamp matches bar_data.
+        Does not modify current_bars.
+        Returns True if a matching bar was found and replaced, False otherwise.
+        """
+        if symbol not in self.bar_history:
+            return False
+        if isinstance(bar_data, dict):
+            t = int(bar_data["time"])
+            new_bar = CandlestickBar(
+                time=t,
+                open=float(bar_data["open"]),
+                high=float(bar_data["high"]),
+                low=float(bar_data["low"]),
+                close=float(bar_data["close"]),
+                volume=float(bar_data.get("volume", 0.0)),
+            )
+        elif isinstance(bar_data, CandlestickBar):
+            t = bar_data.time
+            new_bar = bar_data
+        else:
+            return False
+
+        history = self.bar_history[symbol]
+        for idx, b in enumerate(history):
+            if b.time == t:
+                history[idx] = new_bar
+                return True
+        return False
+
     def remove_symbol(self, symbol: str) -> None:
         """Removes in-memory bar state for an evicted symbol."""
         self.current_bars.pop(symbol, None)
         self.bar_history.pop(symbol, None)
         self.last_cumulative_volume.pop(symbol, None)
+        self.market_clocks.pop(symbol, None)
+        self.last_closed_bucket.pop(symbol, None)
+        self.bar_start_times.pop(symbol, None)
 
     def get_history(self, symbol: str) -> List[Dict[str, Any]]:
         history = list(self.bar_history.get(symbol, []))

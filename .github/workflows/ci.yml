@@ -27,7 +27,7 @@ jobs:
 
       - name: Run Backend Pytest Suite
         run: |
-          pytest -q --ignore=tests/test_e2e_live.py --ignore=tests/stress_websocket.py --ignore=tests/test_gemini_api_copilot.py -m "not network" -rs
+          pytest -q --ignore=tests/test_e2e_live.py --ignore=tests/stress_websocket.py -m "not network" -rs
 
   frontend:
     name: Frontend Typecheck & Vitest (Ubuntu)

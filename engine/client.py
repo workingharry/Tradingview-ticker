@@ -12,7 +12,8 @@ import random
 import logging
 import inspect
 import math
-from typing import List, Dict, Any, Optional, Callable, Set
+import time
+from typing import List, Dict, Any, Optional, Callable, Set, Tuple, Awaitable
 from .protocol import (
     parse_tradingview_packets,
     encode_tradingview_message,
@@ -47,13 +48,35 @@ class TradingViewAsyncClient:
         symbols: List[str],
         on_quote_update: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
         on_status_change: Optional[Callable[[str], Any]] = None,
+        idle_timeout: float = 30.0,
+        backoff_initial: float = 1.0,
+        stable_after: float = 60.0,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.symbols: List[str] = list(symbols)
         self.on_quote_update: Optional[Callable[[str, Dict[str, Any]], Any]] = on_quote_update
         self.on_status_change: Optional[Callable[[str], Any]] = on_status_change
+        self.idle_timeout: float = idle_timeout
+        self.backoff_initial: float = backoff_initial
+        self.stable_after: float = stable_after
+        self._clock: Callable[[], float] = clock
+        self._sleep: Callable[[float], Awaitable[None]] = sleep
+
+        self.reconnect_count: int = 0
+        self.last_disconnect_reason: Optional[str] = None
+        self._last_message_time: Optional[float] = None
 
         self.states: Dict[str, Dict[str, Any]] = {
-            s: {"volume": 0.0, "price": 0.0, "change": 0.0, "changePercentage": 0.0, "time": 0}
+            s: {
+                "volume": 0.0,
+                "price": 0.0,
+                "change": 0.0,
+                "changePercentage": 0.0,
+                "time": 0,
+                "update_mode": None,
+                "is_delayed": None,
+            }
             for s in self.symbols
         }
 
@@ -70,10 +93,23 @@ class TradingViewAsyncClient:
 
         # Chart Series storage and in-flight request tracking (Scheme B)
         self.chart_series: Dict[str, List[Dict[str, Any]]] = {}
-        self.series_futures: Dict[str, tuple[str, asyncio.Future]] = {}
+        self.series_futures: Dict[str, Tuple[str, asyncio.Future]] = {}
         self.series_keys: Dict[str, str] = {}
         self.series_map: Dict[str, str] = {}
         self.key_to_series_id: Dict[str, str] = {}
+
+    def get_health(self) -> Dict[str, Any]:
+        """Returns health diagnostics for upstream connection monitoring."""
+        age_sec: Optional[float] = None
+        if self._last_message_time is not None:
+            age_sec = max(0.0, self._clock() - self._last_message_time)
+        return {
+            "connected": self.connected,
+            "last_message_age_sec": age_sec,
+            "reconnect_count": self.reconnect_count,
+            "last_disconnect_reason": self.last_disconnect_reason,
+            "idle_timeout": self.idle_timeout,
+        }
 
     def _is_open(self) -> bool:
         """Determines if the WebSocket connection is actively open across websockets v13-v15."""
@@ -151,6 +187,8 @@ class TradingViewAsyncClient:
                 "change": 0.0,
                 "changePercentage": 0.0,
                 "time": 0,
+                "update_mode": None,
+                "is_delayed": None,
             }
         if self._is_open() and self.qsl and self.qs:
             await self._send("quote_add_symbols", [self.qsl, symbol])
@@ -239,6 +277,13 @@ class TradingViewAsyncClient:
                                 st["low"] = val
                         except (ValueError, TypeError):
                             logger.debug("Failed parsing low in quote: %s", values)
+
+                    if "update_mode" in values:
+                        mode_raw = values["update_mode"]
+                        if mode_raw is not None:
+                            mode_str = str(mode_raw)
+                            st["update_mode"] = mode_str
+                            st["is_delayed"] = "delayed" in mode_str.lower()
 
                     self._dispatch_quote(symbol, dict(st))
 
@@ -372,9 +417,14 @@ class TradingViewAsyncClient:
             self.series_futures.pop(series_id, None)
 
     async def _connection_loop(self) -> None:
-        backoff = 1.0
+        backoff = self.backoff_initial
         browser_ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        first_connect = True
         while self.running:
+            if not first_connect:
+                self.reconnect_count += 1
+            first_connect = False
+            connected_at: Optional[float] = None
             try:
                 self._set_status("connecting")
                 connect_kwargs: Dict[str, Any] = {
@@ -397,14 +447,15 @@ class TradingViewAsyncClient:
                 async with websockets.connect(self.WS_URL, **connect_kwargs) as ws:
                     self.ws = ws
                     self.connected = True
-                    backoff = 1.0
+                    connected_at = self._clock()
                     self._set_status("connected")
 
                     await self._authenticate_and_subscribe()
 
                     parser = StreamingTradingViewParser()
                     while self.running:
-                        raw_msg = await ws.recv()
+                        raw_msg = await asyncio.wait_for(ws.recv(), timeout=self.idle_timeout)
+                        self._last_message_time = self._clock()
                         chunk = raw_msg.decode("utf-8", errors="replace") if isinstance(raw_msg, (bytes, bytearray)) else str(raw_msg)
                         packets = parser.feed(chunk)
                         for pkt in packets:
@@ -421,11 +472,17 @@ class TradingViewAsyncClient:
                 break
             except Exception as e:
                 self.connected = False
-                self._set_status(f"disconnected: {e}")
+                if isinstance(e, asyncio.TimeoutError):
+                    self.last_disconnect_reason = "idle timeout"
+                else:
+                    self.last_disconnect_reason = str(e)
+                self._set_status(f"disconnected: {self.last_disconnect_reason}")
                 if not self.running:
                     break
+                if connected_at is not None and (self._clock() - connected_at >= self.stable_after):
+                    backoff = self.backoff_initial
                 jitter = random.uniform(0.0, 0.5 * backoff)
-                await asyncio.sleep(backoff + jitter)
+                await self._sleep(backoff + jitter)
                 backoff = min(backoff * 2.0, 30.0)
             finally:
                 self.connected = False

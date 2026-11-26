@@ -189,10 +189,11 @@ class TestDOMIntegrityAndSelectorAlignment(unittest.TestCase):
         )
         qs_matches = set(qs_pattern.findall(self.app_js))
 
-        # If querySelector is used, all targets must exist in HTML
+        # If querySelector is used, all leading #id targets must exist in HTML
         for selector in qs_matches:
-            if selector.startswith("#"):
-                target_id = selector[1:]
+            m = re.match(r"^#([A-Za-z0-9_-]+)", selector)
+            if m:
+                target_id = m.group(1)
                 self.assertIn(
                     f'id="{target_id}"',
                     self.index_html,

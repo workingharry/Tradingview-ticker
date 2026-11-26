@@ -24,6 +24,7 @@ export interface ParsedHistoryData {
   candleData: CandleDataPoint[];
   volumeData: VolumeDataPoint[];
   rsData: RSDataPoint[];
+  benchmarkClose?: number;
   fetchedAt: number;
 }
 
@@ -56,13 +57,85 @@ export function isValidBar(b: any): boolean {
   return true;
 }
 
+function toComparableTime(t: Time): number | null {
+  if (typeof t === 'number') return Number.isFinite(t) ? t : null;
+  if (typeof t === 'string') {
+    const ms = Date.parse(t);
+    return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+  }
+  return null;
+}
+
+export function calcRelativeStrength(
+  candleData: CandleDataPoint[],
+  benchmarkBars: any[]
+): { rsData: RSDataPoint[]; benchmarkClose?: number } {
+  if (!candleData.length || !Array.isArray(benchmarkBars) || !benchmarkBars.length) {
+    return { rsData: [] };
+  }
+
+  const benchMap = new Map<string, number>();
+  const validBench: Array<{ timeNum: number; close: number }> = [];
+
+  for (let i = 0; i < benchmarkBars.length; i++) {
+    const b = benchmarkBars[i];
+    if (!b || typeof b !== 'object') continue;
+    const close = Number(b.close);
+    if (!Number.isFinite(close) || close <= 0) continue;
+    const normT = normalizeTime(b.time);
+    benchMap.set(String(normT), close);
+    const timeNum = toComparableTime(normT);
+    if (timeNum !== null) {
+      validBench.push({ timeNum, close });
+    }
+  }
+
+  if (!validBench.length && benchMap.size === 0) {
+    return { rsData: [] };
+  }
+
+  validBench.sort((a, b) => a.timeNum - b.timeNum);
+
+  const rsData: RSDataPoint[] = [];
+  let bIdx = 0;
+  let lastBenchClose: number | undefined;
+
+  for (let i = 0; i < candleData.length; i++) {
+    const c = candleData[i];
+    let bClose = benchMap.get(String(c.time));
+    if (bClose === undefined && validBench.length > 0) {
+      const cTimeNum = toComparableTime(c.time);
+      if (cTimeNum !== null) {
+        while (bIdx + 1 < validBench.length && validBench[bIdx + 1].timeNum <= cTimeNum) {
+          bIdx++;
+        }
+        if (validBench[bIdx].timeNum <= cTimeNum) {
+          bClose = validBench[bIdx].close;
+        }
+      }
+    }
+
+    if (bClose !== undefined && Number.isFinite(bClose) && bClose > 0) {
+      const rsVal = Number(((c.close / bClose) * 100).toFixed(4));
+      if (Number.isFinite(rsVal)) {
+        rsData.push({ time: c.time, value: rsVal });
+        lastBenchClose = bClose;
+      }
+    }
+  }
+
+  return { rsData, benchmarkClose: lastBenchClose };
+}
+
 export function parseBarsToChartData(
   bars: any[],
-  maxBars: number = 500
+  maxBars: number = 500,
+  benchmarkBars?: any[]
 ): {
   candleData: CandleDataPoint[];
   volumeData: VolumeDataPoint[];
   rsData: RSDataPoint[];
+  benchmarkClose?: number;
 } {
   const candleData: CandleDataPoint[] = [];
   const volumeData: VolumeDataPoint[] = [];
@@ -89,6 +162,11 @@ export function parseBarsToChartData(
     });
   }
 
+  if (benchmarkBars && benchmarkBars.length > 0) {
+    const { rsData, benchmarkClose } = calcRelativeStrength(candleData, benchmarkBars);
+    return { candleData, volumeData, rsData, benchmarkClose };
+  }
+
   const firstClose = candleData.length > 0 && candleData[0].close > 0 ? candleData[0].close : 1;
   const rsData: RSDataPoint[] = candleData.map((b) => ({
     time: b.time,
@@ -103,6 +181,7 @@ interface PrefetchQueueItem {
   timeframe: string;
   generation: number;
   fetchFn: FetchHistoryFn;
+  benchmarkSymbol?: string;
 }
 
 export class LRUPrefetchCache {
@@ -177,7 +256,8 @@ export class LRUPrefetchCache {
     symbol: string,
     timeframe: string,
     fetchFn: FetchHistoryFn,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    benchmarkSymbol?: string
   ): Promise<ParsedHistoryData> {
     if (this.isDisposed) {
       throw new Error('LRUPrefetchCache is disposed');
@@ -199,18 +279,41 @@ export class LRUPrefetchCache {
       return pending;
     }
 
+    const cleanSym = symbol.trim().toUpperCase();
+    const cleanBench = benchmarkSymbol?.trim().toUpperCase();
+    const isSelfBenchmark =
+      !!cleanBench &&
+      (cleanBench === cleanSym ||
+        cleanBench.endsWith(':' + cleanSym) ||
+        cleanSym.endsWith(':' + cleanBench));
+    const shouldFetchBench = !!cleanBench && !isSelfBenchmark;
+
     const fetchPromise = (async () => {
       try {
-        const rawBars = await fetchFn(symbol, timeframe);
-        const { candleData, volumeData, rsData } = parseBarsToChartData(rawBars, this.maxBarsPerEntry);
+        const [rawBars, benchData] = await Promise.all([
+          fetchFn(symbol, timeframe),
+          shouldFetchBench
+            ? this.load(cleanBench!, timeframe, fetchFn).catch(() => null)
+            : Promise.resolve(null)
+        ]);
+        const benchBars = isSelfBenchmark ? rawBars : benchData?.bars;
+        const { candleData, volumeData, rsData, benchmarkClose } = parseBarsToChartData(
+          rawBars,
+          this.maxBarsPerEntry,
+          benchBars
+        );
         const parsed: ParsedHistoryData = {
           bars: rawBars,
           candleData,
           volumeData,
           rsData,
+          benchmarkClose,
           fetchedAt: Date.now()
         };
-        this.set(symbol, timeframe, parsed);
+        // Avoid poisoning the cache with degraded RS data if benchmark fetch failed
+        if (!shouldFetchBench || (benchBars && benchBars.length > 0)) {
+          this.set(symbol, timeframe, parsed);
+        }
         return parsed;
       } finally {
         this.inFlight.delete(key);
@@ -252,7 +355,8 @@ export class LRUPrefetchCache {
     symbols: string[],
     timeframe: string,
     generation: number,
-    fetchFn: FetchHistoryFn
+    fetchFn: FetchHistoryFn,
+    benchmarkSymbol?: string
   ): void {
     if (this.isDisposed) return;
 
@@ -279,7 +383,8 @@ export class LRUPrefetchCache {
           symbol: cleanSym,
           timeframe: timeframe.trim().toUpperCase(),
           generation,
-          fetchFn
+          fetchFn,
+          benchmarkSymbol
         });
       }
     }
@@ -311,7 +416,7 @@ export class LRUPrefetchCache {
       }
 
       this.activePrefetchCount++;
-      this.load(item.symbol, item.timeframe, item.fetchFn)
+      this.load(item.symbol, item.timeframe, item.fetchFn, undefined, item.benchmarkSymbol)
         .catch(() => {
           // Non-critical background failure is silently swallowed
         })
@@ -324,7 +429,9 @@ export class LRUPrefetchCache {
 
   public invalidate(predicate: (symbol: string, timeframe: string) => boolean): void {
     for (const key of Array.from(this.cache.keys())) {
-      const [sym, tf] = key.split(':');
+      const sepIdx = key.lastIndexOf(':');
+      const sym = sepIdx === -1 ? key : key.slice(0, sepIdx);
+      const tf = sepIdx === -1 ? '' : key.slice(sepIdx + 1);
       if (predicate(sym, tf)) {
         this.cache.delete(key);
       }

@@ -148,3 +148,31 @@ def test_drawing_api_endpoints():
     # 5. Verify deleted
     res_verify = client.get("/api/drawings?symbol=SPY")
     assert not any(d["id"] == unique_id for d in res_verify.json()["drawings"])
+
+
+def test_drawing_api_symbol_normalization_parity():
+    client = TestClient(app)
+    unique_id = f"norm_test_{uuid.uuid4().hex[:8]}"
+
+    # Save with bare symbol 'SPY' -> normalized to 'AMEX:SPY'
+    res_post = client.post("/api/drawings", json={
+        "id": unique_id,
+        "symbol": "SPY",
+        "pane_id": "candle",
+        "tool_type": "risk_reward",
+        "timeframe_scope": "ALL",
+        "data": {"entryPrice": 600.0, "stopPrice": 590.0, "targetPrice": 620.0}
+    })
+    assert res_post.status_code == 200
+    assert res_post.json()["drawing"]["symbol"] == "AMEX:SPY"
+
+    # Fetch using prefixed symbol 'AMEX:SPY' finds the exact same drawing
+    res_get_prefixed = client.get("/api/drawings?symbol=AMEX:SPY")
+    assert res_get_prefixed.status_code == 200
+    assert res_get_prefixed.json()["symbol"] == "AMEX:SPY"
+    assert any(d["id"] == unique_id for d in res_get_prefixed.json()["drawings"])
+
+    # Cleanup
+    res_del = client.delete(f"/api/drawings/{unique_id}")
+    assert res_del.status_code == 200
+    assert res_del.json()["deleted"] is True

@@ -11,10 +11,39 @@ let chartBundle: MultiPaneChartBundle | null = null;
 let currentSymbol = 'NVDA';
 let currentTimeframe = '1D';
 let currentBars: any[] = [];
+let currentBenchmarkClose: number | null = null;
+const latestBenchmarkCloseBySymbol = new Map<string, number>();
 let liveFeed: LiveFeed | null = null;
 let commandPalette: CommandPalette | null = null;
 let drawingSyncEngine: DrawingSyncEngine | null = null;
 let activeWatchlist: string[] = [...DEFAULT_WATCHLIST];
+
+const TF_SECONDS: Record<string, number> = {
+  '1m': 60,
+  '5m': 300,
+  '15m': 900,
+  '1h': 3600,
+  '1D': 86400,
+  '1W': 604800
+};
+
+export function alignBarTimestamp(barTime: number, timeframe: string): number {
+  if (timeframe === '1m') return barTime;
+  if (timeframe === '1W') {
+    // Unix Epoch (1970-01-01) was Thursday. Monday 00:00:00 UTC offset is 3 days (259200 seconds).
+    return Math.floor((barTime + 259200) / 604800) * 604800 - 259200;
+  }
+  const tfSec = TF_SECONDS[timeframe] || 60;
+  return barTime - (barTime % tfSec);
+}
+
+export function getBenchmarkForSymbol(symbol: string): string {
+  const s = symbol.trim().toUpperCase();
+  if (s.startsWith('BINANCE:') || s.includes('USDT') || s.includes('BUSD')) {
+    return 'BINANCE:BTCUSDT';
+  }
+  return 'AMEX:SPY';
+}
 
 // Concurrency guards for rapid symbol switching
 let currentLoadGen = 0;
@@ -70,13 +99,7 @@ async function initTerminal() {
     });
   });
 
-  // Hotkey: Shift+R to attach Risk/Reward Box
-  window.addEventListener('keydown', (e) => {
-    if (e.shiftKey && (e.key === 'R' || e.key === 'r')) {
-      e.preventDefault();
-      attachDemoRiskReward();
-    }
-  });
+  // Shift+R hotkey is handled inside setupKeyboardNavigation() so it never hijacks typing in inputs.
 }
 
 function setupCommandPalette() {
@@ -122,7 +145,7 @@ function setupKeyboardNavigation() {
       return;
     }
 
-    // Keyboard fast symbol flipper
+    // Keyboard fast symbol flipper & Risk/Reward shortcut
     if (e.code === 'Space') {
       e.preventDefault();
       flipWatchlistSymbol(e.shiftKey ? -1 : 1);
@@ -132,6 +155,9 @@ function setupKeyboardNavigation() {
     } else if (e.code === 'ArrowUp') {
       e.preventDefault();
       flipWatchlistSymbol(-1);
+    } else if (e.shiftKey && (e.key === 'R' || e.key === 'r')) {
+      e.preventDefault();
+      attachDemoRiskReward();
     }
   });
 }
@@ -140,7 +166,7 @@ export function flipWatchlistSymbol(direction: 1 | -1): void {
   if (activeWatchlist.length === 0) return;
 
   const currentIdx = activeWatchlist.findIndex(
-    (s) => s.toUpperCase() === currentSymbol.toUpperCase()
+    (s) => isSymbolMatch(s, currentSymbol)
   );
 
   let nextIdx: number;
@@ -183,8 +209,9 @@ export async function switchSymbol(symbol: string, timeframe: string = currentTi
     symbolInput.value = cleanSymbol;
   }
 
-  // Add to active watchlist if not already present
-  if (!activeWatchlist.includes(cleanSymbol)) {
+  // Add to active watchlist if not already present (using isSymbolMatch for equivalent ticker deduplication)
+  const existingIdx = activeWatchlist.findIndex((s) => isSymbolMatch(s, cleanSymbol));
+  if (existingIdx === -1) {
     activeWatchlist.push(cleanSymbol);
     commandPalette?.updateSymbols(activeWatchlist);
   }
@@ -208,7 +235,7 @@ export async function switchSymbol(symbol: string, timeframe: string = currentTi
 }
 
 function speculativePrefetchNeighbors(symbol: string, timeframe: string): void {
-  const idx = activeWatchlist.findIndex((s) => s.toUpperCase() === symbol.toUpperCase());
+  const idx = activeWatchlist.findIndex((s) => isSymbolMatch(s, symbol));
   if (idx === -1 || activeWatchlist.length <= 1) return;
 
   const len = activeWatchlist.length;
@@ -216,12 +243,18 @@ function speculativePrefetchNeighbors(symbol: string, timeframe: string): void {
   const next2 = activeWatchlist[(idx + 2) % len];
   const prev1 = activeWatchlist[(idx - 1 + len) % len];
 
-  prefetchCache.prefetch([next1, next2, prev1], timeframe, currentLoadGen, fetchHistoryBars);
+  prefetchCache.prefetch(
+    [next1, next2, prev1],
+    timeframe,
+    currentLoadGen,
+    fetchHistoryBars,
+    getBenchmarkForSymbol(symbol)
+  );
 }
 
 async function fetchHistoryBars(symbol: string, timeframe: string, signal?: AbortSignal): Promise<any[]> {
   const data = await apiFetch<any>(
-    `/api/history?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=300`,
+    `/api/history?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=300&seed=true`,
     { signal }
   );
   return Array.isArray(data) ? data : data?.bars || [];
@@ -231,14 +264,28 @@ function applyChartData(parsed: ParsedHistoryData): void {
   if (!chartBundle) return;
 
   currentBars = parsed.bars;
+  const benchSym = getBenchmarkForSymbol(currentSymbol);
+  if (typeof parsed.benchmarkClose === 'number' && Number.isFinite(parsed.benchmarkClose) && parsed.benchmarkClose > 0) {
+    currentBenchmarkClose = parsed.benchmarkClose;
+    latestBenchmarkCloseBySymbol.set(benchSym, parsed.benchmarkClose);
+  } else {
+    currentBenchmarkClose = latestBenchmarkCloseBySymbol.get(benchSym) ?? null;
+  }
+
   chartBundle.candleSeries.setData(parsed.candleData);
   chartBundle.volumeSeries.setData(parsed.volumeData);
   chartBundle.rsSeries.setData(parsed.rsData);
-  chartBundle.chart.timeScale().fitContent();
+  if (parsed.candleData.length > 0) {
+    chartBundle.chart.timeScale().fitContent();
+  }
 }
 
-async function loadHistory(symbol: string, timeframe: string) {
+export async function loadHistory(symbol: string, timeframe: string, forceRefresh: boolean = false) {
   if (!chartBundle) return;
+
+  if (forceRefresh) {
+    prefetchCache.invalidate((s, tf) => isSymbolMatch(s, symbol) && tf === timeframe.trim().toUpperCase());
+  }
 
   // 1. Abort any previous in-flight request for a superseded symbol
   if (activeAbortController) {
@@ -253,7 +300,8 @@ async function loadHistory(symbol: string, timeframe: string) {
       symbol,
       timeframe,
       fetchHistoryBars,
-      controller.signal
+      controller.signal,
+      getBenchmarkForSymbol(symbol)
     );
 
     // 2. Generation guard: If a newer symbol was requested while this fetch was in flight, discard response
@@ -261,9 +309,7 @@ async function loadHistory(symbol: string, timeframe: string) {
       return;
     }
 
-    if (parsed.candleData.length > 0) {
-      applyChartData(parsed);
-    }
+    applyChartData(parsed);
   } catch (err: any) {
     if (err?.name === 'AbortError') {
       // Intentionally aborted due to rapid symbol switch
@@ -301,44 +347,112 @@ function setupLiveFeed() {
     },
     onGap: (gap) => {
       console.warn('[LiveFeed] Bar gap detected:', gap);
-      // Re-fetch latest history to heal gap if it affects current symbol
+      // Invalidate stale cache for current symbol and re-fetch latest history from server
       if (isSymbolMatch(gap.symbol, currentSymbol)) {
-        loadHistory(currentSymbol, currentTimeframe);
+        prefetchCache.invalidate((s, tf) => isSymbolMatch(s, currentSymbol) && tf === currentTimeframe.trim().toUpperCase());
+        loadHistory(currentSymbol, currentTimeframe, true);
       }
     }
   });
 
   liveFeed.subscribe((msg: LiveMessage) => {
+    // Track latest benchmark close from live bar/quote stream for real-time RS calculation
+    if (msg.symbol) {
+      const livePrice = msg.type === 'bar' ? Number(msg.bar?.close) : Number(msg.data?.price);
+      if (Number.isFinite(livePrice) && livePrice > 0) {
+        if (isSymbolMatch(msg.symbol, 'AMEX:SPY')) {
+          latestBenchmarkCloseBySymbol.set('AMEX:SPY', livePrice);
+          if (getBenchmarkForSymbol(currentSymbol) === 'AMEX:SPY') {
+            currentBenchmarkClose = livePrice;
+          }
+        } else if (isSymbolMatch(msg.symbol, 'BINANCE:BTCUSDT')) {
+          latestBenchmarkCloseBySymbol.set('BINANCE:BTCUSDT', livePrice);
+          if (getBenchmarkForSymbol(currentSymbol) === 'BINANCE:BTCUSDT') {
+            currentBenchmarkClose = livePrice;
+          }
+        }
+      }
+    }
+
     if (msg.type === 'bar' && msg.bar && chartBundle && isSymbolMatch(msg.symbol, currentSymbol)) {
       const b = msg.bar;
-      const barTime = normalizeTime(b.time);
+      const rawClose = Number(b.close);
+      if (!Number.isFinite(rawClose) || rawClose <= 0) return;
 
-      if (currentBars.length > 0 && normalizeTime(currentBars[currentBars.length - 1].time) === barTime) {
-        currentBars[currentBars.length - 1] = b;
+      let barTime = normalizeTime(b.time);
+      let open = Number(b.open);
+      let high = Number(b.high);
+      let low = Number(b.low);
+      const close = rawClose;
+      let volume = Number(b.volume || 0);
+
+      const lastBar = currentBars.length > 0 ? currentBars[currentBars.length - 1] : null;
+      const lastTime = lastBar ? normalizeTime(lastBar.time) : null;
+      const tfSec = TF_SECONDS[currentTimeframe] || 60;
+
+      // Align 1m WebSocket bars to active timeframe & enforce LWC monotonic timestamp invariant
+      if (typeof barTime === 'number' && typeof lastTime === 'number') {
+        if (currentTimeframe !== '1m' && tfSec > 60) {
+          const bucketTime = alignBarTimestamp(barTime, currentTimeframe);
+          const lastBucket = alignBarTimestamp(lastTime, currentTimeframe);
+          let targetTime = bucketTime;
+          if (bucketTime === lastBucket || Math.abs(barTime - lastTime) < tfSec || bucketTime < lastTime) {
+            targetTime = lastTime;
+          }
+          if (targetTime === lastTime && lastBar) {
+            open = Number(lastBar.open);
+            high = Math.max(Number(lastBar.high), high, close);
+            low = Math.min(Number(lastBar.low), low, close);
+            volume = Math.max(Number(lastBar.volume || 0), volume);
+          } else {
+            open = close;
+            high = close;
+            low = close;
+          }
+          barTime = targetTime as Time;
+        } else if (barTime < lastTime) {
+          return;
+        }
+      }
+
+      const mergedBar = { time: barTime, open, high, low, close, volume };
+      if (lastBar && lastTime === barTime) {
+        currentBars[currentBars.length - 1] = mergedBar;
       } else {
-        currentBars.push(b);
+        currentBars.push(mergedBar);
       }
 
       chartBundle.candleSeries.update({
         time: barTime,
-        open: b.open,
-        high: b.high,
-        low: b.low,
-        close: b.close
+        open,
+        high,
+        low,
+        close
       });
 
       chartBundle.volumeSeries.update({
         time: barTime,
-        value: b.volume || 0,
-        color: b.close >= b.open ? 'rgba(34, 197, 94, 0.45)' : 'rgba(239, 68, 68, 0.45)'
+        value: volume,
+        color: close >= open ? 'rgba(34, 197, 94, 0.45)' : 'rgba(239, 68, 68, 0.45)'
       });
+
+      const benchSym = getBenchmarkForSymbol(currentSymbol);
+      const benchClose = currentBenchmarkClose ?? latestBenchmarkCloseBySymbol.get(benchSym) ?? null;
+      if (benchClose && benchClose > 0) {
+        const rsVal = Number(((close / benchClose) * 100).toFixed(4));
+        if (Number.isFinite(rsVal)) {
+          chartBundle.rsSeries.update({ time: barTime, value: rsVal });
+        }
+      } else if (isSymbolMatch(currentSymbol, benchSym)) {
+        chartBundle.rsSeries.update({ time: barTime, value: 100 });
+      }
     }
   });
 
   liveFeed.start();
 }
 
-function isSymbolMatch(msgSymbol?: string, targetSymbol?: string): boolean {
+export function isSymbolMatch(msgSymbol?: string, targetSymbol?: string): boolean {
   if (!msgSymbol || !targetSymbol) return false;
   const s1 = msgSymbol.toUpperCase();
   const s2 = targetSymbol.toUpperCase();
@@ -372,4 +486,6 @@ function attachDemoRiskReward() {
   });
 }
 
-window.addEventListener('DOMContentLoaded', initTerminal);
+if (typeof window !== 'undefined') {
+  window.addEventListener('DOMContentLoaded', initTerminal);
+}

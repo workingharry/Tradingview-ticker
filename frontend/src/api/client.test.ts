@@ -55,14 +55,53 @@ describe('API Client & Transport Hardening', () => {
     expect(headers.get('Content-Type')).toBe('application/json');
   });
 
-  it('throws descriptive error when API returns non-200 status', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+  it('throws descriptive ApiHttpError when API returns non-200 status and does not retry 4xx', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: false,
       status: 404,
       text: async () => 'Not Found'
     } as any);
 
-    await expect(apiFetch('/api/missing')).rejects.toThrow('API 404 on /api/missing: Not Found');
+    await expect(
+      apiFetch('/api/missing', { retry: { max: 2, baseMs: 1, capMs: 5 } })
+    ).rejects.toThrow('API 404 on /api/missing: Not Found');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry when request is aborted via AbortSignal', async () => {
+    const ac = new AbortController();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() => {
+      ac.abort(new DOMException('Aborted', 'AbortError'));
+      return Promise.reject(new DOMException('Aborted', 'AbortError'));
+    });
+
+    await expect(
+      apiFetch('/api/aborted', {
+        signal: ac.signal,
+        retry: { max: 3, baseMs: 1, capMs: 5 }
+      })
+    ).rejects.toThrow();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries transient HTTP 5xx responses and resolves on subsequent success', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        text: async () => 'Service Unavailable'
+      } as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ status: 'recovered' })
+      } as any);
+
+    const res = await apiFetch<{ status: string }>('/api/flaky', {
+      retry: { max: 2, baseMs: 1, capMs: 5 }
+    });
+    expect(res).toEqual({ status: 'recovered' });
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
   it('manages LiveFeed lifecycle transitions and gap detection', () => {

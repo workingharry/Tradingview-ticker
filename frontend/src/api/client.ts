@@ -67,6 +67,29 @@ export async function getBackendConfig(options?: { signal?: AbortSignal; forceRe
   return cachedConfigPromise;
 }
 
+export class ApiHttpError extends Error {
+  public readonly status: number;
+
+  constructor(status: number, path: string, body: string) {
+    super(`API ${status} on ${path}: ${body}`);
+    this.name = 'ApiHttpError';
+    this.status = status;
+  }
+}
+
+function isRetryableError(err: unknown, callerSignal?: AbortSignal): boolean {
+  if (callerSignal?.aborted) {
+    return false;
+  }
+  if (err instanceof ApiHttpError) {
+    return err.status === 429 || err.status >= 500;
+  }
+  if (err && typeof err === 'object' && (err as { name?: string }).name === 'AbortError') {
+    return false;
+  }
+  return true;
+}
+
 export interface ApiOptions extends RequestInit {
   timeoutMs?: number; // default: 10_000ms
   retry?: { max: number; baseMs: number; capMs: number };
@@ -89,34 +112,42 @@ export async function apiFetch<T>(path: string, options: ApiOptions = {}): Promi
     controller.abort(new Error(`API request timed out after ${timeoutMs}ms: ${path}`));
   }, timeoutMs);
 
+  const onCallerAbort = () => {
+    controller.abort(init.signal?.reason);
+  };
+
   if (init.signal) {
     if (init.signal.aborted) {
       clearTimeout(timeoutId);
       throw init.signal.reason;
     }
-    init.signal.addEventListener('abort', () => {
-      controller.abort(init.signal?.reason);
-    });
+    init.signal.addEventListener('abort', onCallerAbort, { once: true });
   }
 
   try {
     const res = await fetch(`${cfg.baseUrl}${path}`, { ...init, headers, signal: controller.signal });
     clearTimeout(timeoutId);
     if (!res.ok) {
-      throw new Error(`API ${res.status} on ${path}: ${await res.text()}`);
+      throw new ApiHttpError(res.status, path, await res.text());
     }
     return (await res.json()) as T;
   } catch (err) {
     clearTimeout(timeoutId);
-    if (retry && retry.max > 0) {
+    if (retry && retry.max > 0 && isRetryableError(err, init.signal ?? undefined)) {
       const nextDelay = Math.min(retry.capMs, retry.baseMs);
       await new Promise((r) => setTimeout(r, nextDelay));
+      if (init.signal?.aborted) {
+        throw init.signal.reason;
+      }
       return apiFetch<T>(path, {
         ...options,
         retry: { max: retry.max - 1, baseMs: retry.baseMs * 2, capMs: retry.capMs }
       });
     }
     throw err;
+  } finally {
+    clearTimeout(timeoutId);
+    init.signal?.removeEventListener('abort', onCallerAbort);
   }
 }
 

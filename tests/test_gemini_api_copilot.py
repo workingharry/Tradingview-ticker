@@ -6,20 +6,21 @@ import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+import pytest
 
 # Add skill script to path
 SKILL_SCRIPTS = os.path.expanduser("~/.gemini/config/skills/gemini-api-copilot/scripts")
 if SKILL_SCRIPTS not in sys.path:
     sys.path.insert(0, SKILL_SCRIPTS)
 
-import gemini_query
+gemini_query = pytest.importorskip("gemini_query", reason="External gemini-api-copilot skill not installed")
 
 # Also import harness for readback testing
 HARNESS_DIR = os.path.expanduser("~/.gemini/config/plugins/tri-copilot-team/scripts")
 if HARNESS_DIR not in sys.path:
     sys.path.insert(0, HARNESS_DIR)
 
-import harness
+harness = pytest.importorskip("harness", reason="External tri-copilot-team harness not installed")
 
 
 class TestGeminiAPICopilot(unittest.TestCase):

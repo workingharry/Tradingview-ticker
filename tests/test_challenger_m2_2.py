@@ -78,7 +78,8 @@ class TestAdversarialHistoryEndpoint(unittest.TestCase):
                 self.assertEqual(resp.status_code, 200, f"Failed for symbol {sym!r}")
                 data = resp.json()
                 self.assertIn("symbol", data)
-                self.assertEqual(data["symbol"], sym)
+                expected_sym = server.normalize_symbol_id(sym) if server.is_valid_symbol_id(sym) else sym
+                self.assertEqual(data["symbol"], expected_sym)
                 self.assertIn("bars", data)
                 self.assertIsInstance(data["bars"], list)
 

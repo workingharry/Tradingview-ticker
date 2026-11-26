@@ -18,6 +18,7 @@
   var bbUpperSeries = null;
   var bbLowerSeries = null;
   var resizeObserver = null;
+  var watchlistItemsEl = null;
   var subCharts = {};
   var subTvWidgets = {};
   var activeSplitLayout = "1x1";
@@ -44,6 +45,13 @@
         console.warn("[disposeSubPane] ro.disconnect() error for pane " + paneNum, e);
       }
       try {
+        if (subCharts[paneNum].rsChart && typeof subCharts[paneNum].rsChart.remove === "function") {
+          subCharts[paneNum].rsChart.remove();
+        }
+      } catch (e) {
+        console.warn("[disposeSubPane] rsChart.remove() error for pane " + paneNum, e);
+      }
+      try {
         if (subCharts[paneNum].chart && typeof subCharts[paneNum].chart.remove === "function") {
           subCharts[paneNum].chart.remove();
         }
@@ -62,6 +70,12 @@
       }
       delete subTvWidgets[paneNum];
     }
+    var rsPane = document.getElementById("splitRsPane" + paneNum);
+    if (rsPane) rsPane.style.display = "none";
+    var splitPane = document.getElementById("splitPane" + paneNum);
+    if (splitPane) splitPane.classList.remove("has-rs");
+    var rsContainer = document.getElementById("splitRsChart" + paneNum);
+    if (rsContainer) rsContainer.innerHTML = "";
     var container = document.getElementById("splitChart" + paneNum);
     if (container) {
       try {
@@ -77,6 +91,626 @@
         console.warn("[disposeSubPane] iframes lookup error for pane " + paneNum, e);
       }
       container.innerHTML = "";
+    }
+  }
+
+function resolveBenchmarkSymbol(tag) {
+  if (!tag || tag === "SPY") return "AMEX:SPY";
+  if (tag === "QQQ") return "NASDAQ:QQQ";
+  if (tag === "IWM") return "AMEX:IWM";
+  if (tag === "DIA") return "NYSE:DIA";
+  if (tag === "BTCUSDT") return "BINANCE:BTCUSDT";
+  if (tag.indexOf(":") !== -1) return tag;
+  return "NASDAQ:" + tag;
+}
+
+// ==========================================================================
+// 主圖與 RS 副圖的 X 軸同步
+// ==========================================================================
+// 不用時間範圍同步（subscribeVisibleTimeRangeChange + setVisibleRange）：時間範圍只包含「有資料的 K 棒」，
+// 捲到最右邊的空白時會被換算成「把剩下幾根撐滿整個寬度」，兩張圖再互相回傳，就會一路放大到最大。
+// 改用邏輯範圍同步：會保留右側空白與縮放。為了讓兩張圖的同一個邏輯位置是同一根 K 棒，
+// RS 資料先補齊成和主圖相同的時間軸（沒有值的時間點補空白點）。
+
+/** 取得某個 series 目前的時間軸（依序的時間陣列）；取不到時改用 fallbackBars。 */
+function getSeriesTimeAxis(series, fallbackBars) {
+  var src = null;
+  if (series && typeof series.data === "function") {
+    try { src = series.data(); } catch (e) { src = null; }
+  }
+  if (!Array.isArray(src) || src.length === 0) src = fallbackBars;
+  var times = [];
+  if (!Array.isArray(src)) return times;
+  for (var i = 0; i < src.length; i++) {
+    var t = src[i] ? src[i].time : null;
+    if (typeof t === "number" && isFinite(t) && (times.length === 0 || t > times[times.length - 1])) times.push(t);
+  }
+  return times;
+}
+
+/**
+ * 把資料補齊到指定的時間軸：時間軸上的每個時間都有一筆（沒有值的補 { time } 空白點）。
+ * 資料中不在時間軸上的點會保留並依時間排序。不修改傳入的陣列。
+ */
+function padToTimeAxis(data, axisTimes) {
+  var src = Array.isArray(data) ? data : [];
+  if (!Array.isArray(axisTimes) || axisTimes.length === 0) return src.slice();
+  var axisSet = {};
+  for (var a = 0; a < axisTimes.length; a++) axisSet[axisTimes[a]] = true;
+  var byTime = {};
+  var extra = [];
+  for (var i = 0; i < src.length; i++) {
+    var p = src[i];
+    if (!p || typeof p.time !== "number") continue;
+    if (axisSet[p.time]) {
+      byTime[p.time] = p;
+    } else {
+      extra.push(p);
+    }
+  }
+  var out = [];
+  for (var j = 0; j < axisTimes.length; j++) {
+    var t = axisTimes[j];
+    out.push(byTime[t] ? byTime[t] : { time: t });
+  }
+  if (extra.length > 0) {
+    out = out.concat(extra);
+    out.sort(function(x, y) { return x.time - y.time; });
+  }
+  return out;
+}
+
+/** 把目標圖的可見邏輯範圍設成 range；目前已相同（差距小於 1e-6）時不動作，避免兩張圖互相回傳。 */
+function syncLogicalRangeTo(targetChart, range) {
+  if (!targetChart || typeof targetChart.timeScale !== "function") return false;
+  if (!range || typeof range.from !== "number" || typeof range.to !== "number" || !isFinite(range.from) || !isFinite(range.to)) return false;
+  var ts = targetChart.timeScale();
+  var cur = null;
+  try { cur = ts.getVisibleLogicalRange(); } catch (e) { cur = null; }
+  if (cur && Math.abs(cur.from - range.from) < 1e-6 && Math.abs(cur.to - range.to) < 1e-6) return false;
+  try {
+    ts.setVisibleLogicalRange({ from: range.from, to: range.to });
+  } catch (e2) {
+    return false;
+  }
+  return true;
+}
+
+/** 雙向綁定兩張圖的邏輯範圍；onPrimaryChange 會在主圖範圍改變時呼叫（例如重畫繪圖層）。 */
+function bindLogicalRangeSync(primaryChart, secondaryChart, onPrimaryChange) {
+  if (!primaryChart || !secondaryChart) return;
+  var syncing = false;
+  primaryChart.timeScale().subscribeVisibleLogicalRangeChange(function(range) {
+    if (typeof onPrimaryChange === "function") onPrimaryChange();
+    if (syncing || !range) return;
+    syncing = true;
+    try { syncLogicalRangeTo(secondaryChart, range); } finally { syncing = false; }
+  });
+  secondaryChart.timeScale().subscribeVisibleLogicalRangeChange(function(range) {
+    if (syncing || !range) return;
+    syncing = true;
+    try { syncLogicalRangeTo(primaryChart, range); } finally { syncing = false; }
+  });
+}
+
+if (typeof window !== "undefined") {
+  window.getSeriesTimeAxis = getSeriesTimeAxis;
+  window.padToTimeAxis = padToTimeAxis;
+  window.syncLogicalRangeTo = syncLogicalRangeTo;
+  window.bindLogicalRangeSync = bindLogicalRangeSync;
+}
+if (typeof globalThis !== "undefined") {
+  globalThis.getSeriesTimeAxis = getSeriesTimeAxis;
+  globalThis.padToTimeAxis = padToTimeAxis;
+  globalThis.syncLogicalRangeTo = syncLogicalRangeTo;
+  globalThis.bindLogicalRangeSync = bindLogicalRangeSync;
+}
+
+var RIGHT_WHITESPACE_BARS = 10;   // 最後一根 K 棒右邊預設留的空白（根數）
+var INITIAL_VISIBLE_BARS = 150;   // 換標的或週期時預設顯示的 K 棒數
+var lastChartViewKey = null;      // 上次重設視圖時的 "標的|週期"
+
+/**
+ * 把圖表重設成「最後 INITIAL_VISIBLE_BARS 根 + 右邊 RIGHT_WHITESPACE_BARS 根空白」。
+ * n 為資料筆數。n <= 0 時不動作。沒有 setVisibleLogicalRange 時退回 fitContent。
+ * 回傳設定的範圍（或 null）。
+ */
+function resetChartView(chartObj, n) {
+  if (typeof n !== "number" || !isFinite(n) || n <= 0) return null;
+  if (!chartObj || typeof chartObj.timeScale !== "function") return null;
+  var from = n - INITIAL_VISIBLE_BARS;
+  var to = n - 1 + RIGHT_WHITESPACE_BARS;
+  var targetRange = { from: from, to: to };
+  var ts = null;
+  try { ts = chartObj.timeScale(); } catch (e) { ts = null; }
+  if (!ts) return null;
+  if (typeof ts.setVisibleLogicalRange === "function") {
+    try {
+      ts.setVisibleLogicalRange(targetRange);
+      return targetRange;
+    } catch (e2) {
+      if (typeof ts.fitContent === "function") {
+        try { ts.fitContent(); } catch (errFit) {}
+      }
+      return targetRange;
+    }
+  } else if (typeof ts.fitContent === "function") {
+    try { ts.fitContent(); } catch (e3) {}
+    return targetRange;
+  }
+  return null;
+}
+
+/**
+ * 資料換掉後，用「時間」當錨點換算舊的邏輯範圍。
+ * - 最新一根在畫面內（range.to >= 舊的最後索引）：保持與最新一根的距離（新 K 棒會跟上）。
+ * - 否則：以畫面右緣那根 K 棒的時間為錨點，找新資料中第一根 time >= 該時間的索引。
+ * prevTimes / nextTimes 為遞增的時間陣列。任一為空或 range 無效時回傳 null。
+ */
+function computePreservedLogicalRange(prevTimes, nextTimes, range) {
+  if (!Array.isArray(prevTimes) || prevTimes.length === 0 || !Array.isArray(nextTimes) || nextTimes.length === 0) return null;
+  if (!range || !Number.isFinite(range.from) || !Number.isFinite(range.to)) return null;
+
+  var prevLast = prevTimes.length - 1;
+  var nextLast = nextTimes.length - 1;
+
+  var prevFirst = prevTimes[0], prevEnd = prevTimes[prevLast];
+  var nextFirst = nextTimes[0], nextEnd = nextTimes[nextLast];
+  if (!Number.isFinite(prevFirst) || !Number.isFinite(prevEnd) || !Number.isFinite(nextFirst) || !Number.isFinite(nextEnd)) return null;
+  if (prevEnd < nextFirst || nextEnd < prevFirst) return null;
+
+  if (range.to >= prevLast - 0.5) {
+    var offset = range.to - prevLast;
+    var span = range.to - range.from;
+    var newTo = nextLast + offset;
+    var newFrom = newTo - span;
+    return { from: newFrom, to: newTo };
+  }
+
+  var anchorIdx = Math.max(0, Math.min(prevLast, Math.round(range.to)));
+  var anchorTime = prevTimes[anchorIdx];
+  if (!Number.isFinite(anchorTime)) return null;
+
+  var lo = 0, hi = nextLast, newAnchorIdx = -1;
+  while (lo <= hi) {
+    var mid = (lo + hi) >> 1;
+    if (!Number.isFinite(nextTimes[mid])) return null;
+    if (nextTimes[mid] >= anchorTime) {
+      newAnchorIdx = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  if (newAnchorIdx === -1) {
+    newAnchorIdx = nextLast;
+  }
+
+  var shift = newAnchorIdx - anchorIdx;
+  return { from: range.from + shift, to: range.to + shift };
+}
+
+/** clientX 是否落在右側價格軸上。rect 為圖表容器的 getBoundingClientRect()，axisWidth 為價格軸寬度（px）。 */
+function isPointInPriceAxis(clientX, rect, axisWidth) {
+  if (typeof clientX !== "number" || !rect) return false;
+  if (typeof rect.left !== "number" || typeof rect.width !== "number") return false;
+  if (typeof axisWidth !== "number" || !isFinite(axisWidth) || axisWidth <= 0) return false;
+  return clientX >= rect.left + rect.width - axisWidth && clientX <= rect.left + rect.width;
+}
+
+/**
+ * 拖動圖表時是否要關閉 AUTO，讓使用者可以上下移動。
+ * state: { autoScale, tool, draggingHandle }
+ * Lightweight Charts 4.2.0 只在拖動開始時檢查 autoScale，所以 AUTO 開著時第一次上下拖只會關掉 AUTO，第二次拖才會上下移動。
+ */
+function shouldDisableAutoScaleOnDrag(dx, dy, state) {
+  if (!state || typeof state !== "object") return false;
+  if (state.autoScale !== true) return false;
+  if (state.tool !== "cursor") return false;
+  if (state.draggingHandle) return false;
+  var absDx = Math.abs(dx);
+  var absDy = Math.abs(dy);
+  if (absDy <= 6) return false;
+  if (absDy <= absDx) return false;
+  return true;
+}
+
+/** 讀取主圖價格軸實際的 autoScale，同步到 isAutoScale 與 AUTO 按鈕；不呼叫 applyOptions。回傳讀到的值或 null。 */
+function syncAutoScaleFromChart() {
+  if (!chart || typeof chart.priceScale !== "function") return null;
+  var currentScale = null;
+  try {
+    var ps = chart.priceScale("right");
+    if (ps && typeof ps.options === "function") {
+      var opts = ps.options();
+      if (opts && typeof opts.autoScale === "boolean") {
+        currentScale = opts.autoScale;
+      }
+    }
+  } catch (e) {
+    currentScale = null;
+  }
+  if (typeof currentScale === "boolean") {
+    isAutoScale = currentScale;
+    var autoBtn = document.getElementById("scaleAuto");
+    if (autoBtn) {
+      autoBtn.classList.toggle("active", isAutoScale);
+    }
+    return currentScale;
+  }
+  return null;
+}
+
+function handleChartDblClick(e) {
+  if (!e || typeof e.clientX !== "number") return;
+  var pContainer = (typeof priceContainer !== "undefined" && priceContainer) ? priceContainer : (document.getElementById("chart") || chartContainer);
+  if (!pContainer || typeof pContainer.getBoundingClientRect !== "function") return;
+  var rect = pContainer.getBoundingClientRect();
+  var axisWidth = 0;
+  if (chart && typeof chart.priceScale === "function") {
+    try {
+      var ps = chart.priceScale("right");
+      if (ps && typeof ps.width === "function") {
+        axisWidth = ps.width() || 0;
+      }
+    } catch (err) {
+      axisWidth = 0;
+    }
+  }
+  if (isPointInPriceAxis(e.clientX, rect, axisWidth)) {
+    setAutoScale(true);
+  }
+}
+
+/** localStorage.tv_debug_range === "1" 時，記錄這張圖所有改變可見範圍的呼叫與呼叫堆疊。 */
+function installRangeDebug(chartObj, label) {
+  if (!chartObj || typeof chartObj.timeScale !== "function") return chartObj;
+  var enabled = false;
+  try {
+    if (typeof safeGetStorage === "function") {
+      enabled = (safeGetStorage("tv_debug_range", "0") === "1");
+    } else if (typeof localStorage !== "undefined" && localStorage && typeof localStorage.getItem === "function") {
+      enabled = (localStorage.getItem("tv_debug_range") === "1");
+    }
+  } catch (e) {
+    enabled = false;
+  }
+  if (!enabled) return chartObj;
+
+  var origTimeScale = chartObj.timeScale;
+  var cachedTs = null;
+
+  chartObj.timeScale = function() {
+    var ts = origTimeScale.apply(chartObj, arguments);
+    if (!ts) return ts;
+    if (cachedTs && cachedTs._raw === ts) {
+      return cachedTs;
+    }
+
+    var methods = [
+      "setVisibleLogicalRange",
+      "setVisibleRange",
+      "fitContent",
+      "scrollToPosition",
+      "scrollToRealTime",
+      "resetTimeScale"
+    ];
+
+    for (var i = 0; i < methods.length; i++) {
+      (function(name) {
+        if (typeof ts[name] === "function" && !ts[name]._rangeDebugWrapped) {
+          var origFn = ts[name];
+          var wrapped = function() {
+            var args = Array.prototype.slice.call(arguments);
+            var stack = "";
+            try { stack = (new Error()).stack || ""; } catch (err) {}
+            console.log("[range]", label, name, args, stack);
+            return origFn.apply(ts, arguments);
+          };
+          wrapped._rangeDebugWrapped = true;
+          wrapped._orig = origFn;
+          ts[name] = wrapped;
+        }
+      })(methods[i]);
+    }
+
+    cachedTs = ts;
+    cachedTs._raw = ts;
+    return ts;
+  };
+
+  return chartObj;
+}
+
+if (typeof window !== "undefined") {
+  window.RIGHT_WHITESPACE_BARS = RIGHT_WHITESPACE_BARS;
+  window.INITIAL_VISIBLE_BARS = INITIAL_VISIBLE_BARS;
+  window.resetChartView = resetChartView;
+  window.computePreservedLogicalRange = computePreservedLogicalRange;
+  window.isPointInPriceAxis = isPointInPriceAxis;
+  window.shouldDisableAutoScaleOnDrag = shouldDisableAutoScaleOnDrag;
+  window.syncAutoScaleFromChart = syncAutoScaleFromChart;
+  window.handleChartDblClick = handleChartDblClick;
+  window.installRangeDebug = installRangeDebug;
+  window.renderChartData = renderChartData;
+  window.clampAndSetVisibleRange = clampAndSetVisibleRange;
+}
+if (typeof globalThis !== "undefined") {
+  globalThis.RIGHT_WHITESPACE_BARS = RIGHT_WHITESPACE_BARS;
+  globalThis.INITIAL_VISIBLE_BARS = INITIAL_VISIBLE_BARS;
+  globalThis.resetChartView = resetChartView;
+  globalThis.computePreservedLogicalRange = computePreservedLogicalRange;
+  globalThis.isPointInPriceAxis = isPointInPriceAxis;
+  globalThis.shouldDisableAutoScaleOnDrag = shouldDisableAutoScaleOnDrag;
+  globalThis.syncAutoScaleFromChart = syncAutoScaleFromChart;
+  globalThis.handleChartDblClick = handleChartDblClick;
+  globalThis.installRangeDebug = installRangeDebug;
+  globalThis.renderChartData = renderChartData;
+  globalThis.clampAndSetVisibleRange = clampAndSetVisibleRange;
+}
+
+  function renderSubPaneRs(paneNum, bars, benchBars) {
+    var splitPaneEl = document.getElementById("splitPane" + paneNum);
+    var rsPaneEl = document.getElementById("splitRsPane" + paneNum);
+    var rsChartEl = document.getElementById("splitRsChart" + paneNum);
+    if (!rsPaneEl || !splitPaneEl) return;
+
+    if (!indicatorConfig.rsLine || currentEngine === "C") {
+      rsPaneEl.style.display = "none";
+      splitPaneEl.classList.remove("has-rs");
+      if (subObj) {
+        if (subObj.rsLineSeries && typeof subObj.rsLineSeries.setMarkers === "function") {
+          try { subObj.rsLineSeries.setMarkers([]); } catch (e) {}
+        }
+        if (subObj.series && typeof subObj.series.setMarkers === "function") {
+          try { subObj.series.setMarkers([]); } catch (e) {}
+        }
+      }
+      var nhBadgeOff = document.getElementById("splitRsNhBadge" + paneNum);
+      if (nhBadgeOff) nhBadgeOff.style.display = "none";
+      return;
+    }
+
+    rsPaneEl.style.display = "flex";
+    splitPaneEl.classList.add("has-rs");
+
+    var subObj = subCharts[paneNum];
+    if (!subObj) return;
+
+    var targetBars = bars || subObj.bars;
+    if (!targetBars || targetBars.length === 0) return;
+
+    var subTf = paneTimeframes[paneNum] || "1D";
+    var bBars = null;
+    if (subTf === (activeTimeframe || "1D")) {
+      bBars = benchBars || benchmarkRawBars || [];
+    } else {
+      var cacheKey = (rsBenchmarkTag || "SPY") + "|" + subTf;
+      if (benchBars && benchBars !== benchmarkRawBars) {
+        bBars = benchBars;
+        subPaneBenchmarkCache[cacheKey] = { bars: benchBars, inFlight: false, failedAt: 0 };
+      } else if (subPaneBenchmarkCache[cacheKey] && subPaneBenchmarkCache[cacheKey].bars && subPaneBenchmarkCache[cacheKey].bars.length > 0) {
+        bBars = subPaneBenchmarkCache[cacheKey].bars;
+      } else {
+        var subState = subPaneBenchmarkCache[cacheKey] || { inFlight: false, failedAt: 0, bars: [] };
+        subPaneBenchmarkCache[cacheKey] = subState;
+        var nowMs = Date.now();
+        if (!subState.inFlight && (nowMs - subState.failedAt >= 30000)) {
+          subState.inFlight = true;
+          var benchSym = resolveBenchmarkSymbol(rsBenchmarkTag);
+          var subFetchUrl = "/api/history?seed=true&timeframe=" + encodeURIComponent(subTf) + "&symbol=" + encodeURIComponent(benchSym);
+          fetch(subFetchUrl)
+            .then(function(res) {
+              if (!res.ok) throw new Error("HTTP " + res.status);
+              return res.json();
+            })
+            .then(function(data) {
+              subState.inFlight = false;
+              var fetchedBars = (data && data.bars) || [];
+              if (fetchedBars.length === 0) {
+                subState.failedAt = Date.now();
+              } else {
+                subState.failedAt = 0;
+                subState.bars = fetchedBars;
+                if (subCharts[paneNum] && subCharts[paneNum].bars) {
+                  renderSubPaneRs(paneNum, subCharts[paneNum].bars, fetchedBars);
+                }
+              }
+            })
+            .catch(function(e) {
+              subState.inFlight = false;
+              subState.failedAt = Date.now();
+            });
+        }
+        var earlySubRsAxis = (typeof getSeriesTimeAxis === "function") ? getSeriesTimeAxis(subObj.series, targetBars) : [];
+        if (subObj.rsLineSeries && typeof subObj.rsLineSeries.setData === "function") {
+          subObj.rsLineSeries.setData(padToTimeAxis([], earlySubRsAxis));
+        }
+        if (subObj.rsEmaSeries && typeof subObj.rsEmaSeries.setData === "function") {
+          subObj.rsEmaSeries.setData(padToTimeAxis([], earlySubRsAxis));
+        }
+        return;
+      }
+    }
+
+    var titleEl = document.getElementById("splitRsTitle" + paneNum);
+    if (titleEl) {
+      titleEl.textContent = "RS vs " + (rsBenchmarkTag || "SPY");
+    }
+
+    if (!subObj.rsChart && typeof LightweightCharts !== "undefined" && rsChartEl) {
+      var subPalette = getChartThemePalette();
+      var subRsTimeOpts = makeChartTimeOptions(
+        function() { return paneSymbols[paneNum]; },
+        function() { return paneTimeframes[paneNum] || "1D"; }
+      );
+      var rsChartInstance = LightweightCharts.createChart(rsChartEl, {
+        width: rsChartEl.clientWidth || 300,
+        height: rsChartEl.clientHeight || 65,
+        layout: {
+          background: { color: subPalette.background },
+          textColor: subPalette.subTextColor
+        },
+        grid: {
+          vertLines: { color: subPalette.grid },
+          horzLines: { color: subPalette.grid }
+        },
+        rightPriceScale: { borderColor: subPalette.border },
+        timeScale: { borderColor: subPalette.border, timeVisible: true, rightOffset: RIGHT_WHITESPACE_BARS, tickMarkFormatter: subRsTimeOpts.tickMarkFormatter },
+        localization: { timeFormatter: subRsTimeOpts.timeFormatter }
+      });
+      var rsLineSeries = rsChartInstance.addLineSeries({
+        color: "#26a69a",
+        lineWidth: 2,
+        priceLineVisible: false,
+        lastValueVisible: false
+      });
+      var rsEmaSeries = rsChartInstance.addLineSeries({
+        color: "#38bdf8",
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false
+      });
+      subObj.rsChart = rsChartInstance;
+      subObj.rsLineSeries = rsLineSeries;
+      subObj.rsEmaSeries = rsEmaSeries;
+
+      var subMainChart = subObj.chart;
+      if (subMainChart && !subObj.timeSyncBound) {
+        subObj.timeSyncBound = true;
+        bindLogicalRangeSync(subMainChart, rsChartInstance);
+      }
+    }
+
+    if (!subObj.rsChart || !subObj.rsLineSeries) return;
+
+    var subRsAxis = getSeriesTimeAxis(subObj.series, targetBars);
+    if (subObj.rsLineSeries && typeof subObj.rsLineSeries.setData === "function") {
+      subObj.rsLineSeries.setData(padToTimeAxis([], subRsAxis));
+    }
+    if (subObj.rsEmaSeries && typeof subObj.rsEmaSeries.setData === "function") {
+      subObj.rsEmaSeries.setData(padToTimeAxis([], subRsAxis));
+    }
+    var currentMode = (indicatorConfig && indicatorConfig.rsMode) || "mansfield";
+    if (window.Indicators) {
+      if (currentMode === "mansfield") {
+        if (subObj.rsZeroLine && typeof subObj.rsLineSeries.removePriceLine === "function") {
+          try { subObj.rsLineSeries.removePriceLine(subObj.rsZeroLine); } catch (e) {}
+          subObj.rsZeroLine = null;
+        }
+        var toolkit = window.Indicators.calcATRToolkit(targetBars, bBars, {
+          riskDollar: 500,
+          stopMult: 2.0,
+          mansfieldLen: 52
+        });
+        if (toolkit && toolkit.mansfieldRS && toolkit.mansfieldRS.length > 0) {
+          if (typeof subObj.rsLineSeries.applyOptions === "function") {
+            subObj.rsLineSeries.applyOptions({ color: "#26a69a", lineWidth: 2 });
+          }
+          subObj.rsLineSeries.setData(padToTimeAxis(toolkit.mansfieldRS, subRsAxis));
+          if (typeof subObj.rsLineSeries.createPriceLine === "function") {
+            try {
+              subObj.rsZeroLine = subObj.rsLineSeries.createPriceLine({
+                price: 0.0,
+                color: "#787b86",
+                lineWidth: 1,
+                lineStyle: 2,
+                axisLabelVisible: false
+              });
+            } catch (e) {}
+          }
+        }
+        if (toolkit && toolkit.atrPct && toolkit.atrPct.length) {
+          var atrData = toolkit.atrPct.map(function(item) {
+            var numVal = typeof item.value === "number" ? item.value : (item.atrPct || 0);
+            return { time: item.time, value: Number(numVal.toFixed(2)) };
+          });
+          if (typeof subObj.rsEmaSeries.applyOptions === "function") {
+            subObj.rsEmaSeries.applyOptions({ color: "#38bdf8", lineWidth: 1, lineStyle: 1 });
+          }
+          subObj.rsEmaSeries.setData(padToTimeAxis(atrData, subRsAxis));
+        }
+      } else {
+        if (subObj.rsZeroLine && typeof subObj.rsLineSeries.removePriceLine === "function") {
+          try { subObj.rsLineSeries.removePriceLine(subObj.rsZeroLine); } catch (e) {}
+          subObj.rsZeroLine = null;
+        }
+        if (bBars && bBars.length > 0) {
+          var rsData = window.Indicators.calcRelativeStrength(targetBars, bBars);
+          if (rsData) {
+            if (typeof subObj.rsLineSeries.applyOptions === "function") {
+              subObj.rsLineSeries.applyOptions({ color: "#2962ff", lineWidth: 2 });
+            }
+            subObj.rsLineSeries.setData(padToTimeAxis(rsData, subRsAxis));
+          }
+          if (rsData && rsData.length >= 21) {
+            var rsBarsForEma = rsData.map(function(r) { return { time: r.time, close: r.value }; });
+            var rsEma = window.Indicators.calcEMA(rsBarsForEma, 21);
+            if (typeof subObj.rsEmaSeries.applyOptions === "function") {
+              subObj.rsEmaSeries.applyOptions({ color: "#f59e0b", lineWidth: 1, lineStyle: 2 });
+            }
+            subObj.rsEmaSeries.setData(padToTimeAxis(rsEma, subRsAxis));
+          }
+        }
+      }
+
+      if (subObj.chart) {
+        try { syncLogicalRangeTo(subObj.rsChart, subObj.chart.timeScale().getVisibleLogicalRange()); } catch (e) {}
+      }
+
+      var ratingBadge = document.getElementById("splitRsRating" + paneNum);
+      if (ratingBadge) {
+        if (bBars && bBars.length > 0 && typeof window.Indicators.calcRsRating === "function") {
+          var rsRating = window.Indicators.calcRsRating(targetBars, bBars);
+          if (rsRating !== null) {
+            ratingBadge.textContent = "RS " + rsRating;
+            ratingBadge.className = "rs-rating-badge split-rs-rating " + (rsRating >= 80 ? "rating-high" : (rsRating >= 60 ? "rating-med" : "rating-low"));
+          } else {
+            ratingBadge.textContent = "RS --";
+            ratingBadge.className = "rs-rating-badge split-rs-rating";
+          }
+        } else {
+          ratingBadge.textContent = "RS --";
+          ratingBadge.className = "rs-rating-badge split-rs-rating";
+        }
+      }
+
+      var nhBadge = document.getElementById("splitRsNhBadge" + paneNum);
+      if (bBars && bBars.length > 0 && typeof window.Indicators.calcRsNewHighMarkers === "function") {
+        var rsMarkers = window.Indicators.calcRsNewHighMarkers(targetBars, bBars);
+        if (!Array.isArray(rsMarkers)) rsMarkers = [];
+        var last5Time = targetBars.length >= 5 ? targetBars[targetBars.length - 5].time : 0;
+        var hasRecentNh = rsMarkers.some(function(m) { return m.time >= last5Time; });
+        if (nhBadge) {
+          nhBadge.style.display = hasRecentNh ? "inline-block" : "none";
+        }
+        if (subObj.rsLineSeries && typeof subObj.rsLineSeries.setMarkers === "function") {
+          try {
+            subObj.rsLineSeries.setMarkers(rsMarkers);
+          } catch (e) {}
+        }
+        if (subObj.series && typeof subObj.series.setMarkers === "function") {
+          try {
+            subObj.series.setMarkers(rsMarkers);
+          } catch (e) {}
+        }
+      } else if (nhBadge) {
+        nhBadge.style.display = "none";
+        if (subObj.rsLineSeries && typeof subObj.rsLineSeries.setMarkers === "function") {
+          try { subObj.rsLineSeries.setMarkers([]); } catch (e) {}
+        }
+        if (subObj.series && typeof subObj.series.setMarkers === "function") {
+          try { subObj.series.setMarkers([]); } catch (e) {}
+        }
+      }
+    }
+
+    if (rsChartEl && subObj.rsChart) {
+      var rw = rsChartEl.clientWidth;
+      var rh = rsChartEl.clientHeight;
+      if (rw > 0 && rh > 0) {
+        subObj.rsChart.applyOptions({ width: rw, height: rh });
+      }
     }
   }
 
@@ -158,10 +792,10 @@
             symbol: tvSymbol,
             interval: tvInterval,
             timezone: "exchange",
-            theme: "dark",
+            theme: currentTheme === "light" ? "light" : "dark",
             style: "1",
             locale: currentLang === "zh" ? "zh_TW" : "en",
-            toolbar_bg: "#131722",
+            toolbar_bg: getChartThemePalette().tvToolbarBg,
             enable_publishing: false,
             allow_symbol_change: false,
             hide_side_toolbar: true,
@@ -193,18 +827,25 @@
     }
 
     if (typeof LightweightCharts === "undefined") return;
+    var subPalette = getChartThemePalette();
+    var subTimeOpts = makeChartTimeOptions(
+      function() { return symbol; },
+      function() { return tf; }
+    );
     var subChart = LightweightCharts.createChart(container, {
       width: container.clientWidth || 380,
       height: container.clientHeight || 240,
       layout: {
-        background: { color: "#131722" },
-        textColor: "#9ca3af"
+        background: { color: subPalette.background },
+        textColor: subPalette.subTextColor
       },
       grid: {
-        vertLines: { color: "#1e222d" },
-        horzLines: { color: "#1e222d" }
+        vertLines: { color: subPalette.grid },
+        horzLines: { color: subPalette.grid }
       },
-      timeScale: { borderColor: "#2a2e39", timeVisible: true }
+      rightPriceScale: { borderColor: subPalette.border },
+      timeScale: { borderColor: subPalette.border, timeVisible: true, rightOffset: RIGHT_WHITESPACE_BARS, tickMarkFormatter: subTimeOpts.tickMarkFormatter },
+      localization: { timeFormatter: subTimeOpts.timeFormatter }
     });
     var subSeries = subChart.addCandlestickSeries({
       upColor: "#26a69a",
@@ -253,6 +894,14 @@
           if (sw > 0 && sh > 0 && subObj.chart) {
             subObj.chart.applyOptions({ width: sw, height: sh });
           }
+          var rsCont = document.getElementById("splitRsChart" + paneNum);
+          if (rsCont && subObj.rsChart) {
+            var rw = rsCont.clientWidth;
+            var rh = rsCont.clientHeight;
+            if (rw > 0 && rh > 0) {
+              subObj.rsChart.applyOptions({ width: rw, height: rh });
+            }
+          }
         });
         ro.observe(container);
         subObj.ro = ro;
@@ -266,8 +915,7 @@
     if (typeof AbortController !== "undefined") {
       ac = paneAbortControllers[paneNum] = new AbortController();
     }
-    var url = "/api/history?symbol=" + encodeURIComponent(symbol) + "&timeframe=" + encodeURIComponent(tf);
-    if (sessionToken) url += "&token=" + encodeURIComponent(sessionToken);
+    var url = "/api/history?seed=true&symbol=" + encodeURIComponent(symbol) + "&timeframe=" + encodeURIComponent(tf);
 
     fetch(url, { signal: ac ? ac.signal : undefined })
       .then(function(r) { return r.ok ? r.json() : null; })
@@ -275,6 +923,7 @@
         if (gen !== paneGen[paneNum] || subCharts[paneNum] !== subObj) return;
         if (!container.isConnected && !document.contains(container)) return;
         if (d && Array.isArray(d.bars) && d.bars.length > 0) {
+          subObj.bars = d.bars;
           subObj.series.setData(d.bars);
           subObj.lastBar = d.bars[d.bars.length - 1];
           if (window.Indicators && typeof window.Indicators.calcEMA === "function") {
@@ -284,6 +933,9 @@
               if (subObj.ema200) subObj.ema200.setData(window.Indicators.calcEMA(d.bars, 200));
             } catch (emaErr) {}
           }
+          if (typeof renderSubPaneRs === "function") {
+            renderSubPaneRs(paneNum, d.bars, benchmarkRawBars);
+          }
           requestAnimationFrame(function() {
             if (gen !== paneGen[paneNum] || subCharts[paneNum] !== subObj) return;
             var sw = container.clientWidth;
@@ -291,7 +943,7 @@
             if (sw > 0 && sh > 0) {
               subObj.chart.applyOptions({ width: sw, height: sh });
             }
-            subObj.chart.timeScale().fitContent();
+            resetChartView(subObj.chart, (subObj.bars && subObj.bars.length) || 0);
           });
         }
       })
@@ -372,6 +1024,67 @@
     return fallback;
   }
 
+  function readStoredJson(key, validate, fallback) {
+    try {
+      if (typeof localStorage === "undefined" || !key) return fallback;
+      var raw = localStorage.getItem(key);
+      if (raw === null || raw === undefined) return fallback;
+      var parsed;
+      var parseFailed = false;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (eP) {
+        parseFailed = true;
+      }
+      if (parseFailed) {
+        try {
+          if (typeof raw === "string" && raw.length > 0 && !localStorage.getItem("tv_bak_" + key)) {
+            localStorage.setItem("tv_bak_" + key, raw);
+            console.warn("[storage] 無效的儲存設定 " + key + "，已備份至 tv_bak_" + key);
+          }
+        } catch (eBak) {}
+        return fallback;
+      }
+
+      var validResult = false;
+      try {
+        validResult = typeof validate === "function" ? validate(parsed) : true;
+      } catch (eV) {
+        validResult = false;
+      }
+
+      if (!validResult) {
+        try {
+          if (typeof raw === "string" && raw.length > 0 && !localStorage.getItem("tv_bak_" + key)) {
+            localStorage.setItem("tv_bak_" + key, raw);
+            console.warn("[storage] 無效的儲存設定 " + key + "，已備份至 tv_bak_" + key);
+          }
+        } catch (eBak) {}
+        return fallback;
+      }
+
+      if (validResult && typeof validResult === "object") {
+        var cleaned = validResult;
+        if (JSON.stringify(cleaned) !== JSON.stringify(parsed)) {
+          try {
+            if (typeof raw === "string" && raw.length > 0 && !localStorage.getItem("tv_bak_" + key)) {
+              localStorage.setItem("tv_bak_" + key, raw);
+              console.warn("[storage] 已清理無效設定項 " + key + "，原始資料備份在 tv_bak_" + key);
+            }
+          } catch (eBak) {}
+          return cleaned;
+        }
+        return parsed;
+      }
+
+      return parsed;
+    } catch (e) {
+      return fallback;
+    }
+  }
+  if (typeof window !== "undefined") window.readStoredJson = readStoredJson;
+  if (typeof globalThis !== "undefined") globalThis.readStoredJson = readStoredJson;
+
   var desktopPort = (function() {
     try {
       if (typeof window !== "undefined") {
@@ -429,6 +1142,45 @@
     return null;
   })();
 
+  var _backendReadyQueue = [];
+  var _isBackendReady = false;
+
+  function isTauriEnvironment() {
+    return typeof window !== "undefined" && Boolean(
+      window.__TAURI__ || (window.location && window.location.protocol === "tauri:")
+    );
+  }
+
+  function whenBackendReady(fn) {
+    if (typeof fn !== "function") return;
+    if (!isTauriEnvironment() || _isBackendReady || apiBase) {
+      fn();
+    } else {
+      _backendReadyQueue.push(fn);
+    }
+  }
+
+  function flushBackendReadyQueue() {
+    _isBackendReady = true;
+    while (_backendReadyQueue.length > 0) {
+      var cb = _backendReadyQueue.shift();
+      try {
+        cb();
+      } catch (err) {
+        console.warn("[whenBackendReady] callback error:", err);
+      }
+    }
+  }
+
+  if (typeof window !== "undefined") {
+    window.whenBackendReady = whenBackendReady;
+    window._backendReadyQueue = _backendReadyQueue;
+  }
+  if (typeof globalThis !== "undefined") {
+    globalThis.whenBackendReady = whenBackendReady;
+    globalThis._backendReadyQueue = _backendReadyQueue;
+  }
+
   if (typeof window !== "undefined") {
     window.initDesktopSession = function(port, token) {
       if (port) {
@@ -440,6 +1192,7 @@
         sessionToken = String(token);
         try { sessionStorage.setItem("tv_session_token", sessionToken); } catch (e) {}
       }
+      flushBackendReadyQueue();
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -467,16 +1220,39 @@
         tauriInvoke = window.__TAURI__.invoke;
       }
       if (tauriInvoke) {
-        tauriInvoke("get_session_info")
-          .then(function(session) {
-            if (session && session.port) {
-              window.initDesktopSession(session.port, session.token);
-              if (typeof loadHistory === "function" && activeSymbol) {
-                loadHistory(activeSymbol);
-              }
-            }
-          })
-          .catch(function(e) {});
+        var sessionAttempts = 0;
+        function tryGetSession() {
+          sessionAttempts++;
+          try {
+            var res = tauriInvoke("get_session_info");
+            Promise.resolve(res)
+              .then(function(session) {
+                if (session && session.port) {
+                  window.initDesktopSession(session.port, session.token);
+                  if (typeof loadHistory === "function" && activeSymbol) {
+                    loadHistory(activeSymbol);
+                  }
+                } else {
+                  retryGetSession();
+                }
+              })
+              .catch(function(e) {
+                retryGetSession();
+              });
+          } catch (e) {
+            retryGetSession();
+          }
+        }
+        function retryGetSession() {
+          if (sessionAttempts < 10) {
+            var retryTimer = setTimeout(tryGetSession, 500);
+            if (retryTimer && typeof retryTimer.unref === "function") retryTimer.unref();
+          } else {
+            if (statusText) statusText.textContent = "無法連線到後端";
+            if (statusBadge) statusBadge.className = "status-badge disconnected";
+          }
+        }
+        tryGetSession();
       }
     } catch (e) {}
   }
@@ -515,6 +1291,19 @@
   }
 
   var renderDrawingCanvas = function() {};
+  var drawingRafId = null;
+  function scheduleDrawingRender() {
+    if (drawingRafId) return;
+    var schedule = typeof requestAnimationFrame === "function"
+      ? requestAnimationFrame
+      : function(cb) { return setTimeout(cb, 16); };
+    drawingRafId = schedule(function() {
+      drawingRafId = null;
+      if (typeof renderDrawingCanvas === "function") {
+        renderDrawingCanvas();
+      }
+    });
+  }
   var lastCrosshairPrice = null;
   var magnetMode = (typeof localStorage !== "undefined" && localStorage.getItem("tv_magnet_mode") === "true");
   var isAlwaysOnTop = (typeof localStorage !== "undefined" && localStorage.getItem("tv_always_on_top") === "true");
@@ -524,11 +1313,179 @@
   var drawingInProgress = null;
   var isDraggingHandle = null;
 
+  var _lastCoordClose = null;
+  var _lastCoordPlus = null;
+  var _lastCoordMinus = null;
+  var _coordLoopTimer = null;
+
+  function checkDrawingCoordinateShift() {
+    if (typeof document !== "undefined" && document.hidden) return;
+    if (!drawings || drawings.length === 0) return;
+    if (!candleSeries || typeof candleSeries.priceToCoordinate !== "function") return;
+
+    var refPrice = (latestBarData && typeof latestBarData.close === "number")
+      ? latestBarData.close
+      : (typeof lastCrosshairPrice === "number" ? lastCrosshairPrice : null);
+    if (refPrice === null || !isFinite(refPrice) || refPrice <= 0) return;
+
+    var cClose = candleSeries.priceToCoordinate(refPrice);
+    var cPlus = candleSeries.priceToCoordinate(refPrice * 1.05);
+    var cMinus = candleSeries.priceToCoordinate(refPrice * 0.95);
+
+    if (cClose === null || cPlus === null || cMinus === null) return;
+
+    if (_lastCoordClose !== null) {
+      if (Math.abs(cClose - _lastCoordClose) > 0.5 ||
+          Math.abs(cPlus - _lastCoordPlus) > 0.5 ||
+          Math.abs(cMinus - _lastCoordMinus) > 0.5) {
+        scheduleDrawingRender();
+      }
+    }
+    _lastCoordClose = cClose;
+    _lastCoordPlus = cPlus;
+    _lastCoordMinus = cMinus;
+  }
+
+  function startDrawingCoordLoop() {
+    if (_coordLoopTimer) return;
+    if (typeof setInterval === "undefined") return;
+    _coordLoopTimer = setInterval(function() {
+      checkDrawingCoordinateShift();
+    }, 100);
+    if (_coordLoopTimer && typeof _coordLoopTimer.unref === "function") {
+      _coordLoopTimer.unref();
+    }
+  }
+
+  function resetDrawToolToCursor() {
+    currentDrawTool = "cursor";
+    drawingInProgress = null;
+    var allDrawBtns = document.querySelectorAll ? document.querySelectorAll(".draw-tool-btn[data-tool]:not(.draw-tool-toggle)") : [];
+    for (var dti = 0; dti < allDrawBtns.length; dti++) {
+      allDrawBtns[dti].classList.toggle("active", allDrawBtns[dti].getAttribute("data-tool") === "cursor");
+    }
+    var dwc = document.getElementById("drawingCanvas");
+    if (dwc) dwc.classList.remove("drawing-active");
+  }
+
+  function restorePriceLinesForSymbol(sym) {
+    var lw = window.LightweightCharts || (typeof LightweightCharts !== "undefined" ? LightweightCharts : null);
+    if (!candleSeries || !lw || !sym) return;
+    try {
+      var lines = readStoredJson("tv_price_lines_" + sym, function(val) {
+        if (!Array.isArray(val)) return false;
+        var cleaned = [];
+        for (var i = 0; i < val.length; i++) {
+          var item = val[i];
+          if (item && typeof item === "object") {
+            if (typeof item.price === "number" || (typeof item.price === "string" && item.price.trim().length > 0)) {
+              var p = Number(item.price);
+              if (typeof p === "number" && isFinite(p)) {
+                cleaned.push(Object.assign({}, item, { price: p }));
+              }
+            }
+          }
+        }
+        return cleaned;
+      }, []);
+      if (Array.isArray(lines)) {
+        for (var i = 0; i < lines.length; i++) {
+          var item = lines[i];
+          var line = candleSeries.createPriceLine({
+            price: item.price,
+            color: item.isAlert ? "#f59e0b" : "#3b82f6",
+            lineWidth: 1,
+            lineStyle: item.isAlert ? lw.LineStyle.Dotted : lw.LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: item.isAlert ? "ALERT (未啟用提醒)" : "LVL"
+          });
+          tvPriceLineHandles.push(line);
+        }
+      }
+    } catch (e) {}
+  }
+
+  function _addQuickPriceLine(isAlert) {
+    var lw = window.LightweightCharts || (typeof LightweightCharts !== "undefined" ? LightweightCharts : null);
+    if (!candleSeries || !lw) return;
+    var p = (typeof lastCrosshairPrice === "number" && isFinite(lastCrosshairPrice)) ? lastCrosshairPrice : (latestBarData ? latestBarData.close : null);
+    if (p === null) return;
+    var line = candleSeries.createPriceLine({
+      price: p,
+      color: isAlert ? "#f59e0b" : "#3b82f6",
+      lineWidth: 1,
+      lineStyle: isAlert ? lw.LineStyle.Dotted : lw.LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: isAlert ? "ALERT (未啟用提醒)" : "LVL"
+    });
+    tvPriceLineHandles.push(line);
+    if (activeSymbol) {
+      try {
+        var existing = safeGetStorage("tv_price_lines_" + activeSymbol, null);
+        var list = existing ? JSON.parse(existing) : [];
+        if (!Array.isArray(list)) list = [];
+        list.push({ price: p, isAlert: Boolean(isAlert) });
+        safeSetStorage("tv_price_lines_" + activeSymbol, JSON.stringify(list));
+      } catch (e) {}
+    }
+  }
+
+  /** 清理並驗證繪圖物件陣列，剔除無效屬性或損壞座標 */
+  function sanitizeDrawings(list) {
+    if (!Array.isArray(list)) return [];
+    var clean = [];
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i];
+      if (!item || typeof item !== "object" || typeof item.type !== "string") {
+        continue;
+      }
+      if (item.type === "hline") {
+        var p = Number(item.price);
+        if (!isFinite(p)) continue;
+        var hCopy = Object.assign({}, item);
+        hCopy.price = p;
+        clean.push(hCopy);
+      } else if (item.type === "trendline") {
+        if (!isValidChartTime(item.time1) || !isValidChartTime(item.time2)) continue;
+        var p1 = Number(item.price1);
+        var p2 = Number(item.price2);
+        if (!isFinite(p1) || !isFinite(p2)) continue;
+        var tCopy = Object.assign({}, item);
+        tCopy.price1 = p1;
+        tCopy.price2 = p2;
+        clean.push(tCopy);
+      } else {
+        clean.push(Object.assign({}, item));
+      }
+    }
+    return clean;
+  }
+  if (typeof window !== "undefined") window.sanitizeDrawings = sanitizeDrawings;
+  if (typeof globalThis !== "undefined") globalThis.sanitizeDrawings = sanitizeDrawings;
+
   function loadDrawingsForSymbol(sym) {
     try {
       if (typeof localStorage !== "undefined" && sym) {
         var raw = localStorage.getItem("tv_drawings_" + sym);
-        return raw ? JSON.parse(raw) : [];
+        var parsed = [];
+        var parseFailed = false;
+        if (raw) {
+          try {
+            parsed = JSON.parse(raw);
+          } catch (eP) {
+            parseFailed = true;
+            parsed = [];
+          }
+        }
+        var clean = sanitizeDrawings(parsed);
+        if (raw && (parseFailed || JSON.stringify(clean) !== JSON.stringify(parsed))) {
+          var bakKey = "tv_bak_drawings_" + sym;
+          if (!localStorage.getItem(bakKey)) {
+            localStorage.setItem(bakKey, raw);
+          }
+          console.warn("[drawings] 已移除無法繪製的繪圖，原始資料備份在 " + bakKey);
+        }
+        return clean;
       }
     } catch (e) {}
     return [];
@@ -573,31 +1530,85 @@
   ];
 
   var symbolsList = (function() {
-    try {
-      if (typeof localStorage !== "undefined") {
-        var raw = localStorage.getItem("tv_symbols_cache");
-        if (raw) {
-          var parsed = JSON.parse(raw);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            // Auto-heal any stale NYSE:PRCH entries to official NASDAQ:PRCH
-            var healed = false;
-            for (var k = 0; k < parsed.length; k++) {
-              if (parsed[k] && parsed[k].id === "NYSE:PRCH") {
-                parsed[k].id = "NASDAQ:PRCH";
-                parsed[k].exchange = "NASDAQ";
-                healed = true;
-              }
-            }
-            if (healed) {
-              safeSetStorage("tv_symbols_cache", JSON.stringify(parsed));
-            }
-            return parsed;
-          }
-        }
+    var list = readStoredJson("tv_symbols_cache", function(val) {
+      return Array.isArray(val) && val.every(function(x) {
+        return x && typeof x === "object" && typeof x.id === "string" && x.id.trim().length > 0;
+      });
+    }, DEFAULT_WATCHLIST_SEEDS.slice());
+    if (!Array.isArray(list) || list.length === 0) {
+      list = DEFAULT_WATCHLIST_SEEDS.slice();
+    }
+    // Auto-heal any stale NYSE:PRCH entries to official NASDAQ:PRCH
+    var healed = false;
+    for (var k = 0; k < list.length; k++) {
+      if (list[k] && list[k].id === "NYSE:PRCH") {
+        list[k].id = "NASDAQ:PRCH";
+        list[k].exchange = "NASDAQ";
+        healed = true;
       }
-    } catch (e) {}
-    return DEFAULT_WATCHLIST_SEEDS.slice();
+    }
+    if (healed) {
+      safeSetStorage("tv_symbols_cache", JSON.stringify(list));
+    }
+    return list;
   })();
+
+  var watchlistGroups = (function() {
+    return readStoredJson("tv_watchlist_groups", function(val) {
+      if (val === null || typeof val !== "object" || Array.isArray(val)) return false;
+      var vals = Object.values ? Object.values(val) : Object.keys(val).map(function(k) { return val[k]; });
+      return vals.every(function(v) { return typeof v === "string"; });
+    }, {});
+  })();
+  var pinnedSymbols = (function() {
+    return readStoredJson("tv_pinned_symbols", function(val) {
+      return Array.isArray(val) && val.every(function(s) {
+        return typeof s === "string" && s.trim().length > 0;
+      });
+    }, []);
+  })();
+  var activeWlGroup = "all";
+
+  function togglePinSymbol(symbolId) {
+    if (!symbolId) return;
+    var idx = pinnedSymbols.indexOf(symbolId);
+    if (idx >= 0) {
+      pinnedSymbols.splice(idx, 1);
+    } else {
+      pinnedSymbols.push(symbolId);
+    }
+    safeSetStorage("tv_pinned_symbols", JSON.stringify(pinnedSymbols));
+    if (typeof savePreferencesDebounced === "function") savePreferencesDebounced();
+    if (typeof renderWatchlist === "function") renderWatchlist();
+  }
+
+  function getOrderedWatchlistSymbols(filterGroup) {
+    var grp = filterGroup || activeWlGroup;
+    var list = symbolsList || [];
+    if (grp && grp !== "all") {
+      list = list.filter(function(s) {
+        return watchlistGroups[s.id] === grp;
+      });
+    }
+    var pinSet = new Set(pinnedSymbols || []);
+    var pinned = [];
+    var unpinned = [];
+    for (var i = 0; i < list.length; i++) {
+      if (pinSet.has(list[i].id)) {
+        pinned.push(list[i]);
+      } else {
+        unpinned.push(list[i]);
+      }
+    }
+    pinned.sort(function(a, b) {
+      return pinnedSymbols.indexOf(a.id) - pinnedSymbols.indexOf(b.id);
+    });
+    return {
+      pinned: pinned,
+      unpinned: unpinned,
+      all: pinned.concat(unpinned)
+    };
+  }
 
   var activeSymbol = "BINANCE:BTCUSDT";
   var activeTimeframe = "1m";
@@ -606,7 +1617,18 @@
   var isAutoScale = true;
   var symbolStates = {};
   var currentRawBars = [];
+  var loadedHistorySymbol = null;
+  if (typeof window !== "undefined") window.loadedHistorySymbol = loadedHistorySymbol;
+  if (typeof globalThis !== "undefined") globalThis.loadedHistorySymbol = loadedHistorySymbol;
   var benchmarkRawBars = [];
+  var benchmarkLoadState = { key: null, inFlight: false, failedAt: 0, promise: null };
+  var benchmarkReqSeq = 0;
+  var subPaneBenchmarkCache = {};
+  if (typeof window !== "undefined") {
+    window.benchmarkLoadState = benchmarkLoadState;
+    window.subPaneBenchmarkCache = subPaneBenchmarkCache;
+    window.resolveBenchmarkSymbol = resolveBenchmarkSymbol;
+  }
   var tickCount = 0;
   var lastPrices = {};
   var sessionHighLow = {};
@@ -633,12 +1655,435 @@
     "1W": 604800
   };
 
+  function alignBarBucket(barTime, tf) {
+    var bt = (typeof barTime === "number" && barTime > 1e11) ? Math.floor(barTime / 1000) : Number(barTime);
+    if (!Number.isFinite(bt) || bt <= 0) return barTime;
+    if (tf === "1W") {
+      // Unix Epoch (1970-01-01) was Thursday. Monday 00:00:00 UTC offset is 3 days (259200 seconds).
+      return Math.floor((bt + 259200) / 604800) * 604800 - 259200;
+    }
+    var tfSec = TF_SECONDS[tf] || 60;
+    return Math.floor(bt / tfSec) * tfSec;
+  }
+  if (typeof window !== "undefined") {
+    window.alignBarBucket = alignBarBucket;
+  }
+  if (typeof globalThis !== "undefined") {
+    globalThis.alignBarBucket = alignBarBucket;
+  }
+
+  // ==========================================================================
+  // K 棒時間與分桶（第 4 段）
+  // ==========================================================================
+  // 美股（NASDAQ、NYSE、AMEX、ARCA、NYSEARCA、BATS、OTC，或沒有交易所前綴的代號）以紐約交易時段為準：
+  // 09:30 開盤、1h K 從 :30 起算、日 K 只計正規交易時段。
+  // 其他市場（加密貨幣、外匯、期貨等可能 24 小時交易的市場）以 UTC 為準，沿用 alignBarBucket。
+  // 已知限制：不處理美股假日（只依週一至週五判斷）。
+  // 假設：美股日 K／週 K 的時間戳落在紐約交易日當天（00:00–16:00 ET），Yahoo、Polygon、Alpaca 都符合。
+
+  var MARKET_TZ_NY = "America/New_York";
+  var US_SESSION_OPEN_MIN = 570;   // 09:30
+  var US_SESSION_CLOSE_MIN = 960;  // 16:00
+  var _zonedFormatterCache = {};
+  var _S4_WEEKDAYS = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  var _S4_MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  function _s4IsCryptoSymbol(symbol) {
+    var s = String(symbol || "").toUpperCase();
+    return s.indexOf("BINANCE:") === 0 || s.indexOf("USDT") !== -1 || s.indexOf("BUSD") !== -1;
+  }
+
+  var _S4_US_EQUITY_PREFIXES = { NASDAQ: true, NYSE: true, AMEX: true, ARCA: true, NYSEARCA: true, BATS: true, OTC: true };
+
+  /** 是否套用美股交易時段規則：只限美股交易所前綴；沒有前綴的代號視為美股（與後端預設 NASDAQ 一致）。 */
+  function _s4IsUsEquitySymbol(symbol) {
+    var s = String(symbol || "").toUpperCase();
+    if (!s || _s4IsCryptoSymbol(s)) return false;
+    var idx = s.indexOf(":");
+    if (idx === -1) return true;
+    return _S4_US_EQUITY_PREFIXES[s.slice(0, idx)] === true;
+  }
+
+  /** 標的的交易所時區：美股為 "America/New_York"，其他（加密貨幣、外匯、期貨等）為 "UTC"。 */
+  function getMarketTimeZone(symbol) {
+    return _s4IsUsEquitySymbol(symbol) ? MARKET_TZ_NY : "UTC";
+  }
+
+  /** 把秒或毫秒時間戳正規化成整數秒；無效時回傳 null。 */
+  function _s4NormalizeEpoch(t) {
+    var n = (typeof t === "string" && t.trim() !== "") ? Number(t) : t;
+    if (typeof n !== "number" || !isFinite(n) || n <= 0) return null;
+    if (n > 1e11) n = n / 1000;
+    return Math.floor(n);
+  }
+
+  /** 回傳某個 UTC 秒數在指定時區的年月日時分秒與星期（0 = 週日）。 */
+  function getZonedParts(epochSec, tz) {
+    var key = tz || "UTC";
+    var fmt = _zonedFormatterCache[key];
+    if (!fmt) {
+      fmt = new Intl.DateTimeFormat("en-US", {
+        timeZone: key,
+        hourCycle: "h23",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        weekday: "short"
+      });
+      _zonedFormatterCache[key] = fmt;
+    }
+    var parts = fmt.formatToParts(new Date(epochSec * 1000));
+    var out = {};
+    for (var i = 0; i < parts.length; i++) out[parts[i].type] = parts[i].value;
+    var hour = parseInt(out.hour, 10);
+    if (hour === 24) hour = 0;
+    return {
+      year: parseInt(out.year, 10),
+      month: parseInt(out.month, 10),
+      day: parseInt(out.day, 10),
+      hour: hour,
+      minute: parseInt(out.minute, 10),
+      second: parseInt(out.second, 10),
+      weekday: _S4_WEEKDAYS[out.weekday]
+    };
+  }
+
+  /** 把指定時區的牆上時間轉成 UTC 秒數（會處理夏令時間）。 */
+  function zonedWallToEpoch(year, month, day, hour, minute, tz) {
+    var wallAsUtc = Date.UTC(year, month - 1, day, hour, minute, 0) / 1000;
+    var guess = wallAsUtc;
+    for (var i = 0; i < 3; i++) {
+      var p = getZonedParts(guess, tz);
+      var seenAsUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) / 1000;
+      var diff = wallAsUtc - seenAsUtc;
+      if (diff === 0) break;
+      guess += diff;
+    }
+    return guess;
+  }
+
+  function _s4AddDays(year, month, day, delta) {
+    var d = new Date(Date.UTC(year, month - 1, day) + delta * 86400000);
+    return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
+  }
+
+  function computeYtdStart(nowSec, symbol) {
+    var tz = getMarketTimeZone(symbol);
+    var parts = getZonedParts(nowSec, tz);
+    return zonedWallToEpoch(parts.year, 1, 1, 0, 0, tz);
+  }
+  if (typeof window !== "undefined") {
+    window.computeYtdStart = computeYtdStart;
+  }
+  if (typeof globalThis !== "undefined") {
+    globalThis.computeYtdStart = computeYtdStart;
+  }
+
+  function _s4DateKey(d) {
+    return d.year * 10000 + d.month * 100 + d.day;
+  }
+
+  function _s4Compare(bucket, lastBarTime) {
+    if (lastBarTime === null) return { action: "new", time: bucket, reason: null };
+    if (bucket === lastBarTime) return { action: "update", time: bucket, reason: null };
+    if (bucket > lastBarTime) return { action: "new", time: bucket, reason: null };
+    return { action: "ignore", time: null, reason: "stale" };
+  }
+
+  /**
+   * 決定一筆即時資料（1 分鐘 K 棒或報價）屬於目前週期的哪一根 K 棒。
+   * @param {{symbol: string, timeframe: string, tickTime: number, lastBarTime: (number|null)}} params
+   * @returns {{action: "update"|"new"|"ignore", time: (number|null), reason: (string|null)}}
+   *   update：更新最後一根（time 等於 lastBarTime）；new：新增一根（time 為新 K 棒的時間）；
+   *   ignore：丟棄（無效時間、比最後一根舊、或美股非正規交易時段且週期不是 1m）。
+   */
+  function computeLiveBucket(params) {
+    var p = params || {};
+    var tf = p.timeframe;
+    var t = _s4NormalizeEpoch(p.tickTime);
+    if (t === null) return { action: "ignore", time: null, reason: "invalid_time" };
+    if (!TF_SECONDS[tf]) return { action: "ignore", time: null, reason: "unknown_timeframe" };
+    var last = _s4NormalizeEpoch(p.lastBarTime);
+
+    if (tf === "1m") {
+      // 以最後一根 K 棒自己的起點為準：[last, last + 60) 屬於同一根（報價與未對齊整分鐘的歷史資料都適用）
+      if (last !== null) {
+        if (t < last) return { action: "ignore", time: null, reason: "stale" };
+        if (t < last + 60) return { action: "update", time: last, reason: null };
+        return { action: "new", time: last + Math.floor((t - last) / 60) * 60, reason: null };
+      }
+      return { action: "new", time: Math.floor(t / 60) * 60, reason: null };
+    }
+    if (!_s4IsUsEquitySymbol(p.symbol)) return _s4Compare(alignBarBucket(t, tf), last);
+
+    var tz = MARKET_TZ_NY;
+    var tp = getZonedParts(t, tz);
+    var minOfDay = tp.hour * 60 + tp.minute;
+    if (tp.weekday === 0 || tp.weekday === 6 || minOfDay < US_SESSION_OPEN_MIN || minOfDay >= US_SESSION_CLOSE_MIN) {
+      return { action: "ignore", time: null, reason: "outside_session" };
+    }
+
+    if (tf === "5m" || tf === "15m" || tf === "1h") {
+      var tfMin = TF_SECONDS[tf] / 60;
+      var startMin = US_SESSION_OPEN_MIN + Math.floor((minOfDay - US_SESSION_OPEN_MIN) / tfMin) * tfMin;
+      var bucket = zonedWallToEpoch(tp.year, tp.month, tp.day, Math.floor(startMin / 60), startMin % 60, tz);
+      return _s4Compare(bucket, last);
+    }
+
+    // 1D / 1W：比對紐約交易日（週 K 比對該週週一）
+    var tickDay = { year: tp.year, month: tp.month, day: tp.day };
+    if (tf === "1W") tickDay = _s4AddDays(tp.year, tp.month, tp.day, -((tp.weekday + 6) % 7));
+    var anchorHour = 9;
+    var anchorMinute = 30;
+    if (last !== null) {
+      var lp = getZonedParts(last, tz);
+      var lastDay = { year: lp.year, month: lp.month, day: lp.day };
+      if (tf === "1W") lastDay = _s4AddDays(lp.year, lp.month, lp.day, -((lp.weekday + 6) % 7));
+      if (_s4DateKey(tickDay) === _s4DateKey(lastDay)) return { action: "update", time: last, reason: null };
+      if (_s4DateKey(tickDay) < _s4DateKey(lastDay)) return { action: "ignore", time: null, reason: "stale" };
+      // 沿用歷史資料的時間戳慣例（例如 09:30 或 00:00 ET），新 K 棒才會和歷史對齊
+      anchorHour = lp.hour;
+      anchorMinute = lp.minute;
+    }
+    var newTime = zonedWallToEpoch(tickDay.year, tickDay.month, tickDay.day, anchorHour, anchorMinute, tz);
+    if (last !== null && newTime <= last) return { action: "ignore", time: null, reason: "stale" };
+    return { action: "new", time: newTime, reason: null };
+  }
+
+  /**
+   * 把一根 1 分鐘 K 棒併入目前週期的 K 棒，並正確累加成交量。
+   * 1 分鐘 K 棒在同一分鐘內會重複送出（成交量逐步增加），所以同一分鐘用「取代」、換分鐘才「累加」。
+   * @param {Object|null} prevState 上一次的狀態（同一根 K 棒時才傳入，否則傳 null）
+   * @param {{bucketTime: number, timeframe: string, minute: Object, historyBar: (Object|null)}} params
+   *   historyBar：這根 K 棒在圖上原本的資料（來自歷史），用來保留開盤價與已有的成交量
+   * @returns {Object|null} 新狀態（含 open/high/low/close/volume）；比目前分鐘還舊的資料回傳 null
+   */
+  function applyMinuteBarToBucket(prevState, params) {
+    var p = params || {};
+    var m = p.minute;
+    var bucketTime = p.bucketTime;
+    if (!m || typeof bucketTime !== "number") return null;
+    var mVol = (typeof m.volume === "number" && isFinite(m.volume) && m.volume > 0) ? m.volume : 0;
+
+    if (prevState && prevState.bucketTime === bucketTime) {
+      var s = {
+        bucketTime: bucketTime,
+        open: prevState.open,
+        high: Math.max(prevState.high, m.high, m.close),
+        low: Math.min(prevState.low, m.low, m.close),
+        close: m.close,
+        baseVolume: prevState.baseVolume,
+        doneVolume: prevState.doneVolume,
+        minuteTime: prevState.minuteTime,
+        minuteVolume: prevState.minuteVolume
+      };
+      if (m.time === prevState.minuteTime) {
+        s.minuteVolume = mVol;
+      } else if (m.time > prevState.minuteTime) {
+        s.doneVolume = prevState.doneVolume + prevState.minuteVolume;
+        s.minuteTime = m.time;
+        s.minuteVolume = mVol;
+      } else {
+        return null;
+      }
+      s.volume = s.baseVolume + s.doneVolume + s.minuteVolume;
+      return s;
+    }
+
+    var h = p.historyBar;
+    var useHistory = Boolean(h && h.time === bucketTime);
+    // 1m 週期時，歷史的最後一根就是同一分鐘，量不能再加一次
+    var base = (useHistory && p.timeframe !== "1m" && typeof h.volume === "number" && isFinite(h.volume) && h.volume > 0) ? h.volume : 0;
+    var st = {
+      bucketTime: bucketTime,
+      open: useHistory ? h.open : m.open,
+      high: useHistory ? Math.max(h.high, m.high, m.close) : Math.max(m.high, m.close),
+      low: useHistory ? Math.min(h.low, m.low, m.close) : Math.min(m.low, m.close),
+      close: m.close,
+      baseVolume: base,
+      doneVolume: 0,
+      minuteTime: m.time,
+      minuteVolume: mVol
+    };
+    st.volume = st.baseVolume + st.doneVolume + st.minuteVolume;
+    return st;
+  }
+
+  function _s4Pad2(n) {
+    return (n < 10 ? "0" : "") + n;
+  }
+
+  /** 圖表傳入的時間不是時間戳時（BusinessDay 物件或日期字串），直接顯示日期，不顯示空白。 */
+  function _s4FormatNonEpochTime(time) {
+    if (time && typeof time === "object" && typeof time.year === "number") {
+      return time.year + "-" + _s4Pad2(time.month) + "-" + _s4Pad2(time.day);
+    }
+    if (typeof time === "string") return time;
+    return "";
+  }
+
+  /** 十字線上的時間文字：日 K／週 K 只顯示日期；盤中週期加上時區（ET 或 UTC）。 */
+  function formatMarketTime(epochSec, symbol, timeframe) {
+    var t = _s4NormalizeEpoch(epochSec);
+    if (t === null) return _s4FormatNonEpochTime(epochSec);
+    var tz = getMarketTimeZone(symbol);
+    var p = getZonedParts(t, tz);
+    var date = p.year + "-" + _s4Pad2(p.month) + "-" + _s4Pad2(p.day);
+    if (timeframe === "1D" || timeframe === "1W") return date;
+    return date + " " + _s4Pad2(p.hour) + ":" + _s4Pad2(p.minute) + (tz === "UTC" ? " UTC" : " ET");
+  }
+
+  /** 時間軸刻度文字（tickMarkType：0 年、1 月、2 日、3 時間、4 含秒的時間）。無法處理時回傳 null，讓圖表用預設格式。 */
+  function formatMarketTickMark(epochSec, tickMarkType, symbol, lang) {
+    var t = _s4NormalizeEpoch(epochSec);
+    if (t === null) return null;
+    var p = getZonedParts(t, getMarketTimeZone(symbol));
+    if (tickMarkType === 0) return String(p.year);
+    if (tickMarkType === 1) return lang === "en" ? _S4_MONTHS_EN[p.month - 1] : (p.month + "月");
+    if (tickMarkType === 2) return String(p.day);
+    if (tickMarkType === 4) return _s4Pad2(p.hour) + ":" + _s4Pad2(p.minute) + ":" + _s4Pad2(p.second);
+    return _s4Pad2(p.hour) + ":" + _s4Pad2(p.minute);
+  }
+
+  /** 建立圖表用的時間格式化函式；getSymbol／getTimeframe 在每次格式化時才讀取，切換標的後自動生效。 */
+  function makeChartTimeOptions(getSymbol, getTimeframe) {
+    return {
+      timeFormatter: function(time) {
+        return formatMarketTime(time, getSymbol(), getTimeframe());
+      },
+      tickMarkFormatter: function(time, tickMarkType) {
+        return formatMarketTickMark(time, tickMarkType, getSymbol(), typeof currentLang !== "undefined" ? currentLang : "zh");
+      }
+    };
+  }
+
+  if (typeof window !== "undefined") {
+    window.getMarketTimeZone = getMarketTimeZone;
+    window.getZonedParts = getZonedParts;
+    window.zonedWallToEpoch = zonedWallToEpoch;
+    window.computeLiveBucket = computeLiveBucket;
+    window.applyMinuteBarToBucket = applyMinuteBarToBucket;
+    window.formatMarketTime = formatMarketTime;
+    window.formatMarketTickMark = formatMarketTickMark;
+  }
+  if (typeof globalThis !== "undefined") {
+    globalThis.getMarketTimeZone = getMarketTimeZone;
+    globalThis.getZonedParts = getZonedParts;
+    globalThis.zonedWallToEpoch = zonedWallToEpoch;
+    globalThis.computeLiveBucket = computeLiveBucket;
+    globalThis.applyMinuteBarToBucket = applyMinuteBarToBucket;
+    globalThis.formatMarketTime = formatMarketTime;
+    globalThis.formatMarketTickMark = formatMarketTickMark;
+  }
+
+  var historyPrefetchCache = new Map();
+  var PREFETCH_TTL_MS = 60000;
+  var PREFETCH_MAX_SIZE = 12;
+
+  function getCachedHistory(key) {
+    var entry = historyPrefetchCache.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.timestamp > PREFETCH_TTL_MS) {
+      historyPrefetchCache.delete(key);
+      return null;
+    }
+    return entry.data;
+  }
+
+  function setCachedHistory(key, data) {
+    if (historyPrefetchCache.size >= PREFETCH_MAX_SIZE) {
+      var oldestKey = historyPrefetchCache.keys().next().value;
+      if (oldestKey) historyPrefetchCache.delete(oldestKey);
+    }
+    historyPrefetchCache.set(key, { data: data, timestamp: Date.now() });
+  }
+
+  function getActiveWatchlistSymbols() {
+    return getOrderedWatchlistSymbols(activeWlGroup).all;
+  }
+
+  function navigateWatchlist(delta) {
+    var list = getActiveWatchlistSymbols();
+    if (!list || list.length === 0) return;
+    var curIdx = -1;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === activeSymbol) {
+        curIdx = i;
+        break;
+      }
+    }
+    var nextIdx;
+    if (curIdx === -1) {
+      nextIdx = delta > 0 ? 0 : list.length - 1;
+    } else {
+      nextIdx = (curIdx + delta + list.length) % list.length;
+    }
+    var nextSym = list[nextIdx].id;
+    if (nextSym) {
+      switchSymbol(nextSym);
+      setTimeout(function() {
+        var activeEl = document.querySelector("#watchlistItems .wl-item.active");
+        if (activeEl && typeof activeEl.scrollIntoView === "function") {
+          activeEl.scrollIntoView({ block: "nearest" });
+        }
+      }, 50);
+    }
+  }
+
+  function prefetchNextWatchlistSymbols(curSym, tf, engine) {
+    var list = getActiveWatchlistSymbols();
+    if (!list || list.length <= 1) return;
+    var curIdx = -1;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === curSym) {
+        curIdx = i;
+        break;
+      }
+    }
+    if (curIdx === -1) return;
+
+    var nextSymbols = [
+      list[(curIdx + 1) % list.length].id,
+      list[(curIdx + 2) % list.length].id
+    ];
+
+    for (var n = 0; n < nextSymbols.length; n++) {
+      (function(sId) {
+        if (!sId || sId === curSym) return;
+        var pKey = sId + "|" + tf + "|" + engine;
+        if (getCachedHistory(pKey)) return;
+
+        var url = "/api/history?seed=true&timeframe=" + encodeURIComponent(tf) +
+                  "&engine=" + encodeURIComponent(engine) +
+                  "&symbol=" + encodeURIComponent(sId);
+        fetch(url)
+          .then(function(res) { return res.ok ? res.json() : null; })
+          .then(function(data) {
+            if (data && Array.isArray(data.bars) && data.bars.length > 0) {
+              setCachedHistory(pKey, data);
+            }
+          })
+          .catch(function() {});
+      })(nextSymbols[n]);
+    }
+  }
+
+  var lastPositionSizing = null;
+  var lastIsSqueeze = false;
+
   var activeHistoryRequestId = 0;
   var historyAbortController = null;
   var isHistoryLoading = false;
   var lastBarTime = 0;
   var lastBarObj = null;
   var latestBarData = null;
+  // 第 4 段：主圖目前這根 K 棒的即時累加狀態（成交量分「歷史量 + 已完成分鐘 + 目前分鐘」）
+  var liveBucketState = null;
+  // 第 4 段：本次啟動後使用者是否手動切換過週期（是的話，後端偏好不覆蓋）
+  var userChangedTimeframe = false;
 
 // Indicator Toggle States
   var defaultIndicatorConfig = {
@@ -712,9 +2157,12 @@
           rsBenchmarkTag: rsBenchmarkTag,
           currentEngine: currentEngine,
           currentLang: currentLang,
+          currentTheme: currentTheme,
           currentCandleStyle: currentCandleStyle,
           alwaysOnTop: isAlwaysOnTop,
-          magnetMode: magnetMode
+          magnetMode: magnetMode,
+          watchlistGroups: watchlistGroups,
+          pinnedSymbols: pinnedSymbols
         };
         var headers = { "Content-Type": "application/json" };
         if (sessionToken) headers["X-Session-Token"] = sessionToken;
@@ -743,9 +2191,12 @@
         rsBenchmarkTag: rsBenchmarkTag,
         currentEngine: currentEngine,
         currentLang: currentLang,
+        currentTheme: currentTheme,
         currentCandleStyle: currentCandleStyle,
         alwaysOnTop: isAlwaysOnTop,
-        magnetMode: magnetMode
+        magnetMode: magnetMode,
+        watchlistGroups: watchlistGroups,
+        pinnedSymbols: pinnedSymbols
       };
       var headers = { "Content-Type": "application/json" };
       if (sessionToken) headers["X-Session-Token"] = sessionToken;
@@ -794,7 +2245,14 @@
           if (inputBench) inputBench.value = rsBenchmarkTag;
         }
         if (p.activeTimeframe && typeof p.activeTimeframe === "string" && p.activeTimeframe !== activeTimeframe) {
-          activeTimeframe = p.activeTimeframe;
+          // 第 4 段：走正規的切換流程（更新按鈕、重新載入圖表），不再只改變數。
+          // 使用者本次已手動切換過週期時，以使用者為準，不覆蓋。
+          if (!userChangedTimeframe && TF_SECONDS[p.activeTimeframe]) {
+            var prefTfBtn = document.querySelector ? document.querySelector('.tf-btn[data-tf="' + p.activeTimeframe + '"]') : null;
+            if (prefTfBtn && typeof prefTfBtn.onclick === "function") {
+              prefTfBtn.onclick();
+            }
+          }
         }
         if (p.currentCandleStyle && typeof p.currentCandleStyle === "string" && p.currentCandleStyle !== currentCandleStyle) {
           currentCandleStyle = p.currentCandleStyle;
@@ -804,7 +2262,12 @@
         if (p.currentLang && typeof p.currentLang === "string" && p.currentLang !== currentLang) {
           currentLang = p.currentLang;
           safeSetStorage("tv_terminal_lang", currentLang);
-          if (typeof setLanguage === "function") setLanguage(currentLang);
+          if (typeof setLanguage === "function") setLanguage(currentLang, true);
+        }
+        if (p.currentTheme && (p.currentTheme === "light" || p.currentTheme === "dark") && p.currentTheme !== currentTheme) {
+          currentTheme = p.currentTheme;
+          safeSetStorage("tv_terminal_theme", currentTheme);
+          if (typeof setTheme === "function") setTheme(currentTheme, true);
         }
         if (p.alwaysOnTop !== undefined) {
           isAlwaysOnTop = Boolean(p.alwaysOnTop);
@@ -823,6 +2286,16 @@
           safeSetStorage("tv_magnet_mode", String(magnetMode));
           var mgBtn = document.getElementById("btnMagnet");
           if (mgBtn) mgBtn.classList.toggle("active", magnetMode);
+        }
+        if (p.watchlistGroups && typeof p.watchlistGroups === "object") {
+          watchlistGroups = Object.assign({}, p.watchlistGroups);
+          safeSetStorage("tv_watchlist_groups", JSON.stringify(watchlistGroups));
+          if (typeof renderWatchlist === "function") renderWatchlist();
+        }
+        if (Array.isArray(p.pinnedSymbols)) {
+          pinnedSymbols = p.pinnedSymbols.slice();
+          safeSetStorage("tv_pinned_symbols", JSON.stringify(pinnedSymbols));
+          if (typeof renderWatchlist === "function") renderWatchlist();
         }
         if (needsRefresh) {
           syncIndicatorCheckboxes();
@@ -881,6 +2354,10 @@
   var i18n = {
     en: {
       langLabel: "繁中",
+      langToggleTitle: "Switch to Traditional Chinese",
+      themeLight: "Light",
+      themeDark: "Dark",
+      themeToggleTitle: "Toggle Light / Dark theme",
       brandSub: "Deepvue Pro Engine",
       connecting: "CONNECTING",
       connected: "CONNECTED",
@@ -889,8 +2366,16 @@
       equityBannerText: "Equity Symbol: Bars accumulate in real time from server launch (market hours only).",
       watchlistTitle: "WATCHLIST",
       searchPlaceholder: "Search stock, crypto or ETF (e.g. AAPL, NVDA, SPY)...",
+      indicatorsBtn: "Indicators",
       indicatorsTitle: "Indicators & Overlays",
-      rsBenchmarkLabel: "RS Benchmark:",
+      candleSolid: "🕯️ Solid",
+      candleHollow: "🕯️ Hollow",
+      candleSolidTitle: "Solid Candles (Click to switch to Hollow)",
+      candleHollowTitle: "Hollow Candles (Click to switch to Solid)",
+      rsToggleTitle: "Toggle RS Sub-pane",
+      rsBenchmarkLabel: "RS",
+      rsModeMansfield: "Mansfield RS (0-Axis)",
+      rsModeDeepvue: "Deepvue RS",
       refBadge: "Ref: ",
       hud52w: "52W High",
       hudVol50: "Vol/50D",
@@ -903,16 +2388,58 @@
       tabStocks: "Stocks",
       tabEtfs: "ETFs",
       tabCrypto: "Crypto",
-      noResults: "No matching symbols found.",
+      volSqueeze: "Volatility Squeeze",
+      posSuggest: "Rec: {shares} shares (${stop} stop)",
+      posSuggestEmpty: "Rec: -- shares",
+      noResults: "No matching symbols found. Press Enter to add custom ticker.",
       done: "Done",
       setTag: "Set Tag",
       customTag: "+ Tag",
       engineTag: "Engine:",
       enginePro: "Deepvue Pro (Auto Dual-Source)",
-      engineTv: "TradingView Official Widget"
+      engineTv: "TradingView Official Widget",
+      pinTitle: "Pin Window (Always on Top)",
+      unpinTitle: "Unpin Window (Pinned on Top)",
+      ctxRemove: "Remove from Watchlist",
+      ctxPin: "Pin to Top",
+      ctxUnpin: "Unpin from Top",
+      pinBtnTitle: "Pin to top",
+      unpinBtnTitle: "Unpin from top",
+      ctxBenchmark: "Set as RS Benchmark",
+      ctxCopy: "Copy Symbol",
+      rsNewHighBadge: "🔵 RS NH",
+      rsNewHighTooltip: "RS New High before Price (Leading Indicator)",
+      grpAll: "All",
+      grpLeaders: "Leaders",
+      grpVcp: "VCP",
+      grpPullback: "Pullback",
+      grpEarnings: "Earnings",
+      ctxGroupHeader: "Assign Watchlist Group",
+      ctxGrpNone: "Clear Group",
+      ctxGrpLeaders: "Leaders (Relative Strength)",
+      ctxGrpVcp: "VCP (Volatility Contraction)",
+      ctxGrpPullback: "Pullback (Support Retest)",
+      ctxGrpEarnings: "Earnings (Catalyst)",
+      heatmapBtn: "Theme",
+      heatmapModalTitle: "🔥 Theme Heatmap",
+      hmUnivThemes: "Themes",
+      hmUnivWatchlist: "Watchlist",
+      hmMetricChange: "1D %",
+      hmMetricRs: "RS Rating",
+      hmSortChange: "Performance",
+      hmSortRs: "RS",
+      heatmapLoading: "Loading theme metrics...",
+      heatmapEmpty: "No theme data found",
+      heatmapFooterTip: "💡 Click any ticker box to switch main chart; box width scales with 50D volume ratio, hover for detailed metrics",
+      screenerBtn: "Screener",
+      batchAddTier12: "⭐ Batch Add Tier 1–2",
     },
     zh: {
       langLabel: "EN",
+      langToggleTitle: "切換為英文介面 (English)",
+      themeLight: "白天",
+      themeDark: "黑夜",
+      themeToggleTitle: "切換白天 / 黑夜模式",
       brandSub: "Deepvue 專業成長股引擎",
       connecting: "連線中",
       connected: "已連線",
@@ -921,8 +2448,16 @@
       equityBannerText: "美股標的：伺服器啟動後即時累積分K，盤中持續更新。",
       watchlistTitle: "自選清單",
       searchPlaceholder: "搜尋美股、加密貨幣或 ETF (如 AAPL, NVDA, SPY)...",
+      indicatorsBtn: "指標",
       indicatorsTitle: "技術指標與均線疊加",
-      rsBenchmarkLabel: "RS 相對強度基準:",
+      candleSolid: "🕯️ 實心",
+      candleHollow: "🕯️ 實空心",
+      candleSolidTitle: "當前為實心蠟燭 (點擊切換為實空心蠟燭)",
+      candleHollowTitle: "當前為實空心蠟燭 (點擊切換為實心蠟燭)",
+      rsToggleTitle: "切換底部 RS 副圖",
+      rsBenchmarkLabel: "RS",
+      rsModeMansfield: "Mansfield RS (0軸)",
+      rsModeDeepvue: "Deepvue RS",
       refBadge: "基準: ",
       hud52w: "距52週高",
       hudVol50: "50天均量比",
@@ -935,17 +2470,165 @@
       tabStocks: "美股",
       tabEtfs: "ETF",
       tabCrypto: "加密貨幣",
-      noResults: "查無相符標的",
+      volSqueeze: "波動收縮 (Volatility Squeeze)",
+      posSuggest: "建議: {shares} 股 (${stop} 停損)",
+      posSuggestEmpty: "建議: -- 股",
+      noResults: "查無相符標的。按 Enter 可自訂新增代碼。",
       done: "完成",
       setTag: "設定",
       customTag: "+ 標籤",
       engineTag: "引擎:",
       enginePro: "Deepvue 專業圖表 (自動高可用)",
-      engineTv: "TradingView 官方組件"
+      engineTv: "TradingView 官方組件",
+      pinTitle: "視窗置頂 (Always on Top)",
+      unpinTitle: "取消視窗置頂 (Pinned on Top)",
+      ctxRemove: "從自選清單移除",
+      ctxPin: "釘選置頂",
+      ctxUnpin: "取消釘選",
+      pinBtnTitle: "釘選到頂部",
+      unpinBtnTitle: "取消釘選",
+      ctxBenchmark: "設為 RS 基準",
+      ctxCopy: "複製代碼",
+      rsNewHighBadge: "🔵 RS NH",
+      rsNewHighTooltip: "RS 領先股價創新高 (強勢潛力訊號)",
+      grpAll: "全部",
+      grpLeaders: "領頭羊",
+      grpVcp: "收縮型態",
+      grpPullback: "拉回支撐",
+      grpEarnings: "財報催化",
+      ctxGroupHeader: "指派自選分組",
+      ctxGrpNone: "無分組 (清除)",
+      ctxGrpLeaders: "領頭羊 (Leaders)",
+      ctxGrpVcp: "收縮型態 (VCP)",
+      ctxGrpPullback: "拉回支撐 (Pullback)",
+      ctxGrpEarnings: "財報催化 (Earnings)",
+      heatmapBtn: "主題熱圖",
+      heatmapModalTitle: "🔥 美股主題板塊熱力圖",
+      hmUnivThemes: "美股主題",
+      hmUnivWatchlist: "自選清單",
+      hmMetricChange: "1D 漲跌%",
+      hmMetricRs: "RS 相對強度",
+      hmSortChange: "漲幅",
+      hmSortRs: "RS",
+      heatmapLoading: "正在載入主題板塊數據...",
+      heatmapEmpty: "未發現板塊資料",
+      heatmapFooterTip: "💡 點選任一個股方塊可直接切換主圖；方塊寬度依 50D 成交量放大，滑鼠懸停可查看完整量化指標",
+      screenerBtn: "智能選股",
+      batchAddTier12: "⭐ 批次加入 Tier 1–2 至自選",
+    }
+  };
+
+  var CHART_THEMES = {
+    dark: {
+      background: "#131722",
+      textColor: "#787b86",
+      subTextColor: "#9ca3af",
+      grid: "#1e222d",
+      border: "#2a2e39",
+      crosshair: "#363c4e",
+      crosshairLabelBg: "#2a2e39",
+      tvToolbarBg: "#131722",
+      anchorBg: "rgba(30, 34, 45, 0.95)",
+      anchorText: "#ffffff",
+      rrTitle: "#ffffff"
+    },
+    light: {
+      background: "#f6f7f9",
+      textColor: "#5f6b7c",
+      subTextColor: "#475569",
+      grid: "#e6ebf2",
+      border: "#d4dce7",
+      crosshair: "#94a3b8",
+      crosshairLabelBg: "#1e293b",
+      tvToolbarBg: "#ffffff",
+      anchorBg: "rgba(255, 255, 255, 0.95)",
+      anchorText: "#0f172a",
+      rrTitle: "#0f172a"
     }
   };
 
   var currentLang = (typeof localStorage !== "undefined" && localStorage.getItem("tv_terminal_lang")) ? localStorage.getItem("tv_terminal_lang") : "zh";
+  var currentTheme = (typeof localStorage !== "undefined" && localStorage.getItem("tv_terminal_theme") === "light") ? "light" : "dark";
+
+  function getChartThemePalette() {
+    return CHART_THEMES[currentTheme] || CHART_THEMES.dark;
+  }
+
+  function updateThemeToggleUI() {
+    var dict = i18n[currentLang] || i18n.en;
+    var btn = document.getElementById("themeToggleBtn");
+    var iconEl = document.getElementById("themeIcon");
+    var labelEl = document.getElementById("themeLabel");
+    var isLight = currentTheme === "light";
+    if (iconEl) iconEl.textContent = isLight ? "🌙" : "☀️";
+    if (labelEl) labelEl.textContent = isLight ? dict.themeDark : dict.themeLight;
+    if (btn) btn.setAttribute("title", dict.themeToggleTitle);
+  }
+
+  function applyThemeToCharts() {
+    var p = getChartThemePalette();
+    var commonOpts = {
+      layout: { background: { color: p.background }, textColor: p.textColor },
+      grid: { vertLines: { color: p.grid }, horzLines: { color: p.grid } },
+      crosshair: {
+        vertLine: { color: p.crosshair, labelBackgroundColor: p.crosshairLabelBg },
+        horzLine: { color: p.crosshair, labelBackgroundColor: p.crosshairLabelBg }
+      },
+      rightPriceScale: { borderColor: p.border },
+      timeScale: { borderColor: p.border }
+    };
+    if (chart && typeof chart.applyOptions === "function") {
+      try { chart.applyOptions(commonOpts); } catch (e) {}
+    }
+    if (rsChart && typeof rsChart.applyOptions === "function") {
+      try { rsChart.applyOptions(commonOpts); } catch (e) {}
+    }
+    for (var paneKey in subCharts) {
+      if (subCharts[paneKey] && subCharts[paneKey].chart && typeof subCharts[paneKey].chart.applyOptions === "function") {
+        try {
+          subCharts[paneKey].chart.applyOptions({
+            layout: { background: { color: p.background }, textColor: p.subTextColor },
+            grid: { vertLines: { color: p.grid }, horzLines: { color: p.grid } },
+            rightPriceScale: { borderColor: p.border },
+            timeScale: { borderColor: p.border }
+          });
+        } catch (e) {}
+      }
+      if (subCharts[paneKey] && subCharts[paneKey].rsChart && typeof subCharts[paneKey].rsChart.applyOptions === "function") {
+        try {
+          subCharts[paneKey].rsChart.applyOptions({
+            layout: { background: { color: p.background }, textColor: p.subTextColor },
+            grid: { vertLines: { color: p.grid }, horzLines: { color: p.grid } },
+            rightPriceScale: { borderColor: p.border },
+            timeScale: { borderColor: p.border }
+          });
+        } catch (e) {}
+      }
+    }
+    if (typeof renderDrawingCanvas === "function") renderDrawingCanvas();
+  }
+
+  function setTheme(theme, skipSave) {
+    currentTheme = (theme === "light") ? "light" : "dark";
+    safeSetStorage("tv_terminal_theme", currentTheme);
+    if (typeof document !== "undefined" && document.documentElement) {
+      document.documentElement.setAttribute("data-theme", currentTheme);
+    }
+    updateThemeToggleUI();
+    applyThemeToCharts();
+    if (typeof renderHeatmap === "function" && heatmapDataCache) {
+      renderHeatmap();
+    }
+    if (!skipSave) {
+      if (currentEngine === "C" && typeof initTradingViewWidget === "function") {
+        initTradingViewWidget(activeSymbol);
+        if (activeSplitLayout !== "1x1" && typeof applySplitLayout === "function") {
+          applySplitLayout(activeSplitLayout);
+        }
+      }
+      if (typeof savePreferencesDebounced === "function") savePreferencesDebounced();
+    }
+  }
   var currentEngine = (typeof localStorage !== "undefined" && localStorage.getItem("tv_chart_engine")) ? localStorage.getItem("tv_chart_engine") : "A";
   var currentPriceScaleMode = "normal";
   var tvWidgetInstance = null;
@@ -987,7 +2670,7 @@
   var legRs = document.getElementById("legRs");
 
 // Sidebar & Modals
-  var watchlistItemsEl = document.getElementById("watchlistItems");
+  watchlistItemsEl = document.getElementById("watchlistItems");
   var openSearchBtn = document.getElementById("openSearchBtn");
   var addSymbolBtn = document.getElementById("addSymbolBtn");
   var searchModal = document.getElementById("searchModal");
@@ -1048,6 +2731,27 @@
   var aiLensFundamentals = document.getElementById("aiLensFundamentals");
   var aiLensHumanNote = document.getElementById("aiLensHumanNote");
   var aiLensModelNotice = document.getElementById("aiLensModelNotice");
+
+// Stock Theme Heatmap Elements & State
+  var heatmapBtn = document.getElementById("heatmapBtn");
+  var heatmapBtnLabel = document.getElementById("heatmapBtnLabel");
+  var heatmapModal = document.getElementById("heatmapModal");
+  var heatmapModalTitle = document.getElementById("heatmapModalTitle");
+  var heatmapBenchBadge = document.getElementById("heatmapBenchBadge");
+  var closeHeatmapModal = document.getElementById("closeHeatmapModal");
+  var closeHeatmapFooterBtn = document.getElementById("closeHeatmapFooterBtn");
+  var heatmapRefreshBtn = document.getElementById("heatmapRefreshBtn");
+  var heatmapLoading = document.getElementById("heatmapLoading");
+  var heatmapLoadingText = document.getElementById("heatmapLoadingText");
+  var heatmapGrid = document.getElementById("heatmapGrid");
+  var heatmapEmptyState = document.getElementById("heatmapEmptyState");
+  var heatmapEmptyTitle = document.getElementById("heatmapEmptyTitle");
+  var heatmapFooterTip = document.getElementById("heatmapFooterTip");
+  var activeHeatmapUniverse = "themes";
+  var activeHeatmapMetric = "change";
+  var activeHeatmapSort = "change";
+  var heatmapDataCache = null;
+  var isHeatmapLoading = false;
 
 // Indicator checkboxes
   var chkEma10 = document.getElementById("chkEma10");
@@ -1118,6 +2822,672 @@ function getSymbolItem(symbol) {
 }
 
 // ==========================================================================
+// 共用數值工具（第 0 段）
+// ==========================================================================
+
+/**
+ * 將輸入轉成數字：只接受 number 或非空的數字字串；布林、物件、空字串一律視為 NaN。
+ */
+function _s0ToNumber(v) {
+  if (typeof v === "number") return v;
+  if (typeof v === "string" && v.trim() !== "") return Number(v);
+  return NaN;
+}
+
+/**
+ * 回傳數字的十進位小數位數（支援 1e-7 這類科學記號）。無法判斷時回傳 -1。
+ */
+function _s0DecimalPlaces(x) {
+  var s = String(x).toLowerCase();
+  var m = /^-?(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/.exec(s);
+  if (!m) return -1;
+  var frac = m[2] ? m[2].length : 0;
+  var exp = m[3] ? parseInt(m[3], 10) : 0;
+  return Math.max(0, frac - exp);
+}
+
+/**
+ * 以十進位整數相減計算停損距離，避免 2.02 - 2.01 = 0.010000000000000009 這類浮點誤差。
+ * 回傳 { distance, scale, units }；無法安全縮放時 scale 為 0，distance 為原始浮點差。
+ */
+function _s0ExactDistance(a, b) {
+  var d = Math.max(_s0DecimalPlaces(a), _s0DecimalPlaces(b));
+  if (d >= 0 && d <= 10) {
+    var scale = Math.pow(10, d);
+    var ia = Math.round(a * scale);
+    var ib = Math.round(b * scale);
+    if (Number.isSafeInteger(ia) && Number.isSafeInteger(ib)) {
+      var units = Math.abs(ia - ib);
+      return { distance: units / scale, scale: scale, units: units };
+    }
+  }
+  return { distance: Math.abs(a - b), scale: 0, units: 0 };
+}
+
+/**
+ * 向下取整，但容忍浮點誤差：若結果與最接近的整數相差在容忍值以內，視為該整數。
+ * relTol：整數單位相除時用 1e-12（只剩一次除法的誤差），否則用 1e-9。
+ * 容忍值上限 1e-6，確保大數量（例如 1.6e10 單位的小幣）不會被錯誤進位而超出風險金額。
+ */
+function _s0FloorWithTolerance(x, relTol) {
+  var nearest = Math.round(x);
+  var tol = Math.min(1e-6, Math.max(1, Math.abs(x)) * relTol);
+  if (Math.abs(x - nearest) <= tol) return nearest;
+  return Math.floor(x);
+}
+
+/**
+ * 計算部位股數與停損距離
+ *
+ * @param {Object} params
+ * @param {number} params.entry - 進場價格 (> 0)
+ * @param {number} params.stop - 停損價格 (> 0)
+ * @param {number} params.riskDollar - 預期承受之風險金額 (> 0)
+ * @param {"long"|"short"} [params.side="long"] - 交易方向
+ * @returns {{shares: number, stopDistance: number, riskDollar: number, error: string|null}}
+ *   stopDistance 以十進位整數相減計算；shares 向下取整並容忍浮點誤差（相對 1e-9）。
+ *   entry、stop、riskDollar 只接受 number 或數字字串，布林等其他型別回傳 error。
+ */
+function computePositionSize(params) {
+  if (!params || typeof params !== "object") {
+    return { shares: 0, stopDistance: 0, riskDollar: 0, error: "Invalid parameters: expected object" };
+  }
+
+  var entry = _s0ToNumber(params.entry);
+  var stop = _s0ToNumber(params.stop);
+  var risk = _s0ToNumber(params.riskDollar);
+  var rawSide = typeof params.side === "string" ? params.side.trim().toLowerCase() : "long";
+  var side = rawSide || "long";
+
+  if (!Number.isFinite(entry) || entry <= 0) {
+    return { shares: 0, stopDistance: 0, riskDollar: Number.isFinite(risk) ? risk : 0, error: "Invalid entry price: must be positive finite number" };
+  }
+  if (!Number.isFinite(stop) || stop <= 0) {
+    return { shares: 0, stopDistance: 0, riskDollar: Number.isFinite(risk) ? risk : 0, error: "Invalid stop price: must be positive finite number" };
+  }
+  if (!Number.isFinite(risk) || risk <= 0) {
+    return { shares: 0, stopDistance: 0, riskDollar: 0, error: "Invalid risk dollar: must be positive finite number" };
+  }
+  if (side !== "long" && side !== "short") {
+    return { shares: 0, stopDistance: 0, riskDollar: risk, error: "Invalid side: must be \"long\" or \"short\"" };
+  }
+  if (entry === stop) {
+    return { shares: 0, stopDistance: 0, riskDollar: risk, error: "Entry price and stop price cannot be equal" };
+  }
+
+  if (side === "long") {
+    if (stop >= entry) {
+      return { shares: 0, stopDistance: 0, riskDollar: risk, error: "Stop price must be strictly below entry price for long positions" };
+    }
+  } else {
+    if (stop <= entry) {
+      return { shares: 0, stopDistance: 0, riskDollar: risk, error: "Stop price must be strictly above entry price for short positions" };
+    }
+  }
+
+  var dist = _s0ExactDistance(entry, stop);
+  var stopDistance = dist.distance;
+  if (stopDistance <= 0) {
+    return { shares: 0, stopDistance: 0, riskDollar: risk, error: "Stop distance must be strictly greater than 0" };
+  }
+
+  // 有十進位縮放時用整數單位相除（500 / 0.01 → 500 * 100 / 1），否則直接相除
+  var ratio = dist.scale > 0 ? (risk * dist.scale) / dist.units : risk / stopDistance;
+  var shares = _s0FloorWithTolerance(ratio, dist.scale > 0 ? 1e-12 : 1e-9);
+  if (shares < 0) shares = 0;
+
+  return {
+    shares: shares,
+    stopDistance: stopDistance,
+    riskDollar: risk,
+    error: null
+  };
+}
+
+/**
+ * 規範價格格式化工具
+ * 依價格大小決定小數位數與有效位數，無效值回傳 "—"
+ *
+ * @param {number|string|null|undefined} value - 欲格式化之數值
+ * @param {string} [symbol] - 標的識別碼（保留介面，目前不影響格式，未來可依 pricescale 擴充）
+ * @returns {string} 格式化後的價格字串或 "—"
+ */
+function canonicalFormatPrice(value, symbol) {
+  if (value === null || value === undefined || value === "") return "—";
+  var n = _s0ToNumber(value);
+  if (!Number.isFinite(n) || n === 0) return "—";
+
+  var abs = Math.abs(n);
+  // 依「四捨五入後」的值決定區間，避免 0.99996 顯示成 "1.0000"
+  var band;
+  if (abs >= 1 || Math.round(abs * 1e4) / 1e4 >= 1) {
+    band = "2dp";
+  } else if (abs >= 0.1 || Number(abs.toPrecision(4)) >= 0.1) {
+    band = "4dp";
+  } else {
+    band = "4sig";
+  }
+
+  if (band === "2dp") {
+    return new Intl.NumberFormat("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(n);
+  } else if (band === "4dp") {
+    return new Intl.NumberFormat("en-US", {
+      minimumFractionDigits: 4,
+      maximumFractionDigits: 4
+    }).format(n);
+  }
+  // |value| < 0.1: 4 位有效數字 (例如 0.00001234, 0.05000)
+  return new Intl.NumberFormat("en-US", {
+    minimumSignificantDigits: 4,
+    maximumSignificantDigits: 4
+  }).format(n);
+}
+
+function computePriceFormatForPrice(price) {
+  var p = Number(price);
+  if (isNaN(p) || !isFinite(p) || p <= 0) {
+    return { precision: 2, minMove: 0.01 };
+  }
+  var absP = Math.abs(p);
+  if (absP >= 1) {
+    return { precision: 2, minMove: 0.01 };
+  }
+  if (absP >= 0.1) {
+    return { precision: 4, minMove: 0.0001 };
+  }
+  var exp = Math.floor(Math.log10(absP));
+  var prec = Math.min(10, Math.max(4, -exp + 3));
+  var minMove = Number(Math.pow(10, -prec).toFixed(prec));
+  return { precision: prec, minMove: minMove };
+}
+
+function applyPriceFormatToCandleSeries(price) {
+  if (!candleSeries || typeof candleSeries.applyOptions !== "function") return;
+  var fmt = computePriceFormatForPrice(price);
+  try {
+    candleSeries.applyOptions({
+      priceFormat: {
+        type: "price",
+        precision: fmt.precision,
+        minMove: fmt.minMove
+      }
+    });
+  } catch (e) {}
+}
+
+if (typeof window !== "undefined") {
+  window.computePositionSize = computePositionSize;
+  window.canonicalFormatPrice = canonicalFormatPrice;
+  window.computePriceFormatForPrice = computePriceFormatForPrice;
+  window.applyPriceFormatToCandleSeries = applyPriceFormatToCandleSeries;
+}
+if (typeof globalThis !== "undefined") {
+  globalThis.computePositionSize = computePositionSize;
+  globalThis.canonicalFormatPrice = canonicalFormatPrice;
+  globalThis.computePriceFormatForPrice = computePriceFormatForPrice;
+  globalThis.applyPriceFormatToCandleSeries = applyPriceFormatToCandleSeries;
+}
+
+// ==========================================================================
+// 部位計算與 R:R（第 11 段）
+// ==========================================================================
+
+var lastAtrSizingInput = null;
+
+function parseRiskDollar(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === "boolean" || typeof raw === "object") return null;
+  var n;
+  if (typeof raw === "string") {
+    var trimmed = raw.trim();
+    if (trimmed === "") return null;
+    n = Number(trimmed);
+  } else if (typeof raw === "number") {
+    n = raw;
+  } else {
+    return null;
+  }
+  if (!isFinite(n) || isNaN(n) || n <= 0 || n > 10000000) return null;
+  return n;
+}
+
+function getRiskDollar() {
+  if (typeof document !== "undefined" && typeof document.getElementById === "function") {
+    var inputEl = document.getElementById("scRiskDollar");
+    if (inputEl && inputEl.value !== undefined) {
+      var fromInput = parseRiskDollar(inputEl.value);
+      if (fromInput !== null) return fromInput;
+    }
+  }
+  if (typeof safeGetStorage === "function") {
+    var fromStorage = parseRiskDollar(safeGetStorage("tv_risk_dollar", ""));
+    if (fromStorage !== null) return fromStorage;
+  }
+  return 500;
+}
+
+function setRiskDollar(value) {
+  var parsed = parseRiskDollar(value);
+  if (parsed === null) return false;
+  if (typeof safeSetStorage === "function") {
+    safeSetStorage("tv_risk_dollar", String(parsed));
+  }
+  return true;
+}
+
+function computeRiskRewardView(params) {
+  function invalid(errMsg) {
+    return {
+      side: null,
+      error: errMsg,
+      rewardPct: null,
+      riskPct: null,
+      rr: null,
+      shares: 0,
+      stopDistance: null
+    };
+  }
+
+  if (!params || typeof params !== "object") {
+    return invalid("invalid_input");
+  }
+
+  var entry = params.entry;
+  var target = params.target;
+  var stop = params.stop;
+  var riskDollar = params.riskDollar;
+
+  if (
+    typeof entry !== "number" || !isFinite(entry) || entry <= 0 ||
+    typeof target !== "number" || !isFinite(target) || target <= 0 ||
+    typeof stop !== "number" || !isFinite(stop) || stop <= 0
+  ) {
+    return invalid("invalid_price");
+  }
+
+  var side = null;
+  if (target > entry && stop < entry) {
+    side = "long";
+  } else if (target < entry && stop > entry) {
+    side = "short";
+  } else {
+    return invalid("停損與目標必須在進場價兩側");
+  }
+
+  var pos = computePositionSize({
+    entry: entry,
+    stop: stop,
+    riskDollar: riskDollar,
+    side: side
+  });
+
+  if (!pos || pos.error) {
+    return invalid(pos && pos.error ? pos.error : "invalid_position_size");
+  }
+
+  var rewardPct = (Math.abs(target - entry) / entry) * 100;
+  var riskPct = (Math.abs(entry - stop) / entry) * 100;
+  if (!isFinite(riskPct) || riskPct <= 0) {
+    return invalid("invalid_risk");
+  }
+
+  return {
+    side: side,
+    error: null,
+    rewardPct: rewardPct,
+    riskPct: riskPct,
+    rr: rewardPct / riskPct,
+    shares: pos.shares,
+    stopDistance: pos.stopDistance
+  };
+}
+
+function computeAtrPositionSizing(params) {
+  if (!params || typeof params !== "object") {
+    return { shares: 0, stopDistance: null, error: "invalid_input" };
+  }
+
+  if (params.timeframe !== "1D") {
+    return { shares: 0, stopDistance: null, error: "daily_only" };
+  }
+
+  var close = params.close;
+  var atr = params.atr;
+  var stopMult = (params.stopMult !== undefined && params.stopMult !== null) ? params.stopMult : 2.0;
+
+  if (
+    typeof close !== "number" || !isFinite(close) || close <= 0 ||
+    typeof atr !== "number" || !isFinite(atr) || atr <= 0 ||
+    typeof stopMult !== "number" || !isFinite(stopMult) || stopMult <= 0
+  ) {
+    return { shares: 0, stopDistance: null, error: "invalid_input" };
+  }
+
+  var stopPrice = close - atr * stopMult;
+  if (!isFinite(stopPrice) || stopPrice <= 0) {
+    return { shares: 0, stopDistance: null, error: "stop_below_zero" };
+  }
+
+  var pos = computePositionSize({
+    entry: close,
+    stop: stopPrice,
+    riskDollar: params.riskDollar,
+    side: "long"
+  });
+
+  return {
+    shares: pos.shares,
+    stopDistance: pos.error ? null : pos.stopDistance,
+    error: pos.error
+  };
+}
+
+function parseManualQuantity(raw) {
+  if (typeof raw !== "number" && typeof raw !== "string") return null;
+  if (typeof raw === "number" && (!isFinite(raw) || isNaN(raw))) return null;
+  var s = String(raw).trim();
+  if (!/^\d+(\.\d{1,8})?$/.test(s)) return null;
+  var n = Number(s);
+  if (!isFinite(n) || isNaN(n) || n <= 0 || n > 1e12) return null;
+  return n;
+}
+
+function formatPriceForInput(value) {
+  if (typeof value !== "number" || !isFinite(value) || isNaN(value) || value <= 0) {
+    return "";
+  }
+  return String(Number(value.toPrecision(10)));
+}
+
+function computeManualRiskView(params) {
+  if (!params || typeof params !== "object") {
+    return { quantity: null, riskAmount: null, overRisk: false, error: "invalid_view" };
+  }
+  var quantity = params.quantity;
+  if (quantity === null || quantity === undefined) {
+    return { quantity: null, riskAmount: null, overRisk: false, error: null };
+  }
+  var view = params.view;
+  if (
+    !view ||
+    view.error ||
+    !view.side ||
+    typeof view.stopDistance !== "number" ||
+    !isFinite(view.stopDistance) ||
+    view.stopDistance <= 0
+  ) {
+    return { quantity: quantity, riskAmount: null, overRisk: false, error: "invalid_view" };
+  }
+  if (typeof quantity !== "number" || !isFinite(quantity) || isNaN(quantity) || quantity <= 0) {
+    return { quantity: quantity, riskAmount: null, overRisk: false, error: "invalid_quantity" };
+  }
+  var riskAmount = quantity * view.stopDistance;
+  var riskDollar = params.riskDollar;
+  var overRisk = false;
+  if (typeof riskDollar === "number" && isFinite(riskDollar) && riskDollar > 0) {
+    overRisk = riskAmount > riskDollar + 1e-9 * Math.max(1, riskDollar);
+  }
+  return {
+    quantity: quantity,
+    riskAmount: riskAmount,
+    overRisk: overRisk,
+    error: null
+  };
+}
+
+function describeRrEditInputs(params) {
+  function parsePositivePrice(rawText) {
+    if (rawText === null || rawText === undefined || typeof rawText === "boolean" || typeof rawText === "object") {
+      return null;
+    }
+    var s = String(rawText).trim();
+    if (s === "") return null;
+    var n = Number(s);
+    if (!isFinite(n) || isNaN(n) || n <= 0) return null;
+    return n;
+  }
+
+  if (!params || typeof params !== "object") {
+    return {
+      ok: false,
+      error: "價格必須是大於 0 的數字",
+      entry: null,
+      stop: null,
+      target: null,
+      quantity: null,
+      view: null,
+      manual: null
+    };
+  }
+
+  var entry = parsePositivePrice(params.entryText);
+  var stop = parsePositivePrice(params.stopText);
+  var target = parsePositivePrice(params.targetText);
+
+  if (entry === null || stop === null || target === null) {
+    return {
+      ok: false,
+      error: "價格必須是大於 0 的數字",
+      entry: entry,
+      stop: stop,
+      target: target,
+      quantity: null,
+      view: null,
+      manual: null
+    };
+  }
+
+  var rawQty = (params.qtyText === null || params.qtyText === undefined) ? "" : String(params.qtyText).trim();
+  var quantity = null;
+  if (rawQty !== "") {
+    quantity = parseManualQuantity(rawQty);
+    if (quantity === null) {
+      return {
+        ok: false,
+        error: "數量必須是大於 0 的數字（最多 8 位小數），或留空",
+        entry: entry,
+        stop: stop,
+        target: target,
+        quantity: null,
+        view: null,
+        manual: null
+      };
+    }
+  }
+
+  var view = computeRiskRewardView({
+    entry: entry,
+    target: target,
+    stop: stop,
+    riskDollar: params.riskDollar
+  });
+
+  if (!view || view.error) {
+    var errMsg = (view && view.error === "停損與目標必須在進場價兩側")
+      ? view.error
+      : "價格必須是大於 0 的數字";
+    return {
+      ok: false,
+      error: errMsg,
+      entry: entry,
+      stop: stop,
+      target: target,
+      quantity: quantity,
+      view: view,
+      manual: null
+    };
+  }
+
+  var manual = computeManualRiskView({
+    view: view,
+    quantity: quantity,
+    riskDollar: params.riskDollar
+  });
+
+  return {
+    ok: true,
+    error: null,
+    entry: entry,
+    stop: stop,
+    target: target,
+    quantity: quantity,
+    view: view,
+    manual: manual
+  };
+}
+
+var rrEditDrawing = null;
+
+function openRrEditModal(drawing) {
+  if (!drawing) return;
+  var modal = document.getElementById("rrEditModal");
+  if (!modal) return;
+  var entryIn = document.getElementById("rrEditEntry");
+  var stopIn = document.getElementById("rrEditStop");
+  var targetIn = document.getElementById("rrEditTarget");
+  var qtyIn = document.getElementById("rrEditQty");
+
+  if (entryIn) entryIn.value = formatPriceForInput(drawing.entryPrice);
+  if (stopIn) stopIn.value = formatPriceForInput(drawing.stopPrice);
+  if (targetIn) targetIn.value = formatPriceForInput(drawing.targetPrice);
+  if (qtyIn) {
+    qtyIn.value = (drawing.manualQuantity !== undefined && drawing.manualQuantity !== null)
+      ? String(drawing.manualQuantity)
+      : "";
+  }
+
+  rrEditDrawing = drawing;
+  modal.style.display = "flex";
+  updateRrEditPreview();
+  if (entryIn) {
+    entryIn.focus();
+    if (typeof entryIn.select === "function") entryIn.select();
+  }
+}
+
+function closeRrEditModal() {
+  var modal = document.getElementById("rrEditModal");
+  if (modal) modal.style.display = "none";
+  rrEditDrawing = null;
+}
+
+function updateRrEditPreview() {
+  var entryIn = document.getElementById("rrEditEntry");
+  var stopIn = document.getElementById("rrEditStop");
+  var targetIn = document.getElementById("rrEditTarget");
+  var qtyIn = document.getElementById("rrEditQty");
+  var previewEl = document.getElementById("rrEditPreview");
+  var errEl = document.getElementById("rrEditError");
+  var applyBtn = document.getElementById("btnRrEditApply");
+
+  var riskDollar = getRiskDollar();
+  var result = describeRrEditInputs({
+    entryText: entryIn ? entryIn.value : "",
+    stopText: stopIn ? stopIn.value : "",
+    targetText: targetIn ? targetIn.value : "",
+    qtyText: qtyIn ? qtyIn.value : "",
+    riskDollar: riskDollar
+  });
+
+  if (previewEl) {
+    while (previewEl.firstChild) {
+      previewEl.removeChild(previewEl.firstChild);
+    }
+    if (result.ok && result.view) {
+      var sideText = result.view.side === "short" ? "做空" : "做多";
+      var line1 = document.createElement("div");
+      line1.textContent = sideText + "｜R:R 1 : " + result.view.rr.toFixed(2) + "｜建議 " + result.view.shares + " 股（$" + riskDollar + " 風控）";
+      previewEl.appendChild(line1);
+
+      if (result.manual && result.manual.quantity !== null && !result.manual.error && result.manual.riskAmount !== null) {
+        var line2 = document.createElement("div");
+        var manualLine = "手動 " + String(result.manual.quantity) + " 股 → 風險 $" + result.manual.riskAmount.toFixed(2);
+        if (result.manual.overRisk) {
+          manualLine += "  ⚠ 超過風控";
+          line2.style.color = "#f87171";
+        }
+        line2.textContent = manualLine;
+        previewEl.appendChild(line2);
+      }
+    }
+  }
+
+  if (errEl) {
+    errEl.textContent = result.ok ? "" : (result.error || "");
+  }
+  if (applyBtn) {
+    applyBtn.disabled = !result.ok;
+  }
+}
+
+function applyRrEdit() {
+  if (!rrEditDrawing || !Array.isArray(drawings) || drawings.indexOf(rrEditDrawing) === -1) {
+    closeRrEditModal();
+    return;
+  }
+
+  var entryIn = document.getElementById("rrEditEntry");
+  var stopIn = document.getElementById("rrEditStop");
+  var targetIn = document.getElementById("rrEditTarget");
+  var qtyIn = document.getElementById("rrEditQty");
+  var errEl = document.getElementById("rrEditError");
+  var applyBtn = document.getElementById("btnRrEditApply");
+
+  var result = describeRrEditInputs({
+    entryText: entryIn ? entryIn.value : "",
+    stopText: stopIn ? stopIn.value : "",
+    targetText: targetIn ? targetIn.value : "",
+    qtyText: qtyIn ? qtyIn.value : "",
+    riskDollar: getRiskDollar()
+  });
+
+  if (!result.ok) {
+    if (errEl) errEl.textContent = result.error || "";
+    if (applyBtn) applyBtn.disabled = true;
+    return;
+  }
+
+  rrEditDrawing.entryPrice = result.entry;
+  rrEditDrawing.stopPrice = result.stop;
+  rrEditDrawing.targetPrice = result.target;
+  if (result.quantity === null) {
+    delete rrEditDrawing.manualQuantity;
+  } else {
+    rrEditDrawing.manualQuantity = result.quantity;
+  }
+
+  saveDrawingsForActiveSymbol();
+  closeRrEditModal();
+  if (typeof scheduleDrawingRender === "function") scheduleDrawingRender();
+}
+
+if (typeof window !== "undefined") {
+  window.parseRiskDollar = parseRiskDollar;
+  window.getRiskDollar = getRiskDollar;
+  window.setRiskDollar = setRiskDollar;
+  window.computeRiskRewardView = computeRiskRewardView;
+  window.computeAtrPositionSizing = computeAtrPositionSizing;
+  window.parseManualQuantity = parseManualQuantity;
+  window.formatPriceForInput = formatPriceForInput;
+  window.computeManualRiskView = computeManualRiskView;
+  window.describeRrEditInputs = describeRrEditInputs;
+}
+if (typeof globalThis !== "undefined") {
+  globalThis.parseRiskDollar = parseRiskDollar;
+  globalThis.getRiskDollar = getRiskDollar;
+  globalThis.setRiskDollar = setRiskDollar;
+  globalThis.computeRiskRewardView = computeRiskRewardView;
+  globalThis.computeAtrPositionSizing = computeAtrPositionSizing;
+  globalThis.parseManualQuantity = parseManualQuantity;
+  globalThis.formatPriceForInput = formatPriceForInput;
+  globalThis.computeManualRiskView = computeManualRiskView;
+  globalThis.describeRrEditInputs = describeRrEditInputs;
+}
+
+// ==========================================================================
 // DOM Initializers & Strict Safe Text Ingestion (Zero XSS innerHTML)
 // ==========================================================================
 
@@ -1179,7 +3549,7 @@ function updateTapeItem(symbol, direction) {
   var state = symbolStates[symbol] || {};
 
   if (state.price !== undefined) {
-    els.price.textContent = formatPrice(state.price, symbol);
+    els.price.textContent = canonicalFormatPrice(state.price, symbol);
   }
   if (state.changePercentage !== undefined) {
     var chp = Number(state.changePercentage);
@@ -1209,15 +3579,82 @@ function updateQuote(symbol, quoteData) {
     lastPrices[symbol] = newPrice;
   }
 
-  symbolStates[symbol] = Object.assign({}, symbolStates[symbol] || {}, quoteData);
+  var mergedState = Object.assign({}, symbolStates[symbol] || {}, quoteData);
+  symbolStates[symbol] = mergedState;
   updateTapeItem(symbol, direction);
-  updateWatchlistPrice(symbol, quoteData);
+  updateWatchlistPrice(symbol, mergedState);
 
   if (symbol === activeSymbol) {
-    updateSymbolMetrics(symbol, quoteData, latestBarData);
+    updateSymbolMetrics(symbol, mergedState, latestBarData);
     if (quoteData && quoteData.price) {
       updateActiveCandleWithPrice(quoteData.price, quoteData.volume, quoteData.time);
     }
+  }
+}
+
+var _liveIndicatorsTimer = null;
+var _lastLiveIndicatorsTime = 0;
+
+function updateLiveIndicatorsThrottled() {
+  var now = Date.now();
+  if (now - _lastLiveIndicatorsTime >= 250) {
+    if (_liveIndicatorsTimer) {
+      clearTimeout(_liveIndicatorsTimer);
+      _liveIndicatorsTimer = null;
+    }
+    _lastLiveIndicatorsTime = now;
+    _runLiveIndicatorsUpdate();
+  } else if (!_liveIndicatorsTimer) {
+    var delay = Math.max(16, 250 - (now - _lastLiveIndicatorsTime));
+    _liveIndicatorsTimer = setTimeout(function() {
+      _liveIndicatorsTimer = null;
+      _lastLiveIndicatorsTime = Date.now();
+      _runLiveIndicatorsUpdate();
+    }, delay);
+  }
+}
+
+function _runLiveIndicatorsUpdate() {
+  if (!currentRawBars || currentRawBars.length === 0) return;
+  try {
+    if (window.Indicators && currentRawBars.length > 0) {
+      if (ema10Series && indicatorConfig.ema10) {
+        var e10 = window.Indicators.calcEMA(currentRawBars, 10);
+        if (e10.length > 0) ema10Series.update(e10[e10.length - 1]);
+      }
+      if (ema21Series && indicatorConfig.ema21) {
+        var e21 = window.Indicators.calcEMA(currentRawBars, 21);
+        if (e21.length > 0) ema21Series.update(e21[e21.length - 1]);
+      }
+      if (ema30Series && indicatorConfig.ema30) {
+        var e30 = window.Indicators.calcEMA(currentRawBars, 30);
+        if (e30.length > 0) ema30Series.update(e30[e30.length - 1]);
+      }
+      if (vwapSeries && indicatorConfig.vwap && window.Indicators.calcVWAP) {
+        var vw = window.Indicators.calcVWAP(currentRawBars, { timeframe: activeTimeframe, symbol: activeSymbol });
+        if (vw.length > 0) vwapSeries.update(vw[vw.length - 1]);
+      }
+      if (sma50Series && indicatorConfig.sma50) {
+        var s50 = window.Indicators.calcSMA(currentRawBars, 50);
+        if (s50.length > 0) sma50Series.update(s50[s50.length - 1]);
+      }
+      if (sma200Series && indicatorConfig.sma200) {
+        var s200 = window.Indicators.calcSMA(currentRawBars, 200);
+        if (s200.length > 0) sma200Series.update(s200[s200.length - 1]);
+      }
+      if (volSmaSeries && indicatorConfig.volSma) {
+        var vs = window.Indicators.calcVolumeSMA(currentRawBars, 50);
+        if (vs.length > 0) volSmaSeries.update(vs[vs.length - 1]);
+      }
+    }
+
+    if (indicatorConfig && indicatorConfig.avwap) {
+      calcAndRenderAvwap();
+    }
+
+    updateDeepvueHud(currentRawBars);
+  } catch (err) {
+    console.debug("Throttled live indicators update skipped:", err);
   }
 }
 
@@ -1229,11 +3666,22 @@ function updateActiveCandleWithPrice(price, volume, tickTime) {
   var curBar = currentRawBars[lastIdx];
   if (!curBar || typeof curBar.time !== "number") return;
 
+  // 第 4 段：只有報價時間屬於目前這根 K 棒時才更新。換時段時由 1 分鐘 K 棒訊息建立新 K 棒，
+  // 避免換分鐘後的價格寫進上一根，也避免美股盤前盤後的報價改動日 K。
+  var placement = computeLiveBucket({
+    symbol: activeSymbol,
+    timeframe: activeTimeframe,
+    tickTime: tickTime,
+    lastBarTime: curBar.time
+  });
+  if (placement.action !== "update" || placement.time !== curBar.time) return;
+
   var updatedOpen = curBar.open;
   var updatedHigh = Math.max(curBar.high, price);
   var updatedLow = Math.min(curBar.low, price);
   var updatedClose = price;
-  var updatedVolume = (volume !== undefined && volume !== null && !isNaN(volume)) ? volume : (curBar.volume || 0);
+  // 第 4 段：報價的成交量是 24h／當日累計量，不能當成這根 K 棒的量；K 棒量只由 1 分鐘 K 棒訊息累加。
+  var updatedVolume = curBar.volume || 0;
 
   var liveBar = {
     time: curBar.time,
@@ -1248,6 +3696,12 @@ function updateActiveCandleWithPrice(price, volume, tickTime) {
   latestBarData = liveBar;
   lastBarTime = curBar.time;
   lastBarObj = Object.assign({}, liveBar);
+  if (liveBucketState && liveBucketState.lastWritten === curBar && liveBucketState.bucketTime === curBar.time) {
+    liveBucketState.high = updatedHigh;
+    liveBucketState.low = updatedLow;
+    liveBucketState.close = updatedClose;
+    liveBucketState.lastWritten = liveBar;
+  }
 
   if (isAppNapSuspended || (typeof document !== "undefined" && document.hidden)) {
     hasPendingChartUpdate = true;
@@ -1288,43 +3742,8 @@ function updateActiveCandleWithPrice(price, volume, tickTime) {
       });
     }
 
-    if (window.Indicators && currentRawBars.length > 0) {
-      if (ema10Series && indicatorConfig.ema10) {
-        var e10 = window.Indicators.calcEMA(currentRawBars, 10);
-        if (e10.length > 0) ema10Series.update(e10[e10.length - 1]);
-      }
-      if (ema21Series && indicatorConfig.ema21) {
-        var e21 = window.Indicators.calcEMA(currentRawBars, 21);
-        if (e21.length > 0) ema21Series.update(e21[e21.length - 1]);
-      }
-      if (ema30Series && indicatorConfig.ema30) {
-        var e30 = window.Indicators.calcEMA(currentRawBars, 30);
-        if (e30.length > 0) ema30Series.update(e30[e30.length - 1]);
-      }
-      if (vwapSeries && indicatorConfig.vwap && window.Indicators.calcVWAP) {
-        var vw = window.Indicators.calcVWAP(currentRawBars);
-        if (vw.length > 0) vwapSeries.update(vw[vw.length - 1]);
-      }
-      if (sma50Series && indicatorConfig.sma50) {
-        var s50 = window.Indicators.calcSMA(currentRawBars, 50);
-        if (s50.length > 0) sma50Series.update(s50[s50.length - 1]);
-      }
-      if (sma200Series && indicatorConfig.sma200) {
-        var s200 = window.Indicators.calcSMA(currentRawBars, 200);
-        if (s200.length > 0) sma200Series.update(s200[s200.length - 1]);
-      }
-      if (volSmaSeries && indicatorConfig.volSma) {
-        var vs = window.Indicators.calcVolumeSMA(currentRawBars, 50);
-        if (vs.length > 0) volSmaSeries.update(vs[vs.length - 1]);
-      }
-    }
-
-    if (indicatorConfig && indicatorConfig.avwap) {
-      calcAndRenderAvwap();
-    }
-
     updateCrosshairLegend(liveBar);
-    updateDeepvueHud(currentRawBars);
+    updateLiveIndicatorsThrottled();
   } catch (chartErr) {
     console.debug("Quote-to-candle update skipped:", chartErr);
   }
@@ -1367,44 +3786,57 @@ function initChart() {
   var initialWidth = priceContainer.clientWidth || chartContainer.clientWidth || 800;
   var initialHeight = priceContainer.clientHeight || 400;
 
+  var mainPalette = getChartThemePalette();
+  // 第 4 段：時間軸與十字線顯示交易所時間（美股 ET、加密貨幣 UTC）
+  var mainTimeOpts = makeChartTimeOptions(
+    function() { return activeSymbol; },
+    function() { return activeTimeframe; }
+  );
   chart = LightweightCharts.createChart(priceContainer, {
     width: initialWidth,
     height: initialHeight,
     layout: {
-      background: { color: "#131722" },
-      textColor: "#787b86",
+      background: { color: mainPalette.background },
+      textColor: mainPalette.textColor,
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
     },
     grid: {
-      vertLines: { color: "#1e222d" },
-      horzLines: { color: "#1e222d" }
+      vertLines: { color: mainPalette.grid },
+      horzLines: { color: mainPalette.grid }
     },
     crosshair: {
       mode: LightweightCharts.CrosshairMode.Normal,
       vertLine: {
-        color: "#363c4e",
+        color: mainPalette.crosshair,
         width: 1,
         style: LightweightCharts.LineStyle.Dashed,
-        labelBackgroundColor: "#2a2e39"
+        labelBackgroundColor: mainPalette.crosshairLabelBg
       },
       horzLine: {
-        color: "#363c4e",
+        color: mainPalette.crosshair,
         width: 1,
         style: LightweightCharts.LineStyle.Dashed,
-        labelBackgroundColor: "#2a2e39"
+        labelBackgroundColor: mainPalette.crosshairLabelBg
       }
     },
     rightPriceScale: {
-      borderColor: "#2a2e39",
-      scaleMargins: { top: 0.20, bottom: 0.15 },
+      borderColor: mainPalette.border,
+      scaleMargins: { top: 0.15, bottom: 0.22 },
       autoScale: true
     },
     timeScale: {
-      borderColor: "#2a2e39",
+      borderColor: mainPalette.border,
       timeVisible: true,
-      secondsVisible: false
+      secondsVisible: false,
+      rightOffset: RIGHT_WHITESPACE_BARS,
+      tickMarkFormatter: mainTimeOpts.tickMarkFormatter
+    },
+    localization: {
+      timeFormatter: mainTimeOpts.timeFormatter
     }
   });
+
+  installRangeDebug(chart, "main");
 
   candleSeries = chart.addCandlestickSeries({
     upColor: "#26a69a",
@@ -1423,7 +3855,7 @@ function initChart() {
     priceScaleId: "vol_overlay"
   });
   volumeSeries.priceScale().applyOptions({
-    scaleMargins: { top: 0.8, bottom: 0 }
+    scaleMargins: { top: 0.82, bottom: 0 }
   });
 
   volSmaSeries = chart.addLineSeries({
@@ -1519,39 +3951,46 @@ function initChart() {
       width: rsInitWidth,
       height: rsInitHeight,
       layout: {
-        background: { color: "#131722" },
-        textColor: "#787b86",
+        background: { color: mainPalette.background },
+        textColor: mainPalette.textColor,
         fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
       },
       grid: {
-        vertLines: { color: "#1e222d" },
-        horzLines: { color: "#1e222d" }
+        vertLines: { color: mainPalette.grid },
+        horzLines: { color: mainPalette.grid }
       },
       crosshair: {
         mode: LightweightCharts.CrosshairMode.Normal,
         vertLine: {
-          color: "#363c4e",
+          color: mainPalette.crosshair,
           width: 1,
           style: LightweightCharts.LineStyle.Dashed,
-          labelBackgroundColor: "#2a2e39"
+          labelBackgroundColor: mainPalette.crosshairLabelBg
         },
         horzLine: {
-          color: "#363c4e",
+          color: mainPalette.crosshair,
           width: 1,
           style: LightweightCharts.LineStyle.Dashed,
-          labelBackgroundColor: "#2a2e39"
+          labelBackgroundColor: mainPalette.crosshairLabelBg
         }
       },
       rightPriceScale: {
-        borderColor: "#2a2e39",
+        borderColor: mainPalette.border,
         scaleMargins: { top: 0.1, bottom: 0.1 }
       },
       timeScale: {
-        borderColor: "#2a2e39",
+        borderColor: mainPalette.border,
         timeVisible: true,
-        secondsVisible: false
+        secondsVisible: false,
+        rightOffset: RIGHT_WHITESPACE_BARS,
+        tickMarkFormatter: mainTimeOpts.tickMarkFormatter
+      },
+      localization: {
+        timeFormatter: mainTimeOpts.timeFormatter
       }
     });
+
+    installRangeDebug(rsChart, "rs");
 
     rsLinePaneSeries = rsChart.addLineSeries({
       color: "#2962ff",
@@ -1570,29 +4009,13 @@ function initChart() {
       lastValueVisible: false
     });
 
-    // Bidirectional range synchronization
-    chart.timeScale().subscribeVisibleLogicalRangeChange(function(newRange) {
-      if (typeof renderDrawingCanvas === "function") renderDrawingCanvas();
-      if (isSyncingRange || !rsChart || !newRange) return;
-      isSyncingRange = true;
-      try {
-        rsChart.timeScale().setVisibleLogicalRange(newRange);
-      } catch (e) {}
-      isSyncingRange = false;
-    });
-
-    rsChart.timeScale().subscribeVisibleLogicalRangeChange(function(newRange) {
-      if (isSyncingRange || !chart || !newRange) return;
-      isSyncingRange = true;
-      try {
-        chart.timeScale().setVisibleLogicalRange(newRange);
-      } catch (e) {}
-      isSyncingRange = false;
+    // Bidirectional range synchronization（邏輯範圍；RS 資料已補齊成主圖的時間軸，見 padToTimeAxis）
+    bindLogicalRangeSync(chart, rsChart, function() {
+      if (typeof scheduleDrawingRender === "function") scheduleDrawingRender();
     });
   }
 
   chart.subscribeCrosshairMove(function(param) {
-    if (typeof renderDrawingCanvas === "function") renderDrawingCanvas();
     if (!param || !param.time || !param.point || !param.seriesData || !param.seriesData.has(candleSeries)) {
       updateCrosshairLegend(latestBarData);
       return;
@@ -1686,6 +4109,14 @@ function resizeAllCharts() {
         subCharts[p].chart.applyOptions({ width: sw, height: sh });
       }
     }
+    var rsEl = document.getElementById("splitRsChart" + p);
+    if (rsEl && subCharts[p] && subCharts[p].rsChart && indicatorConfig.rsLine) {
+      var rw = rsEl.clientWidth;
+      var rh = rsEl.clientHeight;
+      if (rw > 0 && rh > 0) {
+        subCharts[p].rsChart.applyOptions({ width: rw, height: rh });
+      }
+    }
   }
 }
 
@@ -1704,6 +4135,7 @@ function setPriceScaleMode(mode) {
       chart.priceScale("right").applyOptions({ mode: modeNum });
     } catch (e) {}
   }
+  if (typeof scheduleDrawingRender === "function") scheduleDrawingRender();
 }
 
 function setAutoScale(enabled) {
@@ -1715,19 +4147,21 @@ function setAutoScale(enabled) {
       chart.priceScale("right").applyOptions({ autoScale: isAutoScale });
     } catch (e) {}
   }
+  if (typeof scheduleDrawingRender === "function") scheduleDrawingRender();
 }
 
 function updateCandleStyleUI() {
   var btn = document.getElementById("candleStyleBtn");
   if (!btn) return;
+  var dict = i18n[currentLang] || i18n.en;
   if (currentCandleStyle === "hollow") {
-    btn.textContent = "🕯️ 實空心";
+    btn.textContent = dict.candleHollow;
     btn.classList.add("hollow");
-    btn.setAttribute("title", "當前為實空心蠟燭 (點擊切換為傳統實心蠟燭)");
+    btn.setAttribute("title", dict.candleHollowTitle);
   } else {
-    btn.textContent = "🕯️ 實心";
+    btn.textContent = dict.candleSolid;
     btn.classList.remove("hollow");
-    btn.setAttribute("title", "當前為實心蠟燭 (點擊切換為實空心蠟燭)");
+    btn.setAttribute("title", dict.candleSolidTitle);
   }
 }
 
@@ -1867,14 +4301,41 @@ function applyIndicatorVisibilities() {
   if (bbUpperSeries) bbUpperSeries.applyOptions({ visible: indicatorConfig.bollinger, priceLineVisible: false, lastValueVisible: false });
   if (bbLowerSeries) bbLowerSeries.applyOptions({ visible: indicatorConfig.bollinger, priceLineVisible: false, lastValueVisible: false });
 
+  var rsToggleBtn = document.getElementById("rsToggleBtn");
+  if (rsToggleBtn) {
+    if (indicatorConfig.rsLine) {
+      rsToggleBtn.classList.add("active");
+    } else {
+      rsToggleBtn.classList.remove("active");
+    }
+  }
+
   var rsPaneEl = document.getElementById("rsPane");
   var priceContainerEl = document.getElementById("chart");
   if (rsPaneEl) {
     rsPaneEl.style.display = indicatorConfig.rsLine ? "flex" : "none";
+    rsPaneEl.style.height = indicatorConfig.rsLine ? "28%" : "0%";
+    rsPaneEl.style.flex = indicatorConfig.rsLine ? "0 0 28%" : "0 0 0%";
   }
   if (priceContainerEl && priceContainerEl.parentElement) {
     priceContainerEl.parentElement.style.height = indicatorConfig.rsLine ? "72%" : "100%";
     priceContainerEl.parentElement.style.flex = indicatorConfig.rsLine ? "0 0 72%" : "0 0 100%";
+  }
+  if (!indicatorConfig.rsLine) {
+    if (rsLinePaneSeries && typeof rsLinePaneSeries.setMarkers === "function") {
+      try { rsLinePaneSeries.setMarkers([]); } catch (e) {}
+    }
+    if (candleSeries && typeof candleSeries.setMarkers === "function") {
+      try { candleSeries.setMarkers([]); } catch (e) {}
+    }
+    var nhBadgeOff = document.getElementById("rsNewHighBadge");
+    if (nhBadgeOff) nhBadgeOff.style.display = "none";
+  }
+
+  for (var spIdx = 2; spIdx <= 4; spIdx++) {
+    if (typeof renderSubPaneRs === "function") {
+      renderSubPaneRs(spIdx, subCharts[spIdx] ? subCharts[spIdx].bars : null, benchmarkRawBars);
+    }
   }
 
   var legEma30 = document.getElementById("legEma30");
@@ -1927,7 +4388,7 @@ function applyIndicatorVisibilities() {
   }
 
   var isToolsVis = Boolean(indicatorConfig && indicatorConfig.showAnalysisTools);
-  var toolBtnIds = ["fundamentalsBtn", "aiLensBtn", "screenerBtn"];
+  var toolBtnIds = ["fundamentalsBtn", "aiLensBtn"];
   for (var ti = 0; ti < toolBtnIds.length; ti++) {
     var tEl = document.getElementById(toolBtnIds[ti]);
     if (tEl) {
@@ -1937,6 +4398,9 @@ function applyIndicatorVisibilities() {
   }
 
   calcAndRenderAvwap();
+  if (typeof resizeAllCharts === "function") {
+    resizeAllCharts();
+  }
 }
 
 function updateCrosshairLegend(bar) {
@@ -1975,10 +4439,10 @@ function updateCrosshairLegend(bar) {
     }
   }
 
-  if (legendOpenEl) legendOpenEl.textContent = formatPrice(bar.open, activeSymbol);
-  if (legendHighEl) legendHighEl.textContent = formatPrice(bar.high, activeSymbol);
-  if (legendLowEl) legendLowEl.textContent = formatPrice(bar.low, activeSymbol);
-  if (legendCloseEl) legendCloseEl.textContent = formatPrice(bar.close, activeSymbol);
+  if (legendOpenEl) legendOpenEl.textContent = canonicalFormatPrice(bar.open, activeSymbol);
+  if (legendHighEl) legendHighEl.textContent = canonicalFormatPrice(bar.high, activeSymbol);
+  if (legendLowEl) legendLowEl.textContent = canonicalFormatPrice(bar.low, activeSymbol);
+  if (legendCloseEl) legendCloseEl.textContent = canonicalFormatPrice(bar.close, activeSymbol);
   var legendChgEl = document.getElementById("legendChg");
   if (legendChgEl && typeof bar.close === "number" && typeof bar.open === "number" && bar.open > 0) {
     var chgPct = ((bar.close - bar.open) / bar.open) * 100;
@@ -2029,40 +4493,107 @@ function updateCrosshairLegend(bar) {
 // ==========================================================================
 
 function switchSymbol(symbol) {
-  if (activeSymbol === symbol && currentRawBars.length > 0) return;
-  if (activeSymbol && typeof saveDrawingsForActiveSymbol === "function") {
-    saveDrawingsForActiveSymbol();
-  }
+  if (!symbol) return;
+  if (activeSymbol === symbol && currentRawBars.length > 0 && loadedHistorySymbol === symbol) return;
+
+  try {
+    if (activeSymbol && typeof saveDrawingsForActiveSymbol === "function") {
+      saveDrawingsForActiveSymbol();
+    }
+  } catch (e) { console.error("[switchSymbol] saveDrawings 失敗", e); }
+
+  try {
+    resetDrawToolToCursor();
+  } catch (e) { console.error("[switchSymbol] resetDrawTool 失敗", e); }
+
+  try {
+    if (candleSeries && tvPriceLineHandles && tvPriceLineHandles.length > 0) {
+      for (var pi = 0; pi < tvPriceLineHandles.length; pi++) {
+        try { candleSeries.removePriceLine(tvPriceLineHandles[pi]); } catch (eLine) {}
+      }
+    }
+    tvPriceLineHandles = [];
+  } catch (e) { console.error("[switchSymbol] removePriceLines 失敗", e); }
+
+  try {
+    restorePriceLinesForSymbol(symbol);
+  } catch (e) { console.error("[switchSymbol] restorePriceLines 失敗", e); }
+
   activeSymbol = symbol;
   safeSetStorage("tv_active_symbol", symbol);
-  if (typeof loadDrawingsForSymbol === "function") {
-    drawings = loadDrawingsForSymbol(symbol);
-    if (typeof renderDrawingCanvas === "function") renderDrawingCanvas();
-  }
+  drawings = loadDrawingsForSymbol(symbol);
   isHistoryLoading = true;
   currentRawBars = [];
+  loadedHistorySymbol = null;
+  if (typeof window !== "undefined") window.loadedHistorySymbol = null;
+  if (typeof globalThis !== "undefined") globalThis.loadedHistorySymbol = null;
 
-  if (candleSeries) candleSeries.setData([]);
-  if (volumeSeries) volumeSeries.setData([]);
-  if (ema10Series) ema10Series.setData([]);
-  if (ema21Series) ema21Series.setData([]);
-  if (ema30Series) ema30Series.setData([]);
-  if (sma50Series) sma50Series.setData([]);
-  if (sma200Series) sma200Series.setData([]);
-  if (volSmaSeries) volSmaSeries.setData([]);
-  if (bbUpperSeries) bbUpperSeries.setData([]);
-  if (bbLowerSeries) bbLowerSeries.setData([]);
-  if (vwapSeries) vwapSeries.setData([]);
-  if (rsSeries) rsSeries.setData([]);
-  if (rsLinePaneSeries) rsLinePaneSeries.setData([]);
-  if (rsEmaPaneSeries) rsEmaPaneSeries.setData([]);
+  try {
+    var isSubscribed = symbolsList && symbolsList.some(function(s) {
+      return s.id === symbol || s.symbol === symbol;
+    });
+    var unBadge = document.getElementById("unsubscribedBadge");
+    if (unBadge) {
+      if (isSubscribed) {
+        unBadge.style.display = "none";
+        unBadge.textContent = "";
+      } else {
+        unBadge.textContent = "未訂閱即時報價 ";
+        var subBtn = document.createElement("button");
+        subBtn.id = "btnSubscribeActive";
+        subBtn.className = "btn-subscribe-active";
+        subBtn.textContent = "加入自選";
+        subBtn.onclick = function(e) {
+          if (e && e.stopPropagation) e.stopPropagation();
+          subscribeSymbol(symbol, function(ok) {
+            if (ok && unBadge) {
+              unBadge.style.display = "none";
+            }
+          });
+        };
+        unBadge.appendChild(subBtn);
+        unBadge.style.display = "inline-flex";
+      }
+    }
+  } catch (e) { console.error("[switchSymbol] unsubscribedBadge 失敗", e); }
 
-  renderWatchlist();
-  if ((!benchmarkRawBars || benchmarkRawBars.length === 0) && typeof loadBenchmarkHistory === "function") {
-    loadBenchmarkHistory(rsBenchmarkTag);
-  }
+  try {
+    if (candleSeries) candleSeries.setData([]);
+    if (volumeSeries) volumeSeries.setData([]);
+    if (ema10Series) ema10Series.setData([]);
+    if (ema21Series) ema21Series.setData([]);
+    if (ema30Series) ema30Series.setData([]);
+    if (sma50Series) sma50Series.setData([]);
+    if (sma200Series) sma200Series.setData([]);
+    if (volSmaSeries) volSmaSeries.setData([]);
+    if (bbUpperSeries) bbUpperSeries.setData([]);
+    if (bbLowerSeries) bbLowerSeries.setData([]);
+    if (vwapSeries) vwapSeries.setData([]);
+    if (rsSeries) rsSeries.setData([]);
+    if (rsLinePaneSeries) rsLinePaneSeries.setData([]);
+    if (rsEmaPaneSeries) rsEmaPaneSeries.setData([]);
+  } catch (e) { console.error("[switchSymbol] clearSeries 失敗", e); }
+
+  try {
+    if (typeof renderDrawingCanvas === "function") renderDrawingCanvas();
+  } catch (e) { console.error("[switchSymbol] renderDrawingCanvas 失敗", e); }
+
+  try {
+    renderWatchlist();
+  } catch (e) { console.error("[switchSymbol] renderWatchlist 失敗", e); }
+
+  try {
+    updateSymbolMetrics(symbol, symbolStates[symbol] || {}, null);
+  } catch (e) { console.error("[switchSymbol] updateSymbolMetrics 失敗", e); }
+
+  try {
+    if ((!benchmarkRawBars || benchmarkRawBars.length === 0) && typeof loadBenchmarkHistory === "function") {
+      loadBenchmarkHistory(rsBenchmarkTag);
+    }
+  } catch (e) { console.error("[switchSymbol] loadBenchmarkHistory 失敗", e); }
+
   if (currentEngine === "C") {
-    initTradingViewWidget(symbol);
+    if (typeof initTradingViewWidget === "function") initTradingViewWidget(symbol);
   } else {
     loadHistory(symbol);
   }
@@ -2137,10 +4668,14 @@ function initTradingViewWidget(symbol) {
         lk &&
         lk !== "tv_chart_engine" &&
         lk !== "tv_terminal_lang" &&
+        lk !== "tv_terminal_theme" &&
         lk !== "tv_active_timeframe" &&
         lk !== "tv_price_scale_mode" &&
         lk !== "tv_indicator_config" &&
         lk !== "tv_symbols_cache" &&
+        lk !== "tv_watchlist_groups" &&
+        lk !== "tv_pinned_symbols" &&
+        lk !== "tv_custom_screener_presets" &&
         lk !== "tv_session_token" &&
         (lk.indexOf("tradingview") !== -1 || lk.indexOf("tv_chart_studies") !== -1 || lk.indexOf("tv_chart_settings") !== -1)
       ) {
@@ -2201,10 +4736,10 @@ function initTradingViewWidget(symbol) {
         symbol: tvSymbol,
         interval: tvInterval,
         timezone: "exchange",
-        theme: "dark",
+        theme: currentTheme === "light" ? "light" : "dark",
         style: "1",
         locale: currentLang === "zh" ? "zh_TW" : "en",
-        toolbar_bg: "#131722",
+        toolbar_bg: getChartThemePalette().tvToolbarBg,
         enable_publishing: false,
         allow_symbol_change: true,
         hide_side_toolbar: false,
@@ -2282,12 +4817,56 @@ function initTradingViewWidget(symbol) {
   }
 }
 
+function renderPositionSizingBadge() {
+  var dict = i18n[currentLang] || i18n.en;
+  var suggestedBadge = document.getElementById("rsSuggestedBadge");
+  if (suggestedBadge) {
+    if (lastAtrSizingInput) {
+      var sizing = computeAtrPositionSizing({
+        close: lastAtrSizingInput.close,
+        atr: lastAtrSizingInput.atr,
+        stopMult: 2.0,
+        riskDollar: getRiskDollar(),
+        timeframe: lastAtrSizingInput.timeframe
+      });
+      if (!sizing.error && sizing.shares > 0) {
+        var template = dict.posSuggest || "Rec: {shares} shares (${stop} stop)";
+        var str = template
+          .replace("{shares}", String(sizing.shares))
+          .replace("{stop}", canonicalFormatPrice(sizing.stopDistance));
+        suggestedBadge.textContent = str;
+        suggestedBadge.title = "";
+      } else if (sizing.error === "daily_only") {
+        suggestedBadge.textContent = dict.posSuggestEmpty || "Rec: -- shares";
+        suggestedBadge.title = currentLang === "en"
+          ? "Position size uses daily ATR only — switch to 1D"
+          : "建議股數僅以日線 ATR 計算，請切換到日線";
+      } else {
+        suggestedBadge.textContent = dict.posSuggestEmpty || "Rec: -- shares";
+        suggestedBadge.title = "";
+      }
+    } else {
+      suggestedBadge.textContent = dict.posSuggestEmpty || "Rec: -- shares";
+      suggestedBadge.title = "";
+    }
+  }
+  var atrPctBadge = document.getElementById("rsAtrPctBadge");
+  if (atrPctBadge && lastIsSqueeze) {
+    atrPctBadge.title = dict.volSqueeze || "Volatility Squeeze";
+  }
+}
+
 function updateRsPane(bars, benchBars) {
   if (!bars || bars.length === 0) return;
   if (!window.Indicators) return;
 
   var bBars = benchBars || benchmarkRawBars || [];
-  if ((!bBars || bBars.length === 0) && typeof loadBenchmarkHistory === "function") {
+  var currentKey = (rsBenchmarkTag || "SPY") + "|" + (activeTimeframe || "1D");
+  var now = Date.now();
+  var isSameKey = benchmarkLoadState.key === currentKey;
+  var isInFlight = isSameKey && benchmarkLoadState.inFlight;
+  var isCoolingDown = isSameKey && (now - benchmarkLoadState.failedAt < 30000);
+  if ((!bBars || bBars.length === 0) && !isInFlight && !isCoolingDown && typeof loadBenchmarkHistory === "function") {
     loadBenchmarkHistory(rsBenchmarkTag);
   }
 
@@ -2296,7 +4875,11 @@ function updateRsPane(bars, benchBars) {
   var rsPaneTitleEl = document.getElementById("rsPaneTitle");
   if (rsPaneTitleEl) {
     var modeLabel = currentMode === "mansfield" ? "Mansfield 52" : "Deepvue Ratio";
-    rsPaneTitleEl.textContent = "RS Line (" + modeLabel + ") vs " + (rsBenchmarkTag || "SPY");
+    var titleText = "RS Line (" + modeLabel + ") vs " + (rsBenchmarkTag || "SPY");
+    if ((!bBars || bBars.length === 0) && isSameKey && benchmarkLoadState.failedAt > 0) {
+      titleText += " (基準資料載入失敗)";
+    }
+    rsPaneTitleEl.textContent = titleText;
   }
 
   // Calculate ATR Toolkit (ATR%, Squeeze, and Position Sizing)
@@ -2306,6 +4889,14 @@ function updateRsPane(bars, benchBars) {
     stopMult: 2.0,
     mansfieldLen: 52
   });
+  // RS 副圖的時間軸要和主圖相同，邏輯範圍同步才會對齊
+  var rsAxis = getSeriesTimeAxis(candleSeries, bars);
+  if (rsLinePaneSeries && typeof rsLinePaneSeries.setData === "function") {
+    rsLinePaneSeries.setData(padToTimeAxis([], rsAxis));
+  }
+  if (rsEmaPaneSeries && typeof rsEmaPaneSeries.setData === "function") {
+    rsEmaPaneSeries.setData(padToTimeAxis([], rsAxis));
+  }
 
   // 1. Update ATR% badge & Squeeze indicator
   var atrPctBadge = document.getElementById("rsAtrPctBadge");
@@ -2313,9 +4904,11 @@ function updateRsPane(bars, benchBars) {
     var latestAtrPct = toolkit.atrPct[toolkit.atrPct.length - 1];
     var latestNum = typeof latestAtrPct.value === "number" ? latestAtrPct.value : (latestAtrPct.atrPct || 0);
     atrPctBadge.textContent = "ATR%: " + Number(latestNum).toFixed(2) + "%";
-    if (latestAtrPct.isSqueeze) {
+    lastIsSqueeze = Boolean(latestAtrPct.isSqueeze);
+    if (lastIsSqueeze) {
       atrPctBadge.className = "rs-metric-badge squeeze";
-      atrPctBadge.title = "波動收縮 (Volatility Squeeze)";
+      var dict = i18n[currentLang] || i18n.en;
+      atrPctBadge.title = dict.volSqueeze || "Volatility Squeeze";
     } else {
       atrPctBadge.className = "rs-metric-badge";
       atrPctBadge.title = "";
@@ -2323,16 +4916,16 @@ function updateRsPane(bars, benchBars) {
   }
 
   // 2. Update Position Sizing (建議股數)
-  var suggestedBadge = document.getElementById("rsSuggestedBadge");
-  if (suggestedBadge && toolkit.positionSizing) {
-    var shares = toolkit.positionSizing.suggestedShares;
-    var stopD = toolkit.positionSizing.stopDistance;
-    if (shares > 0) {
-      suggestedBadge.textContent = "建議: " + shares + " 股 ($" + stopD + " 停損)";
-    } else {
-      suggestedBadge.textContent = "建議: -- 股";
-    }
+  var latestBar = bars[bars.length - 1];
+  lastAtrSizingInput = {
+    close: latestBar ? latestBar.close : null,
+    atr: (toolkit && toolkit.positionSizing) ? toolkit.positionSizing.latestAtr : null,
+    timeframe: activeTimeframe
+  };
+  if (toolkit.positionSizing) {
+    lastPositionSizing = toolkit.positionSizing;
   }
+  renderPositionSizingBadge();
 
   if (currentMode === "mansfield") {
     if (rsLinePaneSeries && toolkit.mansfieldRS && toolkit.mansfieldRS.length > 0) {
@@ -2343,7 +4936,7 @@ function updateRsPane(bars, benchBars) {
           title: "Mansfield RS (52)"
         });
       }
-      rsLinePaneSeries.setData(toolkit.mansfieldRS);
+      rsLinePaneSeries.setData(padToTimeAxis(toolkit.mansfieldRS, rsAxis));
 
       if (!rsZeroPriceLine && typeof rsLinePaneSeries.createPriceLine === "function") {
         try {
@@ -2372,7 +4965,7 @@ function updateRsPane(bars, benchBars) {
           title: "ATR%"
         });
       }
-      rsEmaPaneSeries.setData(atrLineData);
+      rsEmaPaneSeries.setData(padToTimeAxis(atrLineData, rsAxis));
     }
   } else {
     // Deepvue RS Mode
@@ -2393,7 +4986,7 @@ function updateRsPane(bars, benchBars) {
             title: "RS"
           });
         }
-        rsLinePaneSeries.setData(rsData);
+        rsLinePaneSeries.setData(padToTimeAxis(rsData, rsAxis));
       }
       if (rsEmaPaneSeries && rsData && rsData.length >= 21) {
         var rsBarsForEma = rsData.map(function(r) { return { time: r.time, close: r.value }; });
@@ -2406,9 +4999,14 @@ function updateRsPane(bars, benchBars) {
             title: "RS 21 EMA"
           });
         }
-        rsEmaPaneSeries.setData(rsEma);
+        rsEmaPaneSeries.setData(padToTimeAxis(rsEma, rsAxis));
       }
     }
+  }
+
+  // RS 資料剛換過時 RS 圖會自己調整範圍，這裡對齊回主圖
+  if (chart && rsChart) {
+    try { syncLogicalRangeTo(rsChart, chart.timeScale().getVisibleLogicalRange()); } catch (e) {}
   }
 
   // 3. Update RS Rating
@@ -2425,42 +5023,229 @@ function updateRsPane(bars, benchBars) {
       }
     }
   }
+
+  // 4. RS Line New High (Blue Dot) Markers
+  if (!indicatorConfig.rsLine) {
+    if (rsLinePaneSeries && typeof rsLinePaneSeries.setMarkers === "function") {
+      try { rsLinePaneSeries.setMarkers([]); } catch (e) {}
+    }
+    if (candleSeries && typeof candleSeries.setMarkers === "function") {
+      try { candleSeries.setMarkers([]); } catch (e) {}
+    }
+    var nhBadgeOff = document.getElementById("rsNewHighBadge");
+    if (nhBadgeOff) nhBadgeOff.style.display = "none";
+    return;
+  }
+
+  var rsMarkers = [];
+  if (bBars && bBars.length > 0 && window.Indicators && typeof window.Indicators.calcRsNewHighMarkers === "function") {
+    rsMarkers = window.Indicators.calcRsNewHighMarkers(bars, bBars);
+  }
+  if (rsLinePaneSeries && typeof rsLinePaneSeries.setMarkers === "function") {
+    try {
+      rsLinePaneSeries.setMarkers(rsMarkers);
+    } catch (e) {}
+  }
+  if (candleSeries && typeof candleSeries.setMarkers === "function") {
+    try {
+      var candleMarkers = rsMarkers.map(function(m) {
+        return {
+          time: m.time,
+          position: "aboveBar",
+          color: "#2962ff",
+          shape: "circle",
+          text: "RS NH"
+        };
+      });
+      candleSeries.setMarkers(candleMarkers);
+    } catch (e) {}
+  }
+
+  // Update #rsNewHighBadge
+  var nhBadge = document.getElementById("rsNewHighBadge");
+  if (nhBadge) {
+    var dict = i18n[currentLang] || i18n.en;
+    var last5BarsTime = (bars && bars.length >= 5) ? bars[bars.length - 5].time : 0;
+    var hasRecentNh = rsMarkers.some(function(m) { return m.time >= last5BarsTime; });
+    if (hasRecentNh) {
+      nhBadge.style.display = "inline-flex";
+      nhBadge.textContent = dict.rsNewHighBadge || "🔵 RS NH";
+      nhBadge.title = dict.rsNewHighTooltip || "RS New High before Price (Leading Indicator)";
+    } else {
+      nhBadge.style.display = "none";
+    }
+  }
 }
 
 function loadBenchmarkHistory(benchTag) {
-  var benchSym = "AMEX:SPY";
-  if (benchTag === "QQQ") benchSym = "NASDAQ:QQQ";
-  else if (benchTag === "IWM") benchSym = "AMEX:IWM";
-  else if (benchTag === "DIA") benchSym = "NYSE:DIA";
-  else if (benchTag === "BTCUSDT") benchSym = "BINANCE:BTCUSDT";
-  else if (benchTag && benchTag.indexOf(":") !== -1) benchSym = benchTag;
-  else if (benchTag) benchSym = "NASDAQ:" + benchTag;
-
+  // Cascades to subCharts via renderSubPaneRs
+  var targetTag = benchTag || rsBenchmarkTag || "SPY";
+  var benchSym = resolveBenchmarkSymbol(targetTag);
   var benchTf = activeTimeframe || "1D";
+  var key = targetTag + "|" + benchTf;
+  var now = Date.now();
+
+  if (benchmarkLoadState.key === key && benchmarkLoadState.inFlight && benchmarkLoadState.promise) {
+    return benchmarkLoadState.promise;
+  }
+
+  if (benchmarkLoadState.key === key && !benchmarkLoadState.inFlight && (now - benchmarkLoadState.failedAt < 30000)) {
+    return Promise.resolve({ bars: [] });
+  }
+
+  benchmarkReqSeq++;
+  var reqSeq = benchmarkReqSeq;
+  var expectedTf = benchTf;
+  var expectedTag = targetTag;
+
+  benchmarkLoadState.key = key;
+  benchmarkLoadState.inFlight = true;
+
   var fetchUrl = "/api/history?seed=true&timeframe=" + encodeURIComponent(benchTf) + "&symbol=" + encodeURIComponent(benchSym);
 
-  return fetch(fetchUrl)
+  var p = fetch(fetchUrl)
     .then(function(res) {
-      if (res.ok) return res.json();
-      if (benchTf !== "1D") {
-        var fbUrl = "/api/history?seed=true&timeframe=1D&symbol=" + encodeURIComponent(benchSym);
-        return fetch(fbUrl).then(function(r2) { return r2.ok ? r2.json() : { bars: [] }; });
+      if (!res.ok) {
+        throw new Error("Benchmark HTTP " + res.status);
       }
-      return { bars: [] };
+      return res.json();
     })
     .then(function(data) {
-      benchmarkRawBars = data.bars || [];
+      if (reqSeq !== benchmarkReqSeq || activeTimeframe !== expectedTf || rsBenchmarkTag !== expectedTag) {
+        return;
+      }
+      var bars = data && data.bars ? data.bars : [];
+      if (bars.length === 0) {
+        benchmarkLoadState.inFlight = false;
+        benchmarkLoadState.failedAt = Date.now();
+        benchmarkLoadState.promise = null;
+        benchmarkRawBars = [];
+        var rsPaneTitleEl = document.getElementById("rsPaneTitle");
+        if (rsPaneTitleEl) {
+          var modeLabel = (indicatorConfig && indicatorConfig.rsMode === "deepvue") ? "Deepvue Ratio" : "Mansfield 52";
+          rsPaneTitleEl.textContent = "RS Line (" + modeLabel + ") vs " + (rsBenchmarkTag || "SPY") + " (基準資料載入失敗)";
+        }
+        return { bars: [] };
+      }
+
+      benchmarkLoadState.inFlight = false;
+      benchmarkLoadState.failedAt = 0;
+      benchmarkLoadState.promise = null;
+      benchmarkRawBars = bars;
+
       if (rsSeries && currentRawBars && currentRawBars.length > 0 && window.Indicators && benchmarkRawBars.length > 0) {
         var rsData = window.Indicators.calcRelativeStrength(currentRawBars, benchmarkRawBars);
         rsSeries.setData(rsData);
       }
       updateRsPane(currentRawBars, benchmarkRawBars);
+
+      for (var sp = 2; sp <= 4; sp++) {
+        var spTf = paneTimeframes[sp] || "1D";
+        if (spTf === expectedTf) {
+          if (typeof renderSubPaneRs === "function" && subCharts[sp] && subCharts[sp].bars) {
+            renderSubPaneRs(sp, subCharts[sp].bars, benchmarkRawBars);
+          }
+        }
+      }
+      return data;
     })
     .catch(function(e) {
       console.debug("Failed to load benchmark history:", e);
+      benchmarkLoadState.inFlight = false;
+      benchmarkLoadState.failedAt = Date.now();
+      benchmarkLoadState.promise = null;
       benchmarkRawBars = [];
-      updateRsPane(currentRawBars, []);
+      var rsPaneTitleEl = document.getElementById("rsPaneTitle");
+      if (rsPaneTitleEl) {
+        var modeLabel = (indicatorConfig && indicatorConfig.rsMode === "deepvue") ? "Deepvue Ratio" : "Mansfield 52";
+        rsPaneTitleEl.textContent = "RS Line (" + modeLabel + ") vs " + (rsBenchmarkTag || "SPY") + " (基準資料載入失敗)";
+      }
     });
+
+  benchmarkLoadState.promise = p;
+  return p;
+}
+
+function applyHistoryPayload(data, symbol, currentRequestId) {
+  if (currentRequestId !== activeHistoryRequestId || symbol !== activeSymbol) return;
+
+  var rawBars = data.bars || [];
+  if (rawBars.length > 0) {
+    rawBars.sort(function(a, b) { return a.time - b.time; });
+
+    var uniqueBars = [];
+    for (var i = 0; i < rawBars.length; i++) {
+      var bar = rawBars[i];
+      if (!bar) continue;
+      var barTime = normalizeBarTime(bar.time);
+      if (barTime <= 0) continue;
+      var cleanBar = {
+        time: barTime,
+        open: safeNum(bar.open),
+        high: safeNum(bar.high),
+        low: safeNum(bar.low),
+        close: safeNum(bar.close),
+        volume: safeNum(bar.volume)
+      };
+      if (uniqueBars.length === 0 || cleanBar.time > uniqueBars[uniqueBars.length - 1].time) {
+        uniqueBars.push(cleanBar);
+      } else if (cleanBar.time === uniqueBars[uniqueBars.length - 1].time) {
+        uniqueBars[uniqueBars.length - 1] = cleanBar;
+      }
+    }
+
+    currentRawBars = uniqueBars;
+    liveBucketState = null;
+    if (uniqueBars.length > 0) {
+      var lastRawBar = uniqueBars[uniqueBars.length - 1];
+      lastBarTime = lastRawBar.time;
+      lastBarObj = {
+        time: lastRawBar.time,
+        open: lastRawBar.open,
+        high: lastRawBar.high,
+        low: lastRawBar.low,
+        close: lastRawBar.close,
+        volume: lastRawBar.volume || 0
+      };
+      latestBarData = Object.assign({}, lastBarObj);
+    } else {
+      lastBarTime = null;
+      lastBarObj = null;
+      latestBarData = null;
+    }
+    try {
+      renderChartData(uniqueBars, { viewKey: String(symbol) + "|" + String(activeTimeframe) + "|" + String(currentEngine) });
+      loadedHistorySymbol = symbol;
+      if (typeof window !== "undefined") window.loadedHistorySymbol = symbol;
+      if (typeof globalThis !== "undefined") globalThis.loadedHistorySymbol = symbol;
+    } catch (e) {
+      console.error("[applyHistoryPayload] 畫圖失敗 " + symbol, e);
+    }
+    if (typeof setPriceScaleMode === "function") {
+      setPriceScaleMode(currentPriceScaleMode);
+    }
+  } else {
+    if (candleSeries) candleSeries.setData([]);
+    if (volumeSeries) volumeSeries.setData([]);
+    if (ema10Series) ema10Series.setData([]);
+    if (ema21Series) ema21Series.setData([]);
+    if (ema30Series) ema30Series.setData([]);
+    if (sma50Series) sma50Series.setData([]);
+    if (sma200Series) sma200Series.setData([]);
+    if (volSmaSeries) volSmaSeries.setData([]);
+    if (bbUpperSeries) bbUpperSeries.setData([]);
+    if (bbLowerSeries) bbLowerSeries.setData([]);
+    if (vwapSeries) vwapSeries.setData([]);
+    if (rsSeries) rsSeries.setData([]);
+    if (rsLinePaneSeries) rsLinePaneSeries.setData([]);
+    if (rsEmaPaneSeries) rsEmaPaneSeries.setData([]);
+    currentRawBars = [];
+    lastBarTime = null;
+    lastBarObj = null;
+    loadedHistorySymbol = null;
+    if (typeof window !== "undefined") window.loadedHistorySymbol = null;
+    if (typeof globalThis !== "undefined") globalThis.loadedHistorySymbol = null;
+  }
 }
 
 function loadHistory(symbol, tf, isBackfill) {
@@ -2468,13 +5253,24 @@ function loadHistory(symbol, tf, isBackfill) {
   var currentRequestId = ++activeHistoryRequestId;
   isHistoryLoading = true;
 
+  if (candleSeries && typeof candleSeries.setMarkers === "function") {
+    try { candleSeries.setMarkers([]); } catch (e) {}
+  }
+  if (rsLinePaneSeries && typeof rsLinePaneSeries.setMarkers === "function") {
+    try { rsLinePaneSeries.setMarkers([]); } catch (e) {}
+  }
+  var nhBadge = document.getElementById("rsNewHighBadge");
+  if (nhBadge) nhBadge.style.display = "none";
+
   if (historyAbortController) {
     historyAbortController.abort();
   }
   historyAbortController = new AbortController();
 
   if (equityBanner) {
-    equityBanner.style.display = symbol.indexOf("NASDAQ:") === 0 ? "flex" : "none";
+    var isCrypto = /^(BINANCE|COINBASE|BYBIT|OKX):/i.test(symbol) || /USDT$|BUSD$/i.test(symbol);
+    var isUsEquity = !isCrypto;
+    equityBanner.style.display = (targetTf === "1m" && isUsEquity) ? "flex" : "none";
   }
 
   var isIntraday = (targetTf !== "1D" && targetTf !== "1W");
@@ -2500,6 +5296,20 @@ function loadHistory(symbol, tf, isBackfill) {
   if (omniboxDisplay) omniboxDisplay.textContent = pairName + " • " + (getSymbolItem(symbol) ? getSymbolItem(symbol).name : symbol);
 
   var reqEngine = currentEngine;
+  var cacheKey = symbol + "|" + targetTf + "|" + reqEngine;
+  if (!isBackfill) {
+    var cachedData = getCachedHistory(cacheKey);
+    if (cachedData) {
+      try {
+        applyHistoryPayload(cachedData, symbol, currentRequestId);
+      } finally {
+        isHistoryLoading = false;
+      }
+      prefetchNextWatchlistSymbols(symbol, targetTf, reqEngine);
+      return Promise.resolve(cachedData);
+    }
+  }
+
   var targetUrl = "/api/history?seed=true&timeframe=" + encodeURIComponent(targetTf) +
                   "&engine=" + encodeURIComponent(reqEngine) +
                   "&symbol=" + encodeURIComponent(symbol) +
@@ -2511,78 +5321,15 @@ function loadHistory(symbol, tf, isBackfill) {
       return targetRes.json();
     })
     .then(function(data) {
-      if (currentRequestId !== activeHistoryRequestId || symbol !== activeSymbol) return;
-
-      var rawBars = data.bars || [];
-      if (rawBars.length > 0) {
-        rawBars.sort(function(a, b) { return a.time - b.time; });
-
-        var uniqueBars = [];
-        for (var i = 0; i < rawBars.length; i++) {
-          var bar = rawBars[i];
-          if (!bar) continue;
-          var barTime = normalizeBarTime(bar.time);
-          if (barTime <= 0) continue;
-          var cleanBar = {
-            time: barTime,
-            open: safeNum(bar.open),
-            high: safeNum(bar.high),
-            low: safeNum(bar.low),
-            close: safeNum(bar.close),
-            volume: safeNum(bar.volume)
-          };
-          if (uniqueBars.length === 0 || cleanBar.time > uniqueBars[uniqueBars.length - 1].time) {
-            uniqueBars.push(cleanBar);
-          } else if (cleanBar.time === uniqueBars[uniqueBars.length - 1].time) {
-            uniqueBars[uniqueBars.length - 1] = cleanBar;
-          }
-        }
-
-        currentRawBars = uniqueBars;
-        if (uniqueBars.length > 0) {
-          var lastRawBar = uniqueBars[uniqueBars.length - 1];
-          lastBarTime = lastRawBar.time;
-          lastBarObj = {
-            time: lastRawBar.time,
-            open: lastRawBar.open,
-            high: lastRawBar.high,
-            low: lastRawBar.low,
-            close: lastRawBar.close,
-            volume: lastRawBar.volume || 0
-          };
-          latestBarData = Object.assign({}, lastBarObj);
-        } else {
-          lastBarTime = null;
-          lastBarObj = null;
-          latestBarData = null;
-        }
-        renderChartData(uniqueBars);
-        if (typeof setPriceScaleMode === "function") {
-          setPriceScaleMode(currentPriceScaleMode);
-        }
-      } else {
-        if (candleSeries) candleSeries.setData([]);
-        if (volumeSeries) volumeSeries.setData([]);
-        if (ema10Series) ema10Series.setData([]);
-        if (ema21Series) ema21Series.setData([]);
-        if (ema30Series) ema30Series.setData([]);
-        if (sma50Series) sma50Series.setData([]);
-        if (sma200Series) sma200Series.setData([]);
-        if (volSmaSeries) volSmaSeries.setData([]);
-        if (bbUpperSeries) bbUpperSeries.setData([]);
-        if (bbLowerSeries) bbLowerSeries.setData([]);
-        if (vwapSeries) vwapSeries.setData([]);
-        if (rsSeries) rsSeries.setData([]);
-        if (rsLinePaneSeries) rsLinePaneSeries.setData([]);
-        if (rsEmaPaneSeries) rsEmaPaneSeries.setData([]);
-        currentRawBars = [];
-        lastBarTime = null;
-        lastBarObj = null;
+      if (!isBackfill && data && Array.isArray(data.bars) && data.bars.length > 0) {
+        setCachedHistory(cacheKey, data);
       }
+      applyHistoryPayload(data, symbol, currentRequestId);
+      prefetchNextWatchlistSymbols(symbol, targetTf, reqEngine);
     })
     .catch(function(err) {
-      if (err.name !== "AbortError") {
-        // Log gracefully
+      if (err && err.name !== "AbortError") {
+        console.error("[loadHistory] " + symbol + " " + targetTf, err);
       }
     })
     .finally(function() {
@@ -2592,8 +5339,11 @@ function loadHistory(symbol, tf, isBackfill) {
     });
 }
 
-function renderChartData(bars) {
+function renderChartData(bars, options) {
   if (!candleSeries || !bars || bars.length === 0) return;
+
+  var initialRange = (chart && typeof chart.timeScale === "function" && typeof chart.timeScale().getVisibleLogicalRange === "function") ? chart.timeScale().getVisibleLogicalRange() : null;
+  var prevTimes = getSeriesTimeAxis(candleSeries, null);
 
   var candleData = [];
   var isHollow = (currentCandleStyle === "hollow");
@@ -2649,7 +5399,7 @@ function renderChartData(bars) {
     if (ema21Series) ema21Series.setData(ema21);
     if (ema30Series) ema30Series.setData(ema30);
     if (vwapSeries && window.Indicators.calcVWAP) {
-      var vwapData = window.Indicators.calcVWAP(bars);
+      var vwapData = window.Indicators.calcVWAP(bars, { timeframe: activeTimeframe, symbol: activeSymbol });
       vwapSeries.setData(vwapData);
     }
     if (sma50Series) sma50Series.setData(sma50);
@@ -2676,8 +5426,69 @@ function renderChartData(bars) {
   updateSymbolMetrics(activeSymbol, symbolStates[activeSymbol] || {}, lastBar);
   updateDeepvueHud(bars);
 
-  if (chart && chart.timeScale) {
-    chart.timeScale().fitContent();
+  var viewKey = (options && typeof options.viewKey === "string" && options.viewKey)
+    ? options.viewKey
+    : (String(activeSymbol) + "|" + String(activeTimeframe) + "|" + String(currentEngine));
+
+  if (options && options.keepView === true) {
+    if (initialRange) {
+      var nextTimes = (typeof getSeriesTimeAxis === "function") ? getSeriesTimeAxis(null, bars) : [];
+      var preservedRange = computePreservedLogicalRange(prevTimes, nextTimes, initialRange);
+      if (preservedRange) {
+        if (chart && typeof chart.timeScale === "function") {
+          try {
+            var tsK = chart.timeScale();
+            if (tsK && typeof tsK.setVisibleLogicalRange === "function") {
+              tsK.setVisibleLogicalRange({ from: preservedRange.from, to: preservedRange.to });
+            }
+          } catch (eK) {}
+        }
+      } else if ((!prevTimes || prevTimes.length === 0) && Number.isFinite(initialRange.from) && Number.isFinite(initialRange.to)) {
+        if (chart && typeof chart.timeScale === "function") {
+          try {
+            var tsFallbackK = chart.timeScale();
+            if (tsFallbackK && typeof tsFallbackK.setVisibleLogicalRange === "function") {
+              tsFallbackK.setVisibleLogicalRange({ from: initialRange.from, to: initialRange.to });
+            }
+          } catch (eFK) {}
+        }
+      } else {
+        resetChartView(chart, bars.length);
+      }
+    } else {
+      resetChartView(chart, bars.length);
+    }
+  } else if ((options && options.resetView === true) || viewKey !== lastChartViewKey || !initialRange) {
+    // 換標的、週期或引擎時價格軸回到自動
+    if (viewKey !== lastChartViewKey && typeof setAutoScale === "function") {
+      setAutoScale(true);
+    }
+    resetChartView(chart, bars.length);
+    lastChartViewKey = viewKey;
+  } else {
+    var nextTimes = (typeof getSeriesTimeAxis === "function") ? getSeriesTimeAxis(null, bars) : [];
+    var preservedRange = computePreservedLogicalRange(prevTimes, nextTimes, initialRange);
+    if (preservedRange) {
+      if (chart && typeof chart.timeScale === "function") {
+        try {
+          var tsCurrent = chart.timeScale();
+          if (tsCurrent && typeof tsCurrent.setVisibleLogicalRange === "function") {
+            tsCurrent.setVisibleLogicalRange({ from: preservedRange.from, to: preservedRange.to });
+          }
+        } catch (e) {}
+      }
+    } else if ((!prevTimes || prevTimes.length === 0) && Number.isFinite(initialRange.from) && Number.isFinite(initialRange.to)) {
+      if (chart && typeof chart.timeScale === "function") {
+        try {
+          var tsFallbackCurrent = chart.timeScale();
+          if (tsFallbackCurrent && typeof tsFallbackCurrent.setVisibleLogicalRange === "function") {
+            tsFallbackCurrent.setVisibleLogicalRange({ from: initialRange.from, to: initialRange.to });
+          }
+        } catch (eFC) {}
+      }
+    } else {
+      resetChartView(chart, bars.length);
+    }
   }
   if (typeof setPriceScaleMode === "function") {
     setPriceScaleMode(currentPriceScaleMode);
@@ -2688,12 +5499,50 @@ function renderChartData(bars) {
 // Real-Time Bar Processing & Invariants Enforcement
 // ==========================================================================
 
+function getHudHighLabelMeta(timeframe, lang) {
+  var tf = timeframe || "1D";
+  var isEn = (lang || (typeof currentLang !== "undefined" ? currentLang : "zh")) === "en";
+  if (tf === "1D" || tf === "1W") {
+    return {
+      is52w: true,
+      windowBars: tf === "1W" ? 52 : 252,
+      label: isEn ? "52W High" : "距52週高",
+      title: isEn ? "Distance from 52-week high" : "距離近 52 週最高價百分比"
+    };
+  }
+  return {
+    is52w: false,
+    windowBars: null,
+    label: isEn ? "Range High" : "距區間高",
+    title: isEn
+      ? "Distance from loaded intraday range high (not 52-week high)"
+      : "距離目前盤中載入區間最高價（非 52 週高點）"
+  };
+}
+
+if (typeof window !== "undefined") {
+  window.getHudHighLabelMeta = getHudHighLabelMeta;
+}
+if (typeof globalThis !== "undefined") {
+  globalThis.getHudHighLabelMeta = getHudHighLabelMeta;
+}
+
 function updateDeepvueHud(bars) {
   if (!bars || bars.length === 0) return;
+  var hud52wLabel = document.getElementById("hud52wLabel");
   var hud52wVal = document.getElementById("hud52wVal");
   var hudVol50Val = document.getElementById("hudVol50Val");
   var hudAdrVal = document.getElementById("hudAdrVal");
 
+  var highMeta = getHudHighLabelMeta(activeTimeframe, currentLang);
+  if (hud52wLabel) {
+    hud52wLabel.textContent = highMeta.label;
+    hud52wLabel.title = highMeta.title;
+  }
+
+  var highStartIdx = (highMeta.windowBars && bars.length > highMeta.windowBars)
+    ? (bars.length - highMeta.windowBars)
+    : 0;
   var maxHigh = 0;
   var sumVol50 = 0;
   var volCount = 0;
@@ -2701,7 +5550,7 @@ function updateDeepvueHud(bars) {
   var adrCount = Math.min(bars.length, 20);
 
   for (var i = 0; i < bars.length; i++) {
-    if (bars[i].high > maxHigh) maxHigh = bars[i].high;
+    if (i >= highStartIdx && bars[i].high > maxHigh) maxHigh = bars[i].high;
     if (i >= bars.length - 50) {
       sumVol50 += (bars[i].volume || 0);
       volCount++;
@@ -2719,16 +5568,39 @@ function updateDeepvueHud(bars) {
     hud52wVal.className = "hud-val " + (diff52w >= -5 ? "up" : "down");
   }
 
-  if (hudVol50Val && volCount > 0) {
-    var avgVol50 = sumVol50 / volCount;
-    var ratio = avgVol50 > 0 ? (lastBar.volume / avgVol50) : 1;
-    hudVol50Val.textContent = ratio.toFixed(2) + "x";
-    hudVol50Val.className = "hud-val " + (ratio >= 1.5 ? "up" : "");
-  }
+  var hudVol50Label = document.getElementById("hudVol50Label");
+  var hudAdrLabel = document.getElementById("hudAdrLabel");
 
-  if (hudAdrVal && adrCount > 0) {
-    var adrPct = (sumRangePct / adrCount) * 100;
-    hudAdrVal.textContent = adrPct.toFixed(1) + "%";
+  if (activeTimeframe === "1D") {
+    if (hudVol50Label) hudVol50Label.title = "";
+    if (hudAdrLabel) hudAdrLabel.title = "";
+
+    if (hudVol50Val && volCount > 0) {
+      var avgVol50 = sumVol50 / volCount;
+      var ratio = avgVol50 > 0 ? (lastBar.volume / avgVol50) : 1;
+      hudVol50Val.textContent = ratio.toFixed(2) + "x";
+      hudVol50Val.className = "hud-val " + (ratio >= 1.5 ? "up" : "");
+      hudVol50Val.title = "";
+    }
+    if (hudAdrVal && adrCount > 0) {
+      var adrPct = (sumRangePct / adrCount) * 100;
+      hudAdrVal.textContent = adrPct.toFixed(1) + "%";
+      hudAdrVal.title = "";
+    }
+  } else {
+    var notDailyTitle = "Daily only — switch to 1D";
+    if (hudVol50Label) hudVol50Label.title = notDailyTitle;
+    if (hudAdrLabel) hudAdrLabel.title = notDailyTitle;
+    if (hudVol50Val) {
+      hudVol50Val.textContent = "—";
+      hudVol50Val.className = "hud-val";
+      hudVol50Val.title = notDailyTitle;
+    }
+    if (hudAdrVal) {
+      hudAdrVal.textContent = "—";
+      hudAdrVal.className = "hud-val";
+      hudAdrVal.title = notDailyTitle;
+    }
   }
 }
 
@@ -2739,72 +5611,83 @@ function handleLiveBar(symbol, bar) {
   var price = safeNum(bar.close);
   if (!isValidPrice(price)) return;
 
-  var barTime = normalizeBarTime(bar.time);
-  var open = safeNum(bar.open);
-  var high = safeNum(bar.high);
-  var low = safeNum(bar.low);
-  var close = price;
-  var volume = safeNum(bar.volume);
+  var minuteBar = {
+    time: normalizeBarTime(bar.time),
+    open: safeNum(bar.open),
+    high: safeNum(bar.high),
+    low: safeNum(bar.low),
+    close: price,
+    volume: Math.max(0, safeNum(bar.volume))
+  };
+  if (minuteBar.time <= 0) return;
+  if (!isValidPrice(minuteBar.open) || !isValidPrice(minuteBar.high) || !isValidPrice(minuteBar.low)) return;
 
-  if (barTime <= 0) return;
-  if (isNaN(open) || isNaN(high) || isNaN(low) || !isValidPrice(close)) return;
-
-  var tfSec = TF_SECONDS[activeTimeframe] || 60;
+  // 第 4 段：依交易所時段決定這根 1 分鐘 K 棒屬於哪一根 K 棒（美股以紐約時間、加密貨幣以 UTC），
+  // 並用「同一分鐘取代、換分鐘累加」的方式計算成交量。
   var lastRawBar = (currentRawBars.length > 0) ? currentRawBars[currentRawBars.length - 1] : null;
+  var placement = computeLiveBucket({
+    symbol: symbol,
+    timeframe: activeTimeframe,
+    tickTime: minuteBar.time,
+    lastBarTime: lastRawBar ? lastRawBar.time : null
+  });
 
-  if (activeTimeframe !== "1m" && tfSec > 60) {
-    var bucketTime = barTime - (barTime % tfSec);
-    if (lastRawBar) {
-      var lastBarBucket = lastRawBar.time - (lastRawBar.time % tfSec);
-      if (bucketTime === lastBarBucket || Math.abs(barTime - lastRawBar.time) < tfSec) {
-        bucketTime = lastRawBar.time;
-      }
+  var mainBar = null;
+  if (placement.action !== "ignore") {
+    var prevState = null;
+    if (liveBucketState && liveBucketState.symbol === symbol && liveBucketState.timeframe === activeTimeframe &&
+        liveBucketState.bucketTime === placement.time && lastRawBar && lastRawBar === liveBucketState.lastWritten) {
+      prevState = liveBucketState;
     }
-    if (lastRawBar && bucketTime < lastRawBar.time) {
-      bucketTime = lastRawBar.time;
+    var nextState = applyMinuteBarToBucket(prevState, {
+      bucketTime: placement.time,
+      timeframe: activeTimeframe,
+      minute: minuteBar,
+      historyBar: (placement.action === "update") ? lastRawBar : null
+    });
+    if (nextState) {
+      mainBar = {
+        time: nextState.bucketTime,
+        open: nextState.open,
+        high: nextState.high,
+        low: nextState.low,
+        close: nextState.close,
+        volume: nextState.volume
+      };
+      nextState.symbol = symbol;
+      nextState.timeframe = activeTimeframe;
+      nextState.lastWritten = mainBar;
+      liveBucketState = nextState;
     }
+  }
 
-    if (lastBarObj && bucketTime === lastBarObj.time) {
-      open = lastBarObj.open;
-      high = Math.max(lastBarObj.high, high, close);
-      low = Math.min(lastBarObj.low, low, close);
-      volume = Math.max(lastBarObj.volume || 0, volume);
-    } else if (lastRawBar && bucketTime === lastRawBar.time) {
-      open = lastRawBar.open;
-      high = Math.max(lastRawBar.high, high, close);
-      low = Math.min(lastRawBar.low, low, close);
-      volume = Math.max(lastRawBar.volume || 0, volume);
-    } else {
-      open = close;
-      high = close;
-      low = close;
-    }
-    barTime = bucketTime;
-  } else {
-    if (lastRawBar && barTime < lastRawBar.time) {
-      return;
-    }
-    if (lastBarTime !== null && barTime < lastBarTime) {
-      return;
-    }
+  if (mainBar) {
+    _renderLiveMainBar(mainBar);
+  }
+  if (isAppNapSuspended || (typeof document !== "undefined" && document.hidden)) {
+    hasPendingChartUpdate = true;
+    return;
+  }
+  forwardLiveBarToSubCharts(symbol, minuteBar, mainBar);
+}
+
+function _renderLiveMainBar(liveBar) {
+  var barTime = liveBar.time;
+  var open = liveBar.open;
+  var high = liveBar.high;
+  var low = liveBar.low;
+  var close = liveBar.close;
+  var volume = liveBar.volume;
+
+  if (currentRawBars.length > 0 && currentRawBars[currentRawBars.length - 1].time === barTime) {
+    currentRawBars[currentRawBars.length - 1] = liveBar;
+  } else if (currentRawBars.length === 0 || barTime > currentRawBars[currentRawBars.length - 1].time) {
+    currentRawBars.push(liveBar);
   }
 
   lastBarTime = barTime;
   lastBarObj = { time: barTime, open: open, high: high, low: low, close: close, volume: volume };
-  var liveBar = { time: barTime, open: open, high: high, low: low, close: close, volume: volume };
-
-  if (currentRawBars.length > 0) {
-    var lastIdx = currentRawBars.length - 1;
-    if (currentRawBars[lastIdx].time === barTime) {
-      currentRawBars[lastIdx] = liveBar;
-    } else if (barTime > currentRawBars[lastIdx].time) {
-      currentRawBars.push(liveBar);
-      if (currentRawBars.length > 500) currentRawBars.shift();
-    }
-  }
-
   latestBarData = liveBar;
-  lastBarTime = barTime;
 
   if (isAppNapSuspended || (typeof document !== "undefined" && document.hidden)) {
     hasPendingChartUpdate = true;
@@ -2849,7 +5732,7 @@ function handleLiveBar(symbol, bar) {
       if (e30.length > 0) ema30Series.update(e30[e30.length - 1]);
     }
     if (vwapSeries && indicatorConfig.vwap && window.Indicators.calcVWAP) {
-      var vw = window.Indicators.calcVWAP(currentRawBars);
+      var vw = window.Indicators.calcVWAP(currentRawBars, { timeframe: activeTimeframe, symbol: activeSymbol });
       if (vw.length > 0) vwapSeries.update(vw[vw.length - 1]);
     }
     if (sma50Series && indicatorConfig.sma50) {
@@ -2873,51 +5756,54 @@ function handleLiveBar(symbol, bar) {
 
   updateCrosshairLegend(liveBar);
   updateDeepvueHud(currentRawBars);
+}
 
-  // Forward live tick updates to matching sub-charts in multi-pane split layout
+// Forward live 1m bars to matching sub-charts in multi-pane split layout.
+// 第 4 段：每個子圖依自己的週期分桶（美股以紐約時段），新 K 棒保留 1 分鐘 K 棒的開高低。
+function forwardLiveBarToSubCharts(symbol, minuteBar, mainBar) {
   for (var pId in subCharts) {
     if (paneSymbols[pId] === symbol && subCharts[pId] && subCharts[pId].series) {
       try {
         var scObj = subCharts[pId];
         var scTf = paneTimeframes[pId] || "1D";
         if (scTf === activeTimeframe) {
+          if (!mainBar) continue;
           var sameBar = {
-            time: barTime,
-            open: open,
-            high: high,
-            low: low,
-            close: close
+            time: mainBar.time,
+            open: mainBar.open,
+            high: mainBar.high,
+            low: mainBar.low,
+            close: mainBar.close
           };
           subCharts[pId].series.update(sameBar);
           scObj.lastBar = sameBar;
         } else if (scObj.lastBar) {
           var lb = scObj.lastBar;
-          var isDateString = (typeof lb.time === "string" && (lb.time.indexOf("-") !== -1 || isNaN(Number(lb.time)))) ||
-                             (typeof lb.time === "object" && lb.time !== null && lb.time.year !== undefined);
-          if (isDateString) {
-            lb.high = Math.max(lb.high, price);
-            lb.low = Math.min(lb.low, price);
-            lb.close = price;
+          // 只處理數字時間戳；字串或 BusinessDay 格式無法安全對齊，略過
+          if (typeof lb.time !== "number") continue;
+          var subPlacement = computeLiveBucket({
+            symbol: symbol,
+            timeframe: scTf,
+            tickTime: minuteBar.time,
+            lastBarTime: lb.time
+          });
+          if (subPlacement.action === "ignore") continue;
+          var bucketTime = subPlacement.time;
+          if (bucketTime === lb.time) {
+            lb.high = Math.max(lb.high, minuteBar.high, minuteBar.close);
+            lb.low = Math.min(lb.low, minuteBar.low, minuteBar.close);
+            lb.close = minuteBar.close;
             subCharts[pId].series.update(lb);
-          } else {
-            var step = TF_SECONDS[scTf] || 60;
-            var bucketTime = Math.floor(barTime / step) * step;
-            if (bucketTime === lb.time) {
-              lb.high = Math.max(lb.high, price);
-              lb.low = Math.min(lb.low, price);
-              lb.close = price;
-              subCharts[pId].series.update(lb);
-            } else if (bucketTime > lb.time) {
-              var newCandle = {
-                time: bucketTime,
-                open: price,
-                high: price,
-                low: price,
-                close: price
-              };
-              scObj.lastBar = newCandle;
-              subCharts[pId].series.update(newCandle);
-            }
+          } else if (bucketTime > lb.time) {
+            var newCandle = {
+              time: bucketTime,
+              open: minuteBar.open,
+              high: Math.max(minuteBar.high, minuteBar.close),
+              low: Math.min(minuteBar.low, minuteBar.close),
+              close: minuteBar.close
+            };
+            scObj.lastBar = newCandle;
+            subCharts[pId].series.update(newCandle);
           }
         }
       } catch (subErr) {
@@ -2927,15 +5813,91 @@ function handleLiveBar(symbol, bar) {
   }
 }
 
+function formatQuoteDelayBadge(quote, lang) {
+  if (!quote || typeof quote !== "object") {
+    return { visible: false, text: "", shortText: "", title: "", minutes: null };
+  }
+  var mode = quote.update_mode ? String(quote.update_mode) : "";
+  var isDelayed = false;
+  if (quote.is_delayed === true) {
+    isDelayed = true;
+  } else if (quote.is_delayed === false) {
+    isDelayed = false;
+  } else if (mode && mode.toLowerCase().indexOf("delayed") !== -1) {
+    isDelayed = true;
+  }
+  if (!isDelayed) {
+    return { visible: false, text: "", shortText: "", title: "", minutes: null };
+  }
+  var minutes = null;
+  var secMatch = /_(\d+)$/.exec(mode);
+  if (secMatch) {
+    var secs = parseInt(secMatch[1], 10);
+    if (isFinite(secs) && secs >= 60) {
+      minutes = Math.round(secs / 60);
+    }
+  }
+  var effLang = lang || (typeof currentLang !== "undefined" ? currentLang : "zh");
+  var text = minutes !== null ? ("DELAYED " + minutes + "m") : "DELAYED";
+  var shortText = minutes !== null ? (minutes + "m") : "D";
+  var modeSuffix = mode ? (" (" + mode + ")") : "";
+  var title;
+  if (effLang === "en") {
+    title = minutes !== null
+      ? ("Delayed quote: ~" + minutes + " min" + modeSuffix)
+      : ("Delayed quote" + modeSuffix);
+  } else {
+    title = minutes !== null
+      ? ("延遲行情：約 " + minutes + " 分鐘" + modeSuffix)
+      : ("延遲行情" + modeSuffix);
+  }
+  return {
+    visible: true,
+    text: text,
+    shortText: shortText,
+    title: title,
+    minutes: minutes
+  };
+}
+
+function formatModelSourceLabel(modelUsed, source) {
+  if (source === "rule_based" || !modelUsed) {
+    return "Rule-Based (Offline)";
+  }
+  return String(modelUsed);
+}
+
+if (typeof window !== "undefined") {
+  window.formatQuoteDelayBadge = formatQuoteDelayBadge;
+  window.formatModelSourceLabel = formatModelSourceLabel;
+}
+if (typeof globalThis !== "undefined") {
+  globalThis.formatQuoteDelayBadge = formatQuoteDelayBadge;
+  globalThis.formatModelSourceLabel = formatModelSourceLabel;
+}
+
 function updateSymbolMetrics(symbol, quote, bar) {
   if (symbol !== activeSymbol) return;
 
-  var price = quote.price || (bar ? bar.close : 0);
-  var ch = quote.change;
-  var chp = quote.changePercentage;
-  var vol = quote.volume || (bar ? bar.volume : 0);
+  var q = quote || {};
+  var price = q.price !== undefined ? q.price : (bar ? bar.close : 0);
+  var ch = q.change;
+  var chp = q.changePercentage;
+  var vol = (q.volume !== undefined && q.volume !== null) ? q.volume : null;
 
-  if (activePriceEl) activePriceEl.textContent = formatPrice(price, symbol);
+  if (activePriceEl) activePriceEl.textContent = canonicalFormatPrice(price, symbol);
+  var delayedBadgeEl = document.getElementById("delayedQuoteBadge");
+  if (delayedBadgeEl) {
+    var delayInfo = formatQuoteDelayBadge(q, currentLang);
+    delayedBadgeEl.style.display = delayInfo.visible ? "inline-flex" : "none";
+    if (delayInfo.visible) {
+      delayedBadgeEl.textContent = delayInfo.text;
+      delayedBadgeEl.title = delayInfo.title;
+    } else {
+      delayedBadgeEl.textContent = "";
+      delayedBadgeEl.title = "";
+    }
+  }
 
   if (activeChangeEl) {
     if (chp !== undefined && chp !== null) {
@@ -2947,7 +5909,29 @@ function updateSymbolMetrics(symbol, quote, bar) {
     }
   }
 
-  if (activeVolumeEl) activeVolumeEl.textContent = formatVolume(vol);
+  if (activeVolumeEl) activeVolumeEl.textContent = vol !== null ? formatVolume(vol) : "—";
+
+  var rawHigh = q.high !== undefined ? q.high : q.high24h;
+  var rawLow = q.low !== undefined ? q.low : q.low24h;
+  var hasHighLow = false;
+  if (rawHigh !== undefined && rawHigh !== null && rawLow !== undefined && rawLow !== null) {
+    var numHigh = Number(rawHigh);
+    var numLow = Number(rawLow);
+    if (!isNaN(numHigh) && !isNaN(numLow) && numHigh > 0) {
+      hasHighLow = true;
+      if (activeHighEl) activeHighEl.textContent = formatPrice(numHigh, symbol);
+      if (activeLowEl) activeLowEl.textContent = formatPrice(numLow, symbol);
+    }
+  }
+
+  if (activeHighEl) {
+    var highBox = activeHighEl.closest ? activeHighEl.closest(".metric-box") : activeHighEl.parentElement;
+    if (highBox) highBox.style.display = hasHighLow ? "flex" : "none";
+  }
+  if (activeLowEl) {
+    var lowBox = activeLowEl.closest ? activeLowEl.closest(".metric-box") : activeLowEl.parentElement;
+    if (lowBox) lowBox.style.display = hasHighLow ? "flex" : "none";
+  }
 
   var symItem = getSymbolItem(symbol);
   if (activeNameEl && symItem) activeNameEl.textContent = symItem.name;
@@ -2958,170 +5942,290 @@ function updateSymbolMetrics(symbol, quote, bar) {
 // Watchlist Sidebar Component
 // ==========================================================================
 
+var _wlDragEndTime = 0;
+
 function renderWatchlist() {
   if (!watchlistItemsEl) return;
   watchlistItemsEl.innerHTML = "";
   sidebarElements = {};
 
+  var draggedItemId = null;
   var draggedItemIndex = null;
+  var ordered = getOrderedWatchlistSymbols(activeWlGroup);
+  var pinnedList = ordered.pinned;
+  var unpinnedList = ordered.unpinned;
 
-  for (var i = 0; i < symbolsList.length; i++) {
-    (function(s, idx) {
-      var state = symbolStates[s.id] || {};
-      var div = document.createElement("div");
-      div.className = "wl-item" + (s.id === activeSymbol ? " active" : "");
-      div.id = "wl_" + s.id.replace(/[^a-zA-Z0-9]/g, "_");
-      div.setAttribute("draggable", "true");
-      div.setAttribute("data-index", String(idx));
-      div.setAttribute("data-id", s.id);
+  function renderItem(s, idx) {
+    var state = symbolStates[s.id] || {};
+    var div = document.createElement("div");
+    div.className = "wl-item" + (s.id === activeSymbol ? " active" : "");
+    div.id = "wl_" + s.id.replace(/[^a-zA-Z0-9]/g, "_");
+    div.setAttribute("data-index", String(idx));
+    div.setAttribute("data-id", s.id);
 
-      var colLeft = document.createElement("div");
-      colLeft.className = "wl-symbol-col";
+    var colLeft = document.createElement("div");
+    colLeft.className = "wl-symbol-col";
 
-      var dragGrip = document.createElement("span");
-      dragGrip.className = "wl-drag-handle";
-      dragGrip.textContent = "⋮⋮";
-      dragGrip.setAttribute("title", "拖動以調整自選順序 (Drag to reorder)");
+    var dragGrip = document.createElement("span");
+    dragGrip.className = "wl-drag-handle";
+    dragGrip.textContent = "⋮⋮";
+    dragGrip.setAttribute("title", "拖動以調整自選順序 (Drag to reorder)");
 
-      var tickerSpan = document.createElement("span");
-      tickerSpan.className = "wl-ticker";
-      tickerSpan.textContent = s.pair;
+    var tickerSpan = document.createElement("span");
+    tickerSpan.className = "wl-ticker";
+    tickerSpan.textContent = s.pair;
 
-      if (s.sector) {
-        var secTag = document.createElement("span");
-        secTag.className = "sector-tag";
-        secTag.textContent = s.sector;
-        tickerSpan.appendChild(secTag);
+    var wlDelayBadge = document.createElement("span");
+    wlDelayBadge.className = "wl-delayed-badge";
+    var wlDelayInfo = formatQuoteDelayBadge(state, currentLang);
+    wlDelayBadge.style.display = wlDelayInfo.visible ? "inline-flex" : "none";
+    if (wlDelayInfo.visible) {
+      wlDelayBadge.textContent = wlDelayInfo.shortText;
+      wlDelayBadge.setAttribute("title", wlDelayInfo.title);
+    }
+    tickerSpan.appendChild(wlDelayBadge);
+
+    var grp = watchlistGroups[s.id];
+    if (grp) {
+      var grpTag = document.createElement("span");
+      grpTag.className = "wl-group-tag " + grp;
+      var dict = i18n[currentLang] || i18n.en;
+      var grpKey = "grp" + grp.charAt(0).toUpperCase() + grp.slice(1);
+      grpTag.textContent = dict[grpKey] || grp.toUpperCase();
+      tickerSpan.appendChild(grpTag);
+    }
+
+    if (s.sector) {
+      var secTag = document.createElement("span");
+      secTag.className = "sector-tag";
+      secTag.textContent = s.sector;
+      tickerSpan.appendChild(secTag);
+    }
+
+    var nameSpan = document.createElement("span");
+    nameSpan.className = "wl-name";
+    nameSpan.textContent = s.name;
+
+    colLeft.appendChild(dragGrip);
+    colLeft.appendChild(tickerSpan);
+    colLeft.appendChild(nameSpan);
+
+    var colRight = document.createElement("div");
+    colRight.className = "wl-price-col";
+
+    var priceSpan = document.createElement("span");
+    priceSpan.className = "wl-price";
+    priceSpan.textContent = canonicalFormatPrice(state.price, s.id);
+
+    var chp = safeNum(state.changePercentage, 0);
+    var sign = chp >= 0 ? "+" : "";
+    var chpSpan = document.createElement("span");
+    chpSpan.className = "wl-chp " + (chp >= 0 ? "up" : "down");
+    chpSpan.textContent = sign + chp.toFixed(2) + "%";
+
+    colRight.appendChild(priceSpan);
+    colRight.appendChild(chpSpan);
+
+    var isPinned = pinnedSymbols.indexOf(s.id) >= 0;
+    var pinBtn = document.createElement("button");
+    pinBtn.className = "wl-pin-btn" + (isPinned ? " pinned" : "");
+    var curDict = i18n[currentLang] || i18n.en;
+    pinBtn.setAttribute("title", isPinned ? (curDict.unpinBtnTitle || "取消釘選") : (curDict.pinBtnTitle || "釘選到頂部"));
+    pinBtn.textContent = "📌";
+    pinBtn.onclick = function(e) {
+      e.stopPropagation();
+      togglePinSymbol(s.id);
+    };
+
+    var removeBtn = document.createElement("button");
+    removeBtn.className = "wl-remove-btn";
+    removeBtn.setAttribute("title", "從自選清單移除");
+    removeBtn.textContent = "✕";
+    removeBtn.onclick = function(e) {
+      e.stopPropagation();
+      unsubscribeSymbol(s.id);
+    };
+
+    div.appendChild(colLeft);
+    div.appendChild(colRight);
+    div.appendChild(pinBtn);
+    div.appendChild(removeBtn);
+
+    var startX = 0;
+    var startY = 0;
+    var isDragging = false;
+    var pointerActive = false;
+
+    var onPointerDown = function(e) {
+      if (e.button !== 0) return;
+      if (e.target && e.target.closest && (e.target.closest(".wl-pin-btn") || e.target.closest(".wl-remove-btn"))) {
+        return;
       }
+      var isHandle = Boolean(e.target && e.target.closest && e.target.closest(".wl-drag-handle"));
+      startX = e.clientX;
+      startY = e.clientY;
+      isDragging = false;
+      pointerActive = true;
 
-      var nameSpan = document.createElement("span");
-      nameSpan.className = "wl-name";
-      nameSpan.textContent = s.name;
-
-      colLeft.appendChild(dragGrip);
-      colLeft.appendChild(tickerSpan);
-      colLeft.appendChild(nameSpan);
-
-      var colRight = document.createElement("div");
-      colRight.className = "wl-price-col";
-
-      var priceSpan = document.createElement("span");
-      priceSpan.className = "wl-price";
-      priceSpan.textContent = formatPrice(state.price, s.id);
-
-      var chp = safeNum(state.changePercentage, 0);
-      var sign = chp >= 0 ? "+" : "";
-      var chpSpan = document.createElement("span");
-      chpSpan.className = "wl-chp " + (chp >= 0 ? "up" : "down");
-      chpSpan.textContent = sign + chp.toFixed(2) + "%";
-
-      colRight.appendChild(priceSpan);
-      colRight.appendChild(chpSpan);
-
-      var removeBtn = document.createElement("button");
-      removeBtn.className = "wl-remove-btn";
-      removeBtn.setAttribute("title", "從自選清單移除");
-      removeBtn.textContent = "✕";
-      removeBtn.onclick = function(e) {
-        e.stopPropagation();
-        unsubscribeSymbol(s.id);
-      };
-
-      div.appendChild(colLeft);
-      div.appendChild(colRight);
-      div.appendChild(removeBtn);
-
-      // HTML5 Drag & Drop Reordering Handlers (Safe for both Browser and Headless JSC)
-      var onDragStart = function(e) {
-        draggedItemIndex = idx;
-        div.classList.add("dragging");
-        if (e && e.dataTransfer) {
-          e.dataTransfer.effectAllowed = "move";
-          e.dataTransfer.setData("text/plain", String(idx));
+      var onPointerMove = function(ev) {
+        if (!pointerActive) return;
+        var diffX = Math.abs(ev.clientX - startX);
+        var diffY = Math.abs(ev.clientY - startY);
+        if (!isDragging) {
+          var dragThreshold = isHandle ? 3 : 6;
+          if (diffY > dragThreshold || diffX > dragThreshold) {
+            isDragging = true;
+            draggedItemId = s.id;
+            draggedItemIndex = idx;
+            div.classList.add("dragging");
+            document.body.style.userSelect = "none";
+          }
+        }
+        if (isDragging) {
+          var targetEl = document.elementFromPoint(ev.clientX, ev.clientY);
+          var targetItem = targetEl && targetEl.closest ? targetEl.closest(".wl-item") : null;
+          var allWl = watchlistItemsEl.querySelectorAll ? watchlistItemsEl.querySelectorAll(".wl-item") : [];
+          for (var k = 0; k < allWl.length; k++) {
+            allWl[k].classList.remove("drag-over-top");
+            allWl[k].classList.remove("drag-over-bottom");
+          }
+          if (targetItem && targetItem !== div) {
+            var targetId = targetItem.getAttribute("data-id");
+            var fromPinned = pinnedSymbols.indexOf(s.id) >= 0;
+            var toPinned = targetId ? pinnedSymbols.indexOf(targetId) >= 0 : false;
+            // Boundary partition protection: do not drag across pinned / unpinned boundary
+            if (fromPinned === toPinned) {
+              var rect = targetItem.getBoundingClientRect();
+              var isTop = (ev.clientY - rect.top) < (rect.height / 2);
+              if (isTop) {
+                targetItem.classList.add("drag-over-top");
+              } else {
+                targetItem.classList.add("drag-over-bottom");
+              }
+            }
+          }
         }
       };
 
-      var onDragOver = function(e) {
-        if (e && e.preventDefault) e.preventDefault();
-        if (e && e.dataTransfer) e.dataTransfer.dropEffect = "move";
-        div.classList.add("drag-over");
-      };
+      var onPointerUp = function(ev) {
+        if (!pointerActive) return;
+        pointerActive = false;
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", onPointerUp);
+        window.removeEventListener("pointercancel", onPointerUp);
+        document.body.style.userSelect = "";
 
-      var onDragLeave = function() {
-        div.classList.remove("drag-over");
-      };
+        if (isDragging) {
+          _wlDragEndTime = Date.now();
+          var targetEl = document.elementFromPoint(ev.clientX, ev.clientY);
+          var targetItem = targetEl && targetEl.closest ? targetEl.closest(".wl-item") : null;
+          var allWl = watchlistItemsEl.querySelectorAll ? watchlistItemsEl.querySelectorAll(".wl-item") : [];
+          for (var k = 0; k < allWl.length; k++) {
+            allWl[k].classList.remove("dragging");
+            allWl[k].classList.remove("drag-over-top");
+            allWl[k].classList.remove("drag-over-bottom");
+          }
+          if (targetItem && targetItem !== div) {
+            var fromId = s.id;
+            var toId = targetItem.getAttribute("data-id");
+            if (fromId && toId && fromId !== toId) {
+              var fromPinned = pinnedSymbols.indexOf(fromId) >= 0;
+              var toPinned = pinnedSymbols.indexOf(toId) >= 0;
+              if (fromPinned === toPinned) {
+                var rect = targetItem.getBoundingClientRect();
+                var isTop = (ev.clientY - rect.top) < (rect.height / 2);
 
-      var onDrop = function(e) {
-        if (e && e.preventDefault) e.preventDefault();
-        if (e && e.stopPropagation) e.stopPropagation();
-        div.classList.remove("drag-over");
-        var fromIdx = draggedItemIndex;
-        if (fromIdx === null && e && e.dataTransfer) {
-          var raw = e.dataTransfer.getData("text/plain");
-          if (raw !== "") fromIdx = parseInt(raw, 10);
+                if (fromPinned && toPinned) {
+                  var fpIdx = pinnedSymbols.indexOf(fromId);
+                  var tpIdx = pinnedSymbols.indexOf(toId);
+                  if (fpIdx >= 0 && tpIdx >= 0 && fpIdx !== tpIdx) {
+                    var movedPin = pinnedSymbols.splice(fpIdx, 1)[0];
+                    var targetPinIdx = pinnedSymbols.indexOf(toId);
+                    if (!isTop) targetPinIdx += 1;
+                    pinnedSymbols.splice(targetPinIdx, 0, movedPin);
+                    safeSetStorage("tv_pinned_symbols", JSON.stringify(pinnedSymbols));
+                    if (typeof savePreferencesDebounced === "function") savePreferencesDebounced();
+                  }
+                }
+
+                var fromIdx = -1;
+                var toIdx = -1;
+                for (var m = 0; m < symbolsList.length; m++) {
+                  if (symbolsList[m].id === fromId) fromIdx = m;
+                  if (symbolsList[m].id === toId) toIdx = m;
+                }
+                if (fromIdx !== -1 && toIdx !== -1 && fromIdx !== toIdx) {
+                  var moved = symbolsList.splice(fromIdx, 1)[0];
+                  var targetIdx = -1;
+                  for (var m = 0; m < symbolsList.length; m++) {
+                    if (symbolsList[m].id === toId) { targetIdx = m; break; }
+                  }
+                  if (!isTop) targetIdx += 1;
+                  symbolsList.splice(targetIdx, 0, moved);
+                  safeSetStorage("tv_symbols_cache", JSON.stringify(symbolsList));
+                  renderWatchlist();
+                  fetch("/api/symbols/reorder", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ order: symbolsList.map(function(item) { return item.id; }) })
+                  }).catch(function(err) {
+                    console.warn("Watchlist reorder sync error:", err);
+                  });
+                }
+              }
+            }
+          }
+          isDragging = false;
+          draggedItemId = null;
+          draggedItemIndex = null;
         }
-        var toIdx = idx;
-        if (fromIdx !== null && !isNaN(fromIdx) && fromIdx !== toIdx && fromIdx >= 0 && fromIdx < symbolsList.length && toIdx >= 0 && toIdx < symbolsList.length) {
-          var moved = symbolsList.splice(fromIdx, 1)[0];
-          symbolsList.splice(toIdx, 0, moved);
-          safeSetStorage("tv_symbols_cache", JSON.stringify(symbolsList));
-          renderWatchlist();
-          fetch("/api/symbols/reorder", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ order: symbolsList.map(function(item) { return item.id; }) })
-          }).catch(function(err) {
-            console.warn("Watchlist reorder sync error:", err);
-          });
-        }
       };
 
-      var onDragEnd = function() {
-        draggedItemIndex = null;
-        var allWl = watchlistItemsEl.querySelectorAll ? watchlistItemsEl.querySelectorAll(".wl-item") : [];
-        for (var k = 0; k < allWl.length; k++) {
-          allWl[k].classList.remove("dragging");
-          allWl[k].classList.remove("drag-over");
-        }
-      };
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", onPointerUp);
+      window.addEventListener("pointercancel", onPointerUp);
+    };
 
-      if (typeof div.addEventListener === "function") {
-        div.addEventListener("dragstart", onDragStart);
-        div.addEventListener("dragover", onDragOver);
-        div.addEventListener("dragleave", onDragLeave);
-        div.addEventListener("drop", onDrop);
-        div.addEventListener("dragend", onDragEnd);
+    div.addEventListener("pointerdown", onPointerDown);
+
+    div.onclick = function() {
+      if (Date.now() - _wlDragEndTime < 200) return;
+      if (mtfSyncEnabled) {
+        syncMTF(s.id);
+      } else if (focusedPaneId > 1 && subCharts[focusedPaneId]) {
+        loadSubChart(focusedPaneId, s.id);
       } else {
-        div.ondragstart = onDragStart;
-        div.ondragover = onDragOver;
-        div.ondragleave = onDragLeave;
-        div.ondrop = onDrop;
-        div.ondragend = onDragEnd;
+        switchSymbol(s.id);
       }
+    };
 
-      div.onclick = function() {
-        if (mtfSyncEnabled) {
-          syncMTF(s.id);
-        } else if (focusedPaneId > 1 && subCharts[focusedPaneId]) {
-          loadSubChart(focusedPaneId, s.id);
-        } else {
-          switchSymbol(s.id);
-        }
-      };
+    div.oncontextmenu = function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      openWlContextMenu(e, s.id);
+    };
 
-      div.oncontextmenu = function(e) {
-        e.preventDefault();
-        e.stopPropagation();
-        openWlContextMenu(e, s.id);
-      };
+    watchlistItemsEl.appendChild(div);
+    sidebarElements[s.id] = {
+      item: div,
+      price: priceSpan,
+      chp: chpSpan,
+      delayedBadge: wlDelayBadge
+    };
+  }
 
-      watchlistItemsEl.appendChild(div);
-      sidebarElements[s.id] = {
-        item: div,
-        price: priceSpan,
-        chp: chpSpan
-      };
-    })(symbolsList[i], i);
+  for (var p = 0; p < pinnedList.length; p++) {
+    renderItem(pinnedList[p], p);
+  }
+
+  if (pinnedList.length > 0 && unpinnedList.length > 0) {
+    var divider = document.createElement("div");
+    divider.className = "wl-pin-divider";
+    watchlistItemsEl.appendChild(divider);
+  }
+
+  for (var u = 0; u < unpinnedList.length; u++) {
+    renderItem(unpinnedList[u], pinnedList.length + u);
   }
 }
 
@@ -3130,6 +6234,12 @@ function openWlContextMenu(e, symbolId) {
   activeContextSymbol = symbolId;
   var menu = document.getElementById("wlContextMenu");
   if (!menu) return;
+  var ctxPinWlText = document.getElementById("ctxPinWlText");
+  if (ctxPinWlText) {
+    var isPinned = pinnedSymbols.indexOf(symbolId) >= 0;
+    var dict = i18n[currentLang] || i18n.en;
+    ctxPinWlText.textContent = isPinned ? (dict.ctxUnpin || "取消釘選") : (dict.ctxPin || "釘選置頂");
+  }
   menu.style.display = "block";
   var x = Math.min(e.clientX, window.innerWidth - 200);
   var y = Math.min(e.clientY, window.innerHeight - 150);
@@ -3141,6 +6251,13 @@ document.addEventListener("click", function() {
   var menu = document.getElementById("wlContextMenu");
   if (menu) menu.style.display = "none";
 });
+
+var ctxPinWl = document.getElementById("ctxPinWl");
+if (ctxPinWl) {
+  ctxPinWl.onclick = function() {
+    if (activeContextSymbol) togglePinSymbol(activeContextSymbol);
+  };
+}
 
 var ctxRemoveWl = document.getElementById("ctxRemoveWl");
 if (ctxRemoveWl) {
@@ -3163,6 +6280,38 @@ if (ctxCopySymbol) {
       navigator.clipboard.writeText(activeContextSymbol);
     }
   };
+}
+
+var ctxGroupItems = document.querySelectorAll ? document.querySelectorAll(".ctx-group-item") : [];
+for (var cgi = 0; cgi < ctxGroupItems.length; cgi++) {
+  (function(item) {
+    item.onclick = function() {
+      if (!activeContextSymbol) return;
+      var grpName = item.getAttribute("data-assign-group") || "";
+      if (grpName) {
+        watchlistGroups[activeContextSymbol] = grpName;
+      } else {
+        delete watchlistGroups[activeContextSymbol];
+      }
+      safeSetStorage("tv_watchlist_groups", JSON.stringify(watchlistGroups));
+      renderWatchlist();
+      if (typeof savePreferencesDebounced === "function") savePreferencesDebounced();
+    };
+  })(ctxGroupItems[cgi]);
+}
+
+var wlGroupButtons = document.querySelectorAll ? document.querySelectorAll(".wl-group-btn") : [];
+for (var wbi = 0; wbi < wlGroupButtons.length; wbi++) {
+  (function(btn) {
+    btn.onclick = function() {
+      var grp = btn.getAttribute("data-group") || "all";
+      activeWlGroup = grp;
+      for (var b = 0; b < wlGroupButtons.length; b++) {
+        wlGroupButtons[b].classList.toggle("active", wlGroupButtons[b] === btn);
+      }
+      renderWatchlist();
+    };
+  })(wlGroupButtons[wbi]);
 }
 
 function unsubscribeSymbol(symbolId) {
@@ -3192,13 +6341,24 @@ function updateWatchlistPrice(symbol, quote) {
   if (!els) return;
 
   if (quote.price !== undefined) {
-    els.price.textContent = formatPrice(quote.price, symbol);
+    els.price.textContent = canonicalFormatPrice(quote.price, symbol);
   }
   if (quote.changePercentage !== undefined) {
     var chp = Number(quote.changePercentage);
     var sign = chp >= 0 ? "+" : "";
     els.chp.textContent = sign + chp.toFixed(2) + "%";
     els.chp.className = "wl-chp " + (chp >= 0 ? "up" : "down");
+  }
+  if (els.delayedBadge) {
+    var wlDelay = formatQuoteDelayBadge(quote, currentLang);
+    els.delayedBadge.style.display = wlDelay.visible ? "inline-flex" : "none";
+    if (wlDelay.visible) {
+      els.delayedBadge.textContent = wlDelay.shortText;
+      els.delayedBadge.title = wlDelay.title;
+    } else {
+      els.delayedBadge.textContent = "";
+      els.delayedBadge.title = "";
+    }
   }
 }
 
@@ -3207,22 +6367,37 @@ function updateWatchlistPrice(symbol, quote) {
 // ==========================================================================
 
   var searchDebounceTimer = null;
+  var searchReqSeq = 0;
+  var lastNotificationMessage = "";
 
 function executeSearch(query, filter) {
   if (filter === undefined) filter = "all";
+  var currentSeq = ++searchReqSeq;
   fetch("/api/symbols/search?q=" + encodeURIComponent(query))
     .then(function(res) {
-      if (!res.ok) return { results: [] };
+      if (currentSeq !== searchReqSeq) return null;
+      if (!res.ok) throw new Error("HTTP " + res.status);
       return res.json();
     })
     .then(function(data) {
+      if (currentSeq !== searchReqSeq || !data) return;
       var items = data.results || [];
       if (filter !== "all") {
         items = items.filter(function(it) { return it.type === filter; });
       }
       renderSearchResults(items);
     })
-    .catch(function(e) {});
+    .catch(function(e) {
+      if (currentSeq !== searchReqSeq) return;
+      if (searchResultsList) {
+        searchResultsList.innerHTML = "";
+        var errDiv = document.createElement("div");
+        errDiv.className = "search-error-state";
+        errDiv.style.cssText = "padding:20px;text-align:center;color:#ef5350;";
+        errDiv.textContent = "搜尋失敗";
+        searchResultsList.appendChild(errDiv);
+      }
+    });
 }
 
 function renderSearchResults(items) {
@@ -3232,7 +6407,8 @@ function renderSearchResults(items) {
   if (!items || items.length === 0) {
     var emptyDiv = document.createElement("div");
     emptyDiv.style.cssText = "padding:20px;text-align:center;color:#787b86;";
-    emptyDiv.textContent = "No matching symbols found. Press Enter to add custom ticker.";
+    var dict = i18n[currentLang] || i18n.en;
+    emptyDiv.textContent = dict.noResults || "No matching symbols found. Press Enter to add custom ticker.";
     searchResultsList.appendChild(emptyDiv);
     return;
   }
@@ -3281,7 +6457,19 @@ function renderSearchResults(items) {
   }
 }
 
-function selectAndSubscribeSymbol(item) {
+function subscribeSymbol(symbolId, onResult) {
+  var defExch = symbolId.indexOf(":") !== -1 ? symbolId.split(":")[0] : "NASDAQ";
+  var defTicker = symbolId.indexOf(":") !== -1 ? symbolId.split(":")[1] : symbolId;
+  return selectAndSubscribeSymbol({
+    id: symbolId,
+    pair: defTicker,
+    name: defTicker,
+    exchange: defExch,
+    type: "stock"
+  }, onResult);
+}
+
+function selectAndSubscribeSymbol(item, onResult) {
   closeSearch();
   var payload = {
     symbol: item.id || item.pair || "",
@@ -3291,16 +6479,22 @@ function selectAndSubscribeSymbol(item) {
     pair: item.pair || item.id || "",
     type: item.type || "stock"
   };
-  fetch("/api/symbols/subscribe", {
+  var subPromise = fetch("/api/symbols/subscribe", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   })
     .then(function(res) {
-      if (res.ok) return res.json();
-      return null;
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
     })
     .then(function(data) {
+      if (data && data.exchange_guessed) {
+        lastNotificationMessage = "交易所是推測的（預設 NASDAQ）";
+        if (typeof showScreenerFeedback === "function") {
+          showScreenerFeedback("交易所是推測的（預設 NASDAQ）");
+        }
+      }
       if (data && data.symbol) {
         var subscribed = data.symbol;
         var exists = false;
@@ -3312,9 +6506,19 @@ function selectAndSubscribeSymbol(item) {
           safeSetStorage("tv_symbols_cache", JSON.stringify(symbolsList));
           renderWatchlist();
         }
+        if (subscribed.id === activeSymbol) {
+          var unBadge = document.getElementById("unsubscribedBadge");
+          if (unBadge) unBadge.style.display = "none";
+        }
       }
+      if (typeof onResult === "function") onResult(true, data);
+      return data;
     })
-    .catch(function(e) {});
+    .catch(function(e) {
+      console.warn("[subscribe] error:", e);
+      if (typeof onResult === "function") onResult(false, null, e);
+      throw e;
+    });
 
   if (mtfSyncEnabled) {
     syncMTF(item.id);
@@ -3323,6 +6527,8 @@ function selectAndSubscribeSymbol(item) {
   } else {
     switchSymbol(item.id);
   }
+
+  return subPromise;
 }
 
 function openSearch(seedChar) {
@@ -3345,6 +6551,59 @@ function closeSearch() {
 // WebSocket Lifecycle & Exponential Backoff
 // ==========================================================================
 
+var wsHasConnectedBefore = false;
+var lastBarSeqBySymbol = {};
+var _gapRecoveryInFlight = false;
+
+function checkBarSequenceGap(symbol, seq) {
+  if (!symbol || typeof seq !== "number" || !isFinite(seq) || seq <= 0) {
+    return { gap: false, expected: null, received: null };
+  }
+  var key = String(symbol).trim().toUpperCase();
+  var prev = lastBarSeqBySymbol[key];
+  if (prev === undefined) {
+    lastBarSeqBySymbol[key] = seq;
+    return { gap: false, expected: seq, received: seq };
+  }
+  if (seq > prev + 1) {
+    lastBarSeqBySymbol[key] = seq;
+    return { gap: true, expected: prev + 1, received: seq };
+  }
+  if (seq < prev) {
+    lastBarSeqBySymbol[key] = seq;
+  } else if (seq === prev + 1) {
+    lastBarSeqBySymbol[key] = seq;
+  }
+  return { gap: false, expected: prev + 1, received: seq };
+}
+
+// 第 7 段：伺服器佇列塞車時會連續掉訊息；缺口恢復最多每 15 秒一次，避免整張圖一直重畫
+var _lastGapRecoveryAt = 0;
+var GAP_RECOVERY_MIN_INTERVAL_MS = 15000;
+
+function triggerGapRecovery(force) {
+  if (_gapRecoveryInFlight) return;
+  if (typeof recoverTerminalState !== "function" || !activeSymbol) return;
+  var nowMs = Date.now();
+  if (!force && nowMs - _lastGapRecoveryAt < GAP_RECOVERY_MIN_INTERVAL_MS) return;
+  _lastGapRecoveryAt = nowMs;
+  _gapRecoveryInFlight = true;
+  Promise.resolve(recoverTerminalState({ symbol: activeSymbol, timeframe: activeTimeframe, includeWatchlist: false }))
+    .catch(function() {})
+    .finally(function() {
+      _gapRecoveryInFlight = false;
+    });
+}
+
+if (typeof window !== "undefined") {
+  window.checkBarSequenceGap = checkBarSequenceGap;
+  window.triggerGapRecovery = triggerGapRecovery;
+}
+if (typeof globalThis !== "undefined") {
+  globalThis.checkBarSequenceGap = checkBarSequenceGap;
+  globalThis.triggerGapRecovery = triggerGapRecovery;
+}
+
 function scheduleReconnect() {
   if (reconnectTimer) return;
   reconnectAttempts++;
@@ -3358,7 +6617,43 @@ function scheduleReconnect() {
   }, delay);
 }
 
+var lastWsMessageAt = 0;
+var _wsHeartbeatTimer = null;
+
+function checkWsHeartbeatTimeout(nowMs) {
+  var t = (typeof nowMs === "number") ? nowMs : Date.now();
+  if (ws && ws.readyState === 1) {
+    if (lastWsMessageAt > 0 && (t - lastWsMessageAt > 45000)) {
+      console.warn("[ws] No message received for >45s, closing connection for reconnect");
+      try {
+        ws.close();
+      } catch (e) {}
+    }
+  }
+}
+
+function initWsHeartbeatCheck() {
+  if (_wsHeartbeatTimer) return;
+  if (typeof setInterval === "undefined") return;
+  _wsHeartbeatTimer = setInterval(function() {
+    checkWsHeartbeatTimeout();
+  }, 5000);
+  if (_wsHeartbeatTimer && typeof _wsHeartbeatTimer.unref === "function") {
+    _wsHeartbeatTimer.unref();
+  }
+}
+
+if (typeof window !== "undefined") {
+  window.checkWsHeartbeatTimeout = checkWsHeartbeatTimeout;
+  window.initWsHeartbeatCheck = initWsHeartbeatCheck;
+}
+if (typeof globalThis !== "undefined") {
+  globalThis.checkWsHeartbeatTimeout = checkWsHeartbeatTimeout;
+  globalThis.initWsHeartbeatCheck = initWsHeartbeatCheck;
+}
+
 function connectWebSocket() {
+  initWsHeartbeatCheck();
   if (!desktopPort && typeof window !== "undefined" && (window.__TAURI__ || (window.location && window.location.protocol === "tauri:"))) {
     return;
   }
@@ -3394,27 +6689,41 @@ function connectWebSocket() {
   }
 
   ws.onopen = function() {
+    lastWsMessageAt = Date.now();
+    var isReconnect = wsHasConnectedBefore || reconnectAttempts > 0;
+    wsHasConnectedBefore = true;
     reconnectAttempts = 0;
+    var dict = i18n[currentLang] || i18n.en;
     if (statusBadge) statusBadge.className = "status-badge connected";
-    if (statusText) statusText.textContent = "CONNECTED";
+    if (statusText) statusText.textContent = dict.connected;
+    if (isReconnect) {
+      lastBarSeqBySymbol = {};
+      triggerGapRecovery(true);
+    }
   };
 
   ws.onmessage = function(evt) {
     try {
+      lastWsMessageAt = Date.now();
       var msg = JSON.parse(evt.data);
+
+      if (msg.type === "heartbeat") {
+        return;
+      }
 
       if (msg.type === "status") {
         if (statusBadge && statusText) {
+          var dict = i18n[currentLang] || i18n.en;
           var st = String(msg.status || "").toLowerCase();
           if (st === "connected") {
             statusBadge.className = "status-badge connected";
-            statusText.textContent = "CONNECTED";
+            statusText.textContent = dict.connected;
           } else if (st === "connecting" || st === "initializing") {
             statusBadge.className = "status-badge connecting";
-            statusText.textContent = st.toUpperCase();
+            statusText.textContent = dict.connecting;
           } else {
             statusBadge.className = "status-badge disconnected";
-            statusText.textContent = "DISCONNECTED";
+            statusText.textContent = dict.disconnected;
           }
         }
         return;
@@ -3426,6 +6735,10 @@ function connectWebSocket() {
       if (msg.type === "quote") {
         updateQuote(msg.symbol, msg.data || {});
       } else if (msg.type === "bar") {
+        var seqCheck = checkBarSequenceGap(msg.symbol, msg.seq);
+        if (seqCheck.gap && msg.symbol === activeSymbol) {
+          triggerGapRecovery();
+        }
         handleLiveBar(msg.symbol, msg.bar);
       } else if (msg.type === "symbol_added") {
         var newSym = msg.symbol;
@@ -3441,17 +6754,38 @@ function connectWebSocket() {
       } else if (msg.type === "symbol_removed") {
         var remSymId = typeof msg.symbol === "object" ? msg.symbol.id : msg.symbol;
         if (remSymId) {
+          delete symbolStates[remSymId];
+          delete lastPrices[remSymId];
           symbolsList = symbolsList.filter(function(s) { return s.id !== remSymId; });
           safeSetStorage("tv_symbols_cache", JSON.stringify(symbolsList));
           renderWatchlist();
+          if (remSymId === activeSymbol) {
+            var unBadge = document.getElementById("unsubscribedBadge");
+            if (!unBadge) {
+              unBadge = document.createElement("span");
+              unBadge.id = "unsubscribedBadge";
+              unBadge.className = "status-badge disconnected";
+              var delayedBadgeEl = document.getElementById("delayedQuoteBadge");
+              if (delayedBadgeEl && delayedBadgeEl.parentNode) {
+                delayedBadgeEl.parentNode.insertBefore(unBadge, delayedBadgeEl.nextSibling);
+              }
+            }
+            if (unBadge) {
+              unBadge.style.display = "inline-flex";
+              unBadge.textContent = "已從自選清單移除，即時更新已停止";
+            }
+          }
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn("[ws] message handling error:", e);
+    }
   };
 
   ws.onclose = function() {
+    var dict = i18n[currentLang] || i18n.en;
     if (statusBadge) statusBadge.className = "status-badge disconnected";
-    if (statusText) statusText.textContent = "DISCONNECTED";
+    if (statusText) statusText.textContent = dict.disconnected;
     scheduleReconnect();
   };
 
@@ -3464,13 +6798,18 @@ function connectWebSocket() {
 // Event Listeners & Bootstrapping
 // ==========================================================================
 
-function setLanguage(lang) {
-  currentLang = lang;
-  safeSetStorage("tv_terminal_lang", lang);
-  var dict = i18n[lang] || i18n.en;
+function setLanguage(lang, skipSave) {
+  currentLang = (lang === "en") ? "en" : "zh";
+  safeSetStorage("tv_terminal_lang", currentLang);
+  if (typeof document !== "undefined" && document.documentElement) {
+    document.documentElement.lang = currentLang === "zh" ? "zh-Hant" : "en";
+  }
+  var dict = i18n[currentLang] || i18n.en;
 
   var langLabelEl = document.getElementById("langLabel");
   if (langLabelEl) langLabelEl.textContent = dict.langLabel;
+  var langBtnEl = document.getElementById("langToggleBtn");
+  if (langBtnEl) langBtnEl.setAttribute("title", dict.langToggleTitle);
 
   var brandSubEl = document.querySelector(".brand-sub");
   if (brandSubEl) brandSubEl.textContent = dict.brandSub;
@@ -3481,20 +6820,50 @@ function setLanguage(lang) {
   var searchInputEl = document.getElementById("searchInput");
   if (searchInputEl) searchInputEl.placeholder = dict.searchPlaceholder;
 
+  var indicatorsBtnLabel = document.getElementById("indicatorsBtnLabel");
+  if (indicatorsBtnLabel) indicatorsBtnLabel.textContent = dict.indicatorsBtn;
+
   var rsLabelEl = document.querySelector(".rs-label");
   if (rsLabelEl) rsLabelEl.textContent = dict.rsBenchmarkLabel;
+  var rsToggleEl = document.getElementById("rsToggleBtn");
+  if (rsToggleEl) rsToggleEl.setAttribute("title", dict.rsToggleTitle);
+
+  var btnModeMansfield = document.getElementById("btnModeMansfield");
+  if (btnModeMansfield) btnModeMansfield.textContent = dict.rsModeMansfield;
+  var btnModeDeepvue = document.getElementById("btnModeDeepvue");
+  if (btnModeDeepvue) btnModeDeepvue.textContent = dict.rsModeDeepvue;
 
   var hud52wLabel = document.getElementById("hud52wLabel");
-  if (hud52wLabel) hud52wLabel.textContent = dict.hud52w;
-
+  if (hud52wLabel) {
+    var hudHighMeta = getHudHighLabelMeta(activeTimeframe, currentLang);
+    hud52wLabel.textContent = hudHighMeta.label;
+    hud52wLabel.title = hudHighMeta.title;
+  }
   var hudVol50Label = document.getElementById("hudVol50Label");
   if (hudVol50Label) hudVol50Label.textContent = dict.hudVol50;
-
   var hudAdrLabel = document.getElementById("hudAdrLabel");
   if (hudAdrLabel) hudAdrLabel.textContent = dict.hudAdr;
 
+  var metricTagChange = document.getElementById("metricTagChange");
+  if (metricTagChange) metricTagChange.textContent = dict.change24h;
+  var metricTagHigh = document.getElementById("metricTagHigh");
+  if (metricTagHigh) metricTagHigh.textContent = dict.high24h;
+  var metricTagLow = document.getElementById("metricTagLow");
+  if (metricTagLow) metricTagLow.textContent = dict.low24h;
+  var metricTagVol = document.getElementById("metricTagVol");
+  if (metricTagVol) metricTagVol.textContent = dict.vol24h;
 
-  var modalTitleEl = document.querySelector(".modal-title");
+  var equityBannerText = document.getElementById("equityBannerText");
+  if (equityBannerText) equityBannerText.textContent = dict.equityBannerText;
+
+  var searchTabs = document.querySelectorAll ? document.querySelectorAll(".search-tab") : [];
+  var tabTextMap = { all: dict.tabAll, stock: dict.tabStocks, etf: dict.tabEtfs, crypto: dict.tabCrypto };
+  for (var stIdx = 0; stIdx < searchTabs.length; stIdx++) {
+    var filterKey = searchTabs[stIdx].getAttribute("data-filter");
+    if (filterKey && tabTextMap[filterKey]) searchTabs[stIdx].textContent = tabTextMap[filterKey];
+  }
+
+  var modalTitleEl = document.querySelector("#indicatorModal .modal-title") || document.querySelector(".modal-title");
   if (modalTitleEl) modalTitleEl.textContent = dict.indicatorsTitle;
 
   var closeBottomBtn = document.getElementById("closeIndicatorModalBottom");
@@ -3515,6 +6884,103 @@ function setLanguage(lang) {
     engineSelect.options[0].textContent = dict.enginePro;
     engineSelect.options[1].textContent = dict.engineTv;
   }
+
+  var pinBtn = document.getElementById("btnPinWindow");
+  if (pinBtn) pinBtn.setAttribute("title", isAlwaysOnTop ? dict.unpinTitle : dict.pinTitle);
+
+  var ctxPinEl = document.getElementById("ctxPinWlText");
+  if (ctxPinEl) {
+    var isPinned = activeContextSymbol && pinnedSymbols.indexOf(activeContextSymbol) >= 0;
+    ctxPinEl.textContent = isPinned ? dict.ctxUnpin : dict.ctxPin;
+  }
+
+  var ctxRemoveEl = document.getElementById("ctxRemoveWlText");
+  if (ctxRemoveEl) ctxRemoveEl.textContent = dict.ctxRemove;
+  var ctxBenchEl = document.getElementById("ctxSetBenchmarkText");
+  if (ctxBenchEl) ctxBenchEl.textContent = dict.ctxBenchmark;
+  var ctxCopyEl = document.getElementById("ctxCopySymbolText");
+  if (ctxCopyEl) ctxCopyEl.textContent = dict.ctxCopy;
+
+  var wlGrpAll = document.getElementById("wlGrpAll");
+  if (wlGrpAll) wlGrpAll.textContent = dict.grpAll;
+  var wlGrpLeaders = document.getElementById("wlGrpLeaders");
+  if (wlGrpLeaders) wlGrpLeaders.textContent = dict.grpLeaders;
+  var wlGrpVcp = document.getElementById("wlGrpVcp");
+  if (wlGrpVcp) wlGrpVcp.textContent = dict.grpVcp;
+  var wlGrpPullback = document.getElementById("wlGrpPullback");
+  if (wlGrpPullback) wlGrpPullback.textContent = dict.grpPullback;
+  var wlGrpEarnings = document.getElementById("wlGrpEarnings");
+  if (wlGrpEarnings) wlGrpEarnings.textContent = dict.grpEarnings;
+
+  var ctxGrpHeader = document.getElementById("ctxGroupHeader");
+  if (ctxGrpHeader) ctxGrpHeader.textContent = dict.ctxGroupHeader;
+  var ctxGrpNone = document.getElementById("ctxGrpNone");
+  if (ctxGrpNone) ctxGrpNone.textContent = dict.ctxGrpNone;
+  var ctxGrpLeaders = document.getElementById("ctxGrpLeaders");
+  if (ctxGrpLeaders) ctxGrpLeaders.textContent = dict.ctxGrpLeaders;
+  var ctxGrpVcp = document.getElementById("ctxGrpVcp");
+  if (ctxGrpVcp) ctxGrpVcp.textContent = dict.ctxGrpVcp;
+  var ctxGrpPullback = document.getElementById("ctxGrpPullback");
+  if (ctxGrpPullback) ctxGrpPullback.textContent = dict.ctxGrpPullback;
+  var ctxGrpEarnings = document.getElementById("ctxGrpEarnings");
+  if (ctxGrpEarnings) ctxGrpEarnings.textContent = dict.ctxGrpEarnings;
+
+  var nhBadgeEl = document.getElementById("rsNewHighBadge");
+  if (nhBadgeEl) nhBadgeEl.setAttribute("title", dict.rsNewHighTooltip || "");
+
+  var hmBtnLabel = document.getElementById("heatmapBtnLabel");
+  if (hmBtnLabel) hmBtnLabel.textContent = dict.heatmapBtn;
+  var hmModalTitle = document.getElementById("heatmapModalTitle");
+  if (hmModalTitle) hmModalTitle.textContent = dict.heatmapModalTitle;
+  var hmUnivThemes = document.getElementById("hmUnivThemes");
+  if (hmUnivThemes) hmUnivThemes.textContent = dict.hmUnivThemes;
+  var hmUnivWatchlist = document.getElementById("hmUnivWatchlist");
+  if (hmUnivWatchlist) hmUnivWatchlist.textContent = dict.hmUnivWatchlist;
+  var hmMetricChange = document.getElementById("hmMetricChange");
+  if (hmMetricChange) hmMetricChange.textContent = dict.hmMetricChange;
+  var hmMetricRs = document.getElementById("hmMetricRs");
+  if (hmMetricRs) hmMetricRs.textContent = dict.hmMetricRs;
+  var hmSortChange = document.getElementById("hmSortChange");
+  if (hmSortChange) hmSortChange.textContent = dict.hmSortChange;
+  var hmSortRs = document.getElementById("hmSortRs");
+  if (hmSortRs) hmSortRs.textContent = dict.hmSortRs;
+  var hmLoadingText = document.getElementById("heatmapLoadingText");
+  if (hmLoadingText) hmLoadingText.textContent = dict.heatmapLoading;
+  var hmEmptyTitle = document.getElementById("heatmapEmptyTitle");
+  if (hmEmptyTitle) hmEmptyTitle.textContent = dict.heatmapEmpty;
+  var hmFooterTip = document.getElementById("heatmapFooterTip");
+  if (hmFooterTip) hmFooterTip.textContent = dict.heatmapFooterTip;
+  if (typeof renderHeatmap === "function" && heatmapDataCache) {
+    renderHeatmap();
+  }
+
+  var scBtnLabel = document.getElementById("screenerBtnLabel");
+  if (scBtnLabel) scBtnLabel.textContent = dict.screenerBtn || (currentLang === "en" ? "Screener" : "智能選股");
+  var scBatchAddBtn = document.getElementById("screenerBatchAddBtn");
+  if (scBatchAddBtn) scBatchAddBtn.textContent = dict.batchAddTier12 || (currentLang === "en" ? "⭐ Batch Add Tier 1–2" : "⭐ 批次加入 Tier 1–2 至自選");
+
+  if (statusBadge && statusText) {
+    if (statusBadge.classList.contains("connected")) statusText.textContent = dict.connected;
+    else if (statusBadge.classList.contains("disconnected")) statusText.textContent = dict.disconnected;
+    else if (statusBadge.classList.contains("reconnecting")) statusText.textContent = dict.reconnecting;
+    else statusText.textContent = dict.connecting;
+  }
+
+  renderPositionSizingBadge();
+  if (typeof renderWatchlist === "function") renderWatchlist();
+  if (activeSymbol) updateSymbolMetrics(activeSymbol, symbolStates[activeSymbol] || {}, latestBarData);
+  updateCandleStyleUI();
+  updateThemeToggleUI();
+
+  if (!skipSave) {
+    if (currentEngine === "C" && typeof initTradingViewWidget === "function") {
+      initTradingViewWidget(activeSymbol);
+      if (activeSplitLayout !== "1x1" && typeof applySplitLayout === "function") {
+        applySplitLayout(activeSplitLayout);
+      }
+    }
+    if (typeof savePreferencesDebounced === "function") savePreferencesDebounced();
+  }
 }
 
 var RANGE_TF_MAP = {
@@ -3531,6 +6997,7 @@ var RANGE_TF_MAP = {
 function applyDateRange(range) {
   var targetTf = RANGE_TF_MAP[range] || "1m";
   if (targetTf !== activeTimeframe) {
+    userChangedTimeframe = true;
     activeTimeframe = targetTf;
     var tfButtons = document.querySelectorAll ? document.querySelectorAll(".tf-btn") : [];
     for (var i = 0; i < tfButtons.length; i++) {
@@ -3545,34 +7012,142 @@ function applyDateRange(range) {
   clampAndSetVisibleRange(range);
 }
 
+/** 主圖目前實際的時間軸（以 candleSeries 的資料為準，取不到時用 currentRawBars）。 */
+function getMainTimeAxis() {
+  return getSeriesTimeAxis(candleSeries, currentRawBars);
+}
+if (typeof window !== "undefined") window.getMainTimeAxis = getMainTimeAxis;
+if (typeof globalThis !== "undefined") globalThis.getMainTimeAxis = getMainTimeAxis;
+
+/** 驗證時間格式是否可安全傳入 Lightweight Charts */
+function isValidChartTime(t) {
+  if (typeof t === "number" && isFinite(t) && t > 0) return true;
+  if (typeof t === "string" && /^\d{4}-\d{2}-\d{2}$/.test(t)) return true;
+  if (
+    typeof t === "object" &&
+    t !== null &&
+    typeof t.year === "number" &&
+    isFinite(t.year) &&
+    t.year > 0 &&
+    typeof t.month === "number" &&
+    isFinite(t.month) &&
+    t.month >= 1 &&
+    t.month <= 12 &&
+    typeof t.day === "number" &&
+    isFinite(t.day) &&
+    t.day >= 1 &&
+    t.day <= 31
+  ) {
+    return true;
+  }
+  return false;
+}
+if (typeof window !== "undefined") window.isValidChartTime = isValidChartTime;
+if (typeof globalThis !== "undefined") globalThis.isValidChartTime = isValidChartTime;
+
+/** 安全的時間轉座標轉換，避免 Lightweight Charts convertTime 拋出 TypeError */
+function safeTimeToCoordinate(ts, t) {
+  if (!isValidChartTime(t) || !ts || typeof ts.timeToCoordinate !== "function") return null;
+  try {
+    var coord = ts.timeToCoordinate(t);
+    return (coord !== null && typeof coord === "number" && !isNaN(coord)) ? coord : null;
+  } catch (e) {
+    return null;
+  }
+}
+if (typeof window !== "undefined") window.safeTimeToCoordinate = safeTimeToCoordinate;
+if (typeof globalThis !== "undefined") globalThis.safeTimeToCoordinate = safeTimeToCoordinate;
+
+/** 從座標吸附最近之有效時間（包含右側邊距邏輯索引還原） */
+function snapTimeFromCoordinate(ts, x, axisTimes) {
+  if (ts && typeof ts.coordinateToTime === "function") {
+    try {
+      var t = ts.coordinateToTime(x);
+      if (isValidChartTime(t)) return t;
+    } catch (e) {}
+  }
+  if (!Array.isArray(axisTimes) || axisTimes.length === 0) return null;
+  if (ts && typeof ts.coordinateToLogical === "function") {
+    try {
+      var logical = ts.coordinateToLogical(x);
+      if (typeof logical === "number" && isFinite(logical)) {
+        var idx = Math.round(logical);
+        if (idx < 0) idx = 0;
+        if (idx > axisTimes.length - 1) idx = axisTimes.length - 1;
+        var resolved = axisTimes[idx];
+        if (isValidChartTime(resolved)) return resolved;
+      }
+    } catch (e) {}
+  }
+  return null;
+}
+if (typeof window !== "undefined") window.snapTimeFromCoordinate = snapTimeFromCoordinate;
+if (typeof globalThis !== "undefined") globalThis.snapTimeFromCoordinate = snapTimeFromCoordinate;
+
+/**
+ * 從 fromTime 起（第一根 time >= fromTime 的 K 棒）到最後一根，右邊再留 rightPad 根空白的邏輯範圍。
+ * bars 須依時間排序。沒有 K 棒時回傳 null；fromTime 晚於最後一根時從最後一根開始。
+ */
+function computeLogicalRangeForTime(bars, fromTime, rightPad) {
+  if (!Array.isArray(bars) || bars.length === 0) return null;
+  var pad = (typeof rightPad === "number" && isFinite(rightPad) && rightPad > 0) ? rightPad : 0;
+  var n = bars.length;
+  var lo = 0, hi = n - 1, idx = n - 1;
+  while (lo <= hi) {
+    var mid = (lo + hi) >> 1;
+    if (bars[mid] && bars[mid].time >= fromTime) { idx = mid; hi = mid - 1; } else { lo = mid + 1; }
+  }
+  return { from: idx, to: n - 1 + pad };
+}
+if (typeof window !== "undefined") window.computeLogicalRangeForTime = computeLogicalRangeForTime;
+if (typeof globalThis !== "undefined") globalThis.computeLogicalRangeForTime = computeLogicalRangeForTime;
+
 function clampAndSetVisibleRange(range) {
-  if (!chart || !currentRawBars || currentRawBars.length === 0) return;
+  var axis = getMainTimeAxis();
+  var n = axis.length;
+  if (!chart || n === 0) return;
   if (range === "ALL") {
-    try { chart.timeScale().fitContent(); } catch (e) {}
+    try {
+      var tsAll = (chart && typeof chart.timeScale === "function") ? chart.timeScale() : null;
+      if (tsAll && typeof tsAll.setVisibleLogicalRange === "function") {
+        tsAll.setVisibleLogicalRange({ from: 0, to: n - 1 + RIGHT_WHITESPACE_BARS });
+      } else if (tsAll && typeof tsAll.fitContent === "function") {
+        tsAll.fitContent();
+      }
+    } catch (e) {
+      try { if (chart && typeof chart.timeScale === "function" && typeof chart.timeScale().fitContent === "function") chart.timeScale().fitContent(); } catch (err) {}
+    }
     return;
   }
-  var lastBar = currentRawBars[currentRawBars.length - 1];
-  var now = lastBar.time;
+  var now = axis[n - 1];
   var from = now;
   if (range === "1D") from = now - 86400;
   else if (range === "5D") from = now - 86400 * 5;
   else if (range === "1M") from = now - 86400 * 30;
   else if (range === "3M") from = now - 86400 * 90;
   else if (range === "6M") from = now - 86400 * 180;
-  else if (range === "YTD") from = now - 86400 * 250;
+  else if (range === "YTD") from = computeYtdStart(now, activeSymbol);
   else if (range === "1Y") from = now - 86400 * 365;
 
-  var earliest = currentRawBars[0].time;
+  var earliest = axis[0];
   if (from < earliest) from = earliest;
   if (from >= now) {
-    try { chart.timeScale().fitContent(); } catch (e) {}
+    resetChartView(chart, n);
     return;
   }
 
+  // Lightweight Charts 4.2.0 的 setVisibleRange / setVisibleLogicalRange 要到下一個畫面才生效，
+  // 設定後立刻 getVisibleLogicalRange 會讀到舊範圍；所以直接從 K 棒算出邏輯範圍，只設定一次。
   try {
-    chart.timeScale().setVisibleRange({ from: from, to: now });
+    var logical = computeLogicalRangeForTime(axis.map(function(t) { return { time: t }; }), from, RIGHT_WHITESPACE_BARS);
+    var tsRange = (chart && typeof chart.timeScale === "function") ? chart.timeScale() : null;
+    if (tsRange && logical && typeof tsRange.setVisibleLogicalRange === "function") {
+      tsRange.setVisibleLogicalRange(logical);
+    } else if (tsRange && typeof tsRange.setVisibleRange === "function") {
+      tsRange.setVisibleRange({ from: from, to: now });
+    }
   } catch (e) {
-    try { chart.timeScale().fitContent(); } catch (err) {}
+    try { if (chart && typeof chart.timeScale === "function" && typeof chart.timeScale().fitContent === "function") chart.timeScale().fitContent(); } catch (err) {}
   }
   if (typeof setPriceScaleMode === "function") {
     setPriceScaleMode(currentPriceScaleMode);
@@ -3602,7 +7177,12 @@ function setRsBenchmark(tag) {
 
   loadBenchmarkHistory(tag).then(function() {
     if (currentRawBars && currentRawBars.length > 0) {
-      renderChartData(currentRawBars);
+      renderChartData(currentRawBars, { keepView: true });
+    }
+    for (var sp = 2; sp <= 4; sp++) {
+      if (typeof renderSubPaneRs === "function" && subCharts[sp] && subCharts[sp].bars) {
+        renderSubPaneRs(sp, subCharts[sp].bars, benchmarkRawBars);
+      }
     }
   });
 }
@@ -3619,8 +7199,18 @@ function closeFundamentalsModalHandler() {
   }
 }
 
+var _fundSeq = 0;
+var _fundAbort = null;
+
 function fetchFundamentals(symbol, refresh) {
   if (!symbol) return;
+  if (_fundAbort) {
+    try { _fundAbort.abort(); } catch (e) {}
+  }
+  var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  _fundAbort = ctrl;
+  var seq = ++_fundSeq;
+
   var tagEl = document.getElementById("fundamentalsSymbolTag");
   var statusEl = document.getElementById("fundamentalsStatus");
   var modelTagEl = document.getElementById("fundamentalsModelTag");
@@ -3637,19 +7227,20 @@ function fetchFundamentals(symbol, refresh) {
   if (aiContentEl) aiContentEl.textContent = "正在透過 AI 投資長模型進行全方位量化與基本面診斷...";
 
   var url = "/api/fundamentals?symbol=" + encodeURIComponent(symbol) + (refresh ? "&refresh=true" : "");
-  fetch(url)
+  fetch(url, ctrl ? { signal: ctrl.signal } : undefined)
     .then(function(res) {
       if (!res.ok) throw new Error("HTTP " + res.status);
       return res.json();
     })
     .then(function(data) {
+      if (seq !== _fundSeq || symbol !== activeSymbol) return;
       var metrics = data.metrics || {};
       if (statusEl) {
         var updateTimeStr = data.updated_at ? new Date(data.updated_at * 1000).toLocaleTimeString() : "";
         statusEl.textContent = (data.cached ? "📦 快取報告" : "⚡ 最新診斷") + (updateTimeStr ? " (" + updateTimeStr + ")" : "");
       }
       if (modelTagEl) {
-        modelTagEl.textContent = data.model_used || "gemini-3.8-flash";
+        modelTagEl.textContent = formatModelSourceLabel(data.model_used || data.model, data.source);
       }
 
       if (h52El) h52El.textContent = metrics.fifty_two_week_high ? formatPrice(metrics.fifty_two_week_high, symbol) : "--";
@@ -3681,6 +7272,8 @@ function fetchFundamentals(symbol, refresh) {
       }
     })
     .catch(function(err) {
+      if (err && err.name === "AbortError") return;
+      if (seq !== _fundSeq) return;
       if (statusEl) statusEl.textContent = "讀取失敗: " + err.message;
       if (aiContentEl) aiContentEl.textContent = "無法取得基本面報告，請確認網路連線或稍後再試。";
     });
@@ -3698,8 +7291,18 @@ function closeAiLensModalHandler() {
   }
 }
 
+var _aiLensSeq = 0;
+var _aiLensAbort = null;
+
 function fetchAiLens(symbol, timeframe, refresh) {
   if (!symbol) return;
+  if (_aiLensAbort) {
+    try { _aiLensAbort.abort(); } catch (e) {}
+  }
+  var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  _aiLensAbort = ctrl;
+  var seq = ++_aiLensSeq;
+
   var sym = symbol;
   var tf = timeframe || activeTimeframe || "1D";
 
@@ -3732,12 +7335,13 @@ function fetchAiLens(symbol, timeframe, refresh) {
   if (humanNoteEl) humanNoteEl.textContent = "生成中...";
 
   var url = "/api/ai-lens?symbol=" + encodeURIComponent(sym) + "&timeframe=" + encodeURIComponent(tf) + (refresh ? "&refresh=true" : "");
-  fetch(url)
+  fetch(url, ctrl ? { signal: ctrl.signal } : undefined)
     .then(function(res) {
       if (!res.ok) throw new Error("HTTP " + res.status);
       return res.json();
     })
     .then(function(data) {
+      if (seq !== _aiLensSeq || sym !== activeSymbol) return;
       var rep = data.report || {};
       var lens = rep.lens || {};
       var quant = lens.quant_metrics || {};
@@ -3748,7 +7352,8 @@ function fetchAiLens(symbol, timeframe, refresh) {
         statusEl.textContent = (data.cached ? "📦 快取快照" : "⚡ 最新分析") + (updateTimeStr ? " (" + updateTimeStr + ")" : "");
       }
       if (modelNoticeEl) {
-        modelNoticeEl.textContent = "Model: " + (rep.model_used || "gemini-3.8-flash");
+        var effectiveSource = data.source || decision.source;
+        modelNoticeEl.textContent = "Model: " + formatModelSourceLabel(rep.model_used || data.model, effectiveSource);
       }
 
       if (biasEl) {
@@ -3807,6 +7412,8 @@ function fetchAiLens(symbol, timeframe, refresh) {
       if (humanNoteEl) humanNoteEl.textContent = decision.human_decision_note || "嚴格遵循停損停利紀律。";
     })
     .catch(function(err) {
+      if (err && err.name === "AbortError") return;
+      if (seq !== _aiLensSeq) return;
       if (statusEl) statusEl.textContent = "讀取失敗: " + err.message;
       if (setupEl) setupEl.textContent = "無法取得 AI Agent Lens 數據，請確認後端服務正常。";
     });
@@ -3816,12 +7423,80 @@ function fetchAiLens(symbol, timeframe, refresh) {
  * Unified State & History Recovery Engine
  * Recovers terminal state and heals candle history gaps.
  */
+/**
+ * 把恢復回來的新 K 棒合併進現有 K 棒（純函式，不修改傳入的陣列）。
+ * 時間相同的取代、比最後一根新的依序加在後面、比最後一根舊的忽略；無效的 K 棒略過。
+ */
+function mergeRecoveryDeltaBars(existingBars, deltaBars) {
+  var result = Array.isArray(existingBars) ? existingBars.slice() : [];
+  if (!Array.isArray(deltaBars) || deltaBars.length === 0) return result;
+  var cleaned = [];
+  for (var i = 0; i < deltaBars.length; i++) {
+    var b = deltaBars[i];
+    if (!b) continue;
+    var t = normalizeBarTime(b.time);
+    var o = safeNum(b.open), h = safeNum(b.high), l = safeNum(b.low), c = safeNum(b.close);
+    if (t <= 0 || !isValidPrice(o) || !isValidPrice(h) || !isValidPrice(l) || !isValidPrice(c)) continue;
+    cleaned.push({ time: t, open: o, high: h, low: l, close: c, volume: Math.max(0, safeNum(b.volume)) });
+  }
+  cleaned.sort(function(a, b) { return a.time - b.time; });
+  for (var j = 0; j < cleaned.length; j++) {
+    var db = cleaned[j];
+    var lastIdx = result.length - 1;
+    if (lastIdx >= 0 && result[lastIdx].time === db.time) {
+      result[lastIdx] = db;
+    } else if (lastIdx < 0 || db.time > result[lastIdx].time) {
+      result.push(db);
+    }
+  }
+  return result;
+}
+
+/**
+ * 重畫主圖但保留使用者的縮放與捲動位置（以距離最右邊的 K 棒數為準，新增的 K 棒會出現在原本的右緣）。
+ * prevLen：重畫前的 K 棒數量；保留當前邏輯範圍與縮放位置。
+ */
+function renderChartDataKeepView(bars, prevLen) {
+  var ts = (chart && typeof chart.timeScale === "function") ? chart.timeScale() : null;
+  var range = null;
+  try {
+    range = (ts && typeof ts.getVisibleLogicalRange === "function") ? ts.getVisibleLogicalRange() : null;
+  } catch (e) {
+    range = null;
+  }
+  var prevTimes = (typeof getSeriesTimeAxis === "function" && candleSeries) ? getSeriesTimeAxis(candleSeries, null) : null;
+  var barsTimeArray = (typeof getSeriesTimeAxis === "function") ? getSeriesTimeAxis(null, bars) : [];
+  var preserved = (range && prevTimes && prevTimes.length > 0 && barsTimeArray && barsTimeArray.length > 0)
+    ? computePreservedLogicalRange(prevTimes, barsTimeArray, range)
+    : null;
+  renderChartData(bars, { keepView: true });
+  if (ts && typeof ts.setVisibleLogicalRange === "function") {
+    if (preserved) {
+      try {
+        ts.setVisibleLogicalRange({ from: preserved.from, to: preserved.to });
+      } catch (e1) {}
+    } else if (range && Number.isFinite(range.from) && Number.isFinite(range.to) && typeof prevLen === "number" && prevLen > 0 && Array.isArray(bars) && bars.length > 0) {
+      var shift = bars.length - prevLen;
+      try {
+        ts.setVisibleLogicalRange({ from: range.from + shift, to: range.to + shift });
+      } catch (e2) {}
+    }
+  }
+}
+
 function recoverTerminalState(options) {
   var opts = options || {};
   var sym = opts.symbol || activeSymbol || "BINANCE:BTCUSDT";
   var tf = opts.timeframe || activeTimeframe || "1D";
-  var activeBars = (sym === activeSymbol && Array.isArray(currentRawBars)) ? currentRawBars : [];
-  var sinceTime = opts.sinceTime || (activeBars.length ? activeBars[activeBars.length - 1].time : null);
+  // 第 7 段：由 seq 缺口觸發的恢復只補 K 棒，不覆蓋自選清單
+  var includeWatchlist = opts.includeWatchlist !== false;
+  var activeBars = (sym === activeSymbol && tf === activeTimeframe && Array.isArray(currentRawBars)) ? currentRawBars : [];
+  var lastLocalTime = activeBars.length ? activeBars[activeBars.length - 1].time : null;
+  var sinceTime = opts.sinceTime || null;
+  if (!sinceTime && typeof lastLocalTime === "number" && lastLocalTime > 1) {
+    // 1m：連最後一根一起要（它可能在斷線期間才收完）；較大週期：只要更新的 K 棒，避免被較舊的快取蓋掉
+    sinceTime = (tf === "1m") ? lastLocalTime - 1 : lastLocalTime;
+  }
 
   var url = "/api/recovery?symbol=" + encodeURIComponent(sym) + "&timeframe=" + encodeURIComponent(tf);
   if (sinceTime) {
@@ -3836,37 +7511,37 @@ function recoverTerminalState(options) {
     .then(function(data) {
       if (!data || data.status !== "ok") return data;
 
-      if (Array.isArray(data.watchlist) && data.watchlist.length > 0) {
+      if (includeWatchlist && Array.isArray(data.watchlist) && data.watchlist.length > 0) {
         symbolsList = data.watchlist;
         renderWatchlist();
       }
 
-      if (Array.isArray(data.bars) && data.bars.length > 0) {
-        if (activeSymbol === sym) {
-          currentRawBars = data.bars;
-          if (currentEngine !== "C") renderChartData(currentRawBars);
-        }
-      } else if (Array.isArray(data.delta_bars) && data.delta_bars.length > 0 && activeSymbol === sym) {
-        if (!Array.isArray(currentRawBars)) currentRawBars = [];
-        for (var i = 0; i < data.delta_bars.length; i++) {
-          var db = data.delta_bars[i];
-          var lastIdx = currentRawBars.length - 1;
-          if (lastIdx >= 0 && currentRawBars[lastIdx].time === db.time) {
-            currentRawBars[lastIdx] = db;
-          } else if (lastIdx < 0 || currentRawBars[lastIdx].time < db.time) {
-            currentRawBars.push(db);
+      // 回應回來時標的或週期已經換了，就不要把這批 K 棒畫上去
+      var stillCurrent = (activeSymbol === sym && activeTimeframe === tf);
+      if (stillCurrent) {
+        var prevLen = Array.isArray(currentRawBars) ? currentRawBars.length : 0;
+        var nextBars = null;
+        if (sinceTime && prevLen > 0) {
+          // 已有 K 棒：只合併新的部分，不整張替換（指標起點與縮放位置不會跳）
+          if (Array.isArray(data.delta_bars) && data.delta_bars.length > 0) {
+            nextBars = mergeRecoveryDeltaBars(currentRawBars, data.delta_bars);
           }
+        } else if (Array.isArray(data.bars) && data.bars.length > 0) {
+          nextBars = data.bars;
         }
-        if (currentEngine !== "C") renderChartData(currentRawBars);
+        if (nextBars) {
+          currentRawBars = nextBars;
+          liveBucketState = null;
+          if (currentEngine !== "C") renderChartDataKeepView(currentRawBars, prevLen);
+        }
       }
 
-      var refTicker = rsBenchmarkTag || "SPY";
-      var isCrypto = /^(BINANCE|COINBASE|BYBIT|OKX):/i.test(sym);
-      var benchSym = refTicker.indexOf(":") !== -1 ? refTicker : (isCrypto ? "BINANCE:BTCUSDT" : "AMEX:" + refTicker);
-      if (indicatorConfig && indicatorConfig.rsLine && activeSymbol === sym) {
+      var benchSym = resolveBenchmarkSymbol(rsBenchmarkTag);
+      if (indicatorConfig && indicatorConfig.rsLine && stillCurrent) {
         fetch("/api/history?symbol=" + encodeURIComponent(benchSym) + "&timeframe=" + encodeURIComponent(tf))
           .then(function(r) { return r.ok ? r.json() : null; })
           .then(function(bData) {
+            if (activeSymbol !== sym || activeTimeframe !== tf) return;
             if (bData && Array.isArray(bData.bars) && bData.bars.length > 0 && typeof updateRsPane === "function") {
               updateRsPane(currentRawBars, bData.bars);
             }
@@ -3884,6 +7559,16 @@ function recoverTerminalState(options) {
     });
 }
 
+// 第 7 段：回到前景時 focus 與 visibilitychange 會同時觸發，2 秒內只恢復一次
+var _focusRecoveryAt = 0;
+function requestFocusRecovery() {
+  if (!activeSymbol) return;
+  var nowMs = Date.now();
+  if (nowMs - _focusRecoveryAt < 2000) return;
+  _focusRecoveryAt = nowMs;
+  recoverTerminalState({ symbol: activeSymbol, timeframe: activeTimeframe, includeWatchlist: false });
+}
+
 // ==========================================================================
 // Institutional Stock Screener Controller (RS + ATR + CANSLIM Engine)
 // ==========================================================================
@@ -3892,65 +7577,286 @@ var screenerModal = null;
 var isScreenerDocked = false;
 var lastScreenerResults = [];
 var lastBenchmarkStatus = { symbol: "SPY", close: 0, regime: "NEUTRAL" };
-var currentScreenerSort = { col: "rs_rating", asc: false };
-
-var activeMinRevGrowth = null;
+var currentScreenerSort = { col: "filter_count", asc: false };
+var activeCustomPresetName = null;
 
 var SCREENER_PRESET_CONFIGS = {
-  stage2_vcp: {
-    min_rs_rating: 80,
-    mansfield_above_zero: true,
+  multi_filter: {
+    min_price: 15.0,
+    min_avg_vol: 500000,
+    min_eps_yoy: 20.0,
+    min_rev_yoy: 20.0,
+    min_roe: 15.0,
+    allow_missing_fundamentals: false,
+    min_volume_ratio: 1.2,
+    min_perf_26w: 10.0,
     stage2_only: true,
     weekly_stage2_only: false,
     power_trend_only: false,
-    atr_squeeze_only: true,
-    max_atr_percentile: 20.0,
+    min_rs_rating: 80,
     max_pct_from_52w_high: 15.0,
+    hide_v6_hard: false,
+    risk_dollar: 500.0,
+  },
+  canslim_standard: {
+    min_price: 15.0,
+    min_avg_vol: 400000,
+    min_eps_yoy: 25.0,
+    min_rev_yoy: 25.0,
+    min_roe: 17.0,
+    allow_missing_fundamentals: false,
+    min_volume_ratio: 1.0,
+    min_perf_26w: 0.0,
+    stage2_only: true,
+    weekly_stage2_only: false,
+    power_trend_only: false,
+    min_rs_rating: 80,
+    max_pct_from_52w_high: 15.0,
+    hide_v6_hard: true,
+    risk_dollar: 500.0,
+  },
+  minervini_sepa: {
+    min_price: 12.0,
+    min_avg_vol: 300000,
+    min_eps_yoy: null,
+    min_rev_yoy: null,
+    min_roe: null,
+    allow_missing_fundamentals: true,
+    min_volume_ratio: 1.2,
+    min_perf_26w: 15.0,
+    stage2_only: true,
+    weekly_stage2_only: false,
+    power_trend_only: false,
+    min_rs_rating: 85,
+    max_pct_from_52w_high: 15.0,
+    hide_v6_hard: false,
+    risk_dollar: 500.0,
+  },
+  weinstein_s2: {
+    min_price: 10.0,
+    min_avg_vol: 500000,
+    min_eps_yoy: null,
+    min_rev_yoy: null,
+    min_roe: null,
+    allow_missing_fundamentals: true,
+    min_volume_ratio: 1.5,
+    min_perf_26w: 5.0,
+    stage2_only: true,
+    weekly_stage2_only: false,
+    power_trend_only: false,
+    min_rs_rating: 70,
+    max_pct_from_52w_high: 25.0,
+    hide_v6_hard: false,
+    risk_dollar: 500.0,
+  },
+  stage2_vcp: {
+    min_price: 12.0,
+    min_avg_vol: 300000,
+    min_eps_yoy: null,
+    min_rev_yoy: null,
+    min_roe: null,
+    allow_missing_fundamentals: true,
     min_volume_ratio: 1.1,
-    min_rev_growth_yoy: null
+    min_perf_26w: 10.0,
+    stage2_only: true,
+    weekly_stage2_only: false,
+    power_trend_only: false,
+    min_rs_rating: 80,
+    max_pct_from_52w_high: 15.0,
+    hide_v6_hard: false,
+    risk_dollar: 500.0,
   },
   rs_leaders: {
-    min_rs_rating: 85,
-    mansfield_above_zero: true,
+    min_price: 12.0,
+    min_avg_vol: 300000,
+    min_eps_yoy: null,
+    min_rev_yoy: null,
+    min_roe: null,
+    allow_missing_fundamentals: true,
+    min_volume_ratio: 1.2,
+    min_perf_26w: 15.0,
     stage2_only: true,
     weekly_stage2_only: false,
     power_trend_only: true,
-    atr_squeeze_only: false,
-    max_atr_percentile: 30.0,
+    min_rs_rating: 85,
     max_pct_from_52w_high: 20.0,
-    min_volume_ratio: 1.2,
-    min_rev_growth_yoy: null
+    hide_v6_hard: false,
+    risk_dollar: 500.0,
   },
   canslim_growth: {
-    min_rs_rating: 75,
-    mansfield_above_zero: true,
+    min_price: 15.0,
+    min_avg_vol: 400000,
+    min_eps_yoy: 20.0,
+    min_rev_yoy: 20.0,
+    min_roe: 15.0,
+    allow_missing_fundamentals: false,
+    min_volume_ratio: 1.0,
+    min_perf_26w: 0.0,
     stage2_only: true,
     weekly_stage2_only: false,
     power_trend_only: false,
-    atr_squeeze_only: false,
-    max_atr_percentile: 30.0,
+    min_rs_rating: 75,
     max_pct_from_52w_high: 20.0,
-    min_volume_ratio: 1.0,
-    min_rev_growth_yoy: 20.0
+    hide_v6_hard: false,
+    risk_dollar: 500.0,
   },
   low_vol_base: {
-    min_rs_rating: 65,
-    mansfield_above_zero: false,
+    min_price: 10.0,
+    min_avg_vol: 200000,
+    min_eps_yoy: null,
+    min_rev_yoy: null,
+    min_roe: null,
+    allow_missing_fundamentals: true,
+    min_volume_ratio: 0.5,
+    min_perf_26w: 0.0,
     stage2_only: false,
     weekly_stage2_only: false,
     power_trend_only: false,
-    atr_squeeze_only: true,
-    max_atr_percentile: 15.0,
+    min_rs_rating: 65,
     max_pct_from_52w_high: 30.0,
-    min_volume_ratio: 0.5,
-    min_rev_growth_yoy: null
+    hide_v6_hard: false,
+    risk_dollar: 500.0,
   }
 };
+
+function getCustomScreenerPresets() {
+  try {
+    if (typeof localStorage !== "undefined") {
+      var raw = localStorage.getItem("tv_custom_screener_presets");
+      if (raw) return JSON.parse(raw);
+    }
+  } catch (e) {}
+  return {};
+}
+
+function renderCustomPresetPills() {
+  var bar = document.getElementById("screenerPresetsBar");
+  if (!bar) return;
+  var existingCustoms = bar.querySelectorAll(".screener-custom-pill");
+  existingCustoms.forEach(function(el) { el.remove(); });
+
+  var actionWrap = bar.querySelector(".screener-custom-presets-actions");
+  var presets = getCustomScreenerPresets();
+  for (var name in presets) {
+    var pill = document.createElement("button");
+    pill.className = "screener-preset-pill screener-custom-pill" + (activeCustomPresetName === name ? " active" : "");
+    pill.setAttribute("data-preset", "custom_" + name);
+    pill.textContent = "⚙️ " + name;
+    (function(pName, pBtn) {
+      pBtn.onclick = function() {
+        applyScreenerPreset("custom_" + pName);
+      };
+    })(name, pill);
+    if (actionWrap) {
+      bar.insertBefore(pill, actionWrap);
+    } else {
+      bar.appendChild(pill);
+    }
+  }
+}
+
+function saveCurrentAsCustomPreset() {
+  var name = prompt(currentLang === "en" ? "Enter custom strategy name:" : "請輸入自訂策略名稱：");
+  if (!name || !name.trim()) return;
+  name = name.trim();
+  var presets = getCustomScreenerPresets();
+
+  var rsInput = document.getElementById("scMinRsRating");
+  var stage2Chk = document.getElementById("scStage2Only");
+  var weeklyStage2Chk = document.getElementById("scWeeklyStage2Only");
+  var powerTrendChk = document.getElementById("scPowerTrendOnly");
+  var maxHighPct = document.getElementById("scMaxPctFromHigh");
+  var minVol = document.getElementById("scMinVolRatio");
+  var minPriceInput = document.getElementById("scMinPrice");
+  var minAvgVolInput = document.getElementById("scMinAvgVol");
+  var minEpsInput = document.getElementById("scMinEpsYoY");
+  var minRevInput = document.getElementById("scMinRevYoY");
+  var minRoeInput = document.getElementById("scMinRoe");
+  var allowMissingChk = document.getElementById("scAllowMissingFundamentals");
+  var minPerf26wInput = document.getElementById("scMinPerf26W");
+  var hideV6Chk = document.getElementById("scHideV6Hard");
+  var riskInput = document.getElementById("scRiskDollar");
+
+  presets[name] = {
+    name: name,
+    min_price: minPriceInput ? parseFloat(minPriceInput.value) : 10,
+    min_avg_vol: minAvgVolInput ? parseInt(minAvgVolInput.value, 10) : 300000,
+    min_eps_yoy: minEpsInput && minEpsInput.value ? parseFloat(minEpsInput.value) : null,
+    min_rev_yoy: minRevInput && minRevInput.value ? parseFloat(minRevInput.value) : null,
+    min_roe: minRoeInput && minRoeInput.value ? parseFloat(minRoeInput.value) : null,
+    allow_missing_fundamentals: allowMissingChk ? allowMissingChk.checked : false,
+    min_volume_ratio: minVol ? parseFloat(minVol.value) : 1.0,
+    min_perf_26w: minPerf26wInput ? parseFloat(minPerf26wInput.value) : 0,
+    stage2_only: stage2Chk ? stage2Chk.checked : true,
+    weekly_stage2_only: weeklyStage2Chk ? weeklyStage2Chk.checked : false,
+    power_trend_only: powerTrendChk ? powerTrendChk.checked : false,
+    min_rs_rating: rsInput ? parseInt(rsInput.value, 10) : 70,
+    max_pct_from_52w_high: maxHighPct ? parseFloat(maxHighPct.value) : 25,
+    hide_v6_hard: hideV6Chk ? hideV6Chk.checked : false,
+    risk_dollar: getRiskDollar(),
+  };
+
+  safeSetStorage("tv_custom_screener_presets", JSON.stringify(presets));
+  renderCustomPresetPills();
+  applyScreenerPreset("custom_" + name);
+}
+
+function deleteCurrentCustomPreset() {
+  if (!activeCustomPresetName) return;
+  var ok = confirm((currentLang === "en" ? "Delete strategy " : "確定要刪除策略 ") + activeCustomPresetName + "？");
+  if (!ok) return;
+  var presets = getCustomScreenerPresets();
+  delete presets[activeCustomPresetName];
+  safeSetStorage("tv_custom_screener_presets", JSON.stringify(presets));
+  activeCustomPresetName = null;
+  renderCustomPresetPills();
+  applyScreenerPreset("multi_filter");
+}
+
+function batchAddTier12ToWatchlist() {
+  if (!lastScreenerResults || lastScreenerResults.length === 0) {
+    alert(currentLang === "en" ? "No screened candidates available." : "目前尚無篩選結果可加入。");
+    return;
+  }
+  var addedCount = 0;
+  lastScreenerResults.forEach(function(item) {
+    if (item.tier === "Tier 1" || item.tier === "Tier 2" || (item.filter_count && item.filter_count >= 3)) {
+      var symId = item.id || (item.exchange ? item.exchange + ":" + item.symbol : "NASDAQ:" + item.symbol);
+      var already = symbolsList.some(function(s) { return s.id === symId || s.symbol === item.symbol; });
+      if (!already) {
+        symbolsList.push({
+          id: symId,
+          pair: item.symbol,
+          symbol: item.symbol,
+          name: item.company_name || item.name || item.symbol,
+          exchange: symId.indexOf(":") !== -1 ? symId.split(":")[0] : "NASDAQ",
+          type: "stock"
+        });
+        addedCount++;
+      }
+      watchlistGroups[symId] = "leaders";
+    }
+  });
+
+  safeSetStorage("tv_symbols_cache", JSON.stringify(symbolsList));
+  safeSetStorage("tv_watchlist_groups", JSON.stringify(watchlistGroups));
+  if (typeof savePreferencesDebounced === "function") savePreferencesDebounced();
+  if (typeof renderWatchlist === "function") renderWatchlist();
+  if (typeof renderScreenerTable === "function") renderScreenerTable(lastScreenerResults);
+
+  var btn = document.getElementById("screenerBatchAddBtn");
+  if (btn) {
+    var oldText = btn.textContent;
+    btn.textContent = currentLang === "en" ? ("✓ Added " + addedCount + " leaders") : ("✓ 已加入 " + addedCount + " 檔領頭羊");
+    setTimeout(function() { btn.textContent = oldText; }, 2500);
+  }
+}
 
 function openScreenerModal() {
   screenerModal = document.getElementById("screenerModal");
   if (!screenerModal) return;
   screenerModal.style.display = "flex";
+  renderCustomPresetPills();
   if (lastScreenerResults.length === 0) {
     runStockScreen();
   }
@@ -3992,29 +7898,52 @@ function toggleScreenerDock() {
 }
 
 function applyScreenerPreset(presetId) {
-  var cfg = SCREENER_PRESET_CONFIGS[presetId];
+  var delBtn = document.getElementById("screenerDeletePresetBtn");
+  var cfg = null;
+  if (presetId.startsWith("custom_")) {
+    var cName = presetId.replace("custom_", "");
+    activeCustomPresetName = cName;
+    var cPresets = getCustomScreenerPresets();
+    cfg = cPresets[cName];
+    if (delBtn) delBtn.style.display = "inline-flex";
+  } else {
+    activeCustomPresetName = null;
+    cfg = SCREENER_PRESET_CONFIGS[presetId];
+    if (delBtn) delBtn.style.display = "none";
+  }
   if (!cfg) return;
 
   var rsInput = document.getElementById("scMinRsRating");
-  var mansfieldChk = document.getElementById("scMansfieldZero");
   var stage2Chk = document.getElementById("scStage2Only");
   var weeklyStage2Chk = document.getElementById("scWeeklyStage2Only");
   var powerTrendChk = document.getElementById("scPowerTrendOnly");
-  var squeezeChk = document.getElementById("scAtrSqueezeOnly");
-  var maxAtrPct = document.getElementById("scMaxAtrPercentile");
   var maxHighPct = document.getElementById("scMaxPctFromHigh");
   var minVol = document.getElementById("scMinVolRatio");
+  var minPriceInput = document.getElementById("scMinPrice");
+  var minAvgVolInput = document.getElementById("scMinAvgVol");
+  var minEpsInput = document.getElementById("scMinEpsYoY");
+  var minRevInput = document.getElementById("scMinRevYoY");
+  var minRoeInput = document.getElementById("scMinRoe");
+  var allowMissingChk = document.getElementById("scAllowMissingFundamentals");
+  var minPerf26wInput = document.getElementById("scMinPerf26W");
+  var hideV6Chk = document.getElementById("scHideV6Hard");
+  var riskInput = document.getElementById("scRiskDollar");
 
-  if (rsInput) rsInput.value = cfg.min_rs_rating;
-  if (mansfieldChk) mansfieldChk.checked = Boolean(cfg.mansfield_above_zero);
-  if (stage2Chk) stage2Chk.checked = Boolean(cfg.stage2_only);
-  if (weeklyStage2Chk) weeklyStage2Chk.checked = Boolean(cfg.weekly_stage2_only);
-  if (powerTrendChk) powerTrendChk.checked = Boolean(cfg.power_trend_only);
-  if (squeezeChk) squeezeChk.checked = Boolean(cfg.atr_squeeze_only);
-  if (maxAtrPct) maxAtrPct.value = cfg.max_atr_percentile;
-  if (maxHighPct) maxHighPct.value = cfg.max_pct_from_52w_high;
-  if (minVol) minVol.value = cfg.min_volume_ratio;
-  activeMinRevGrowth = (cfg.min_rev_growth_yoy !== undefined && cfg.min_rev_growth_yoy !== null) ? cfg.min_rev_growth_yoy : null;
+  if (minPriceInput && cfg.min_price !== undefined) minPriceInput.value = cfg.min_price;
+  if (minAvgVolInput && cfg.min_avg_vol !== undefined) minAvgVolInput.value = cfg.min_avg_vol;
+  if (minEpsInput && cfg.min_eps_yoy !== undefined) minEpsInput.value = cfg.min_eps_yoy !== null ? cfg.min_eps_yoy : 0;
+  if (minRevInput && cfg.min_rev_yoy !== undefined) minRevInput.value = cfg.min_rev_yoy !== null ? cfg.min_rev_yoy : 0;
+  if (minRoeInput && cfg.min_roe !== undefined) minRoeInput.value = cfg.min_roe !== null ? cfg.min_roe : 0;
+  if (allowMissingChk && cfg.allow_missing_fundamentals !== undefined) allowMissingChk.checked = Boolean(cfg.allow_missing_fundamentals);
+  if (minVol && cfg.min_volume_ratio !== undefined) minVol.value = cfg.min_volume_ratio;
+  if (minPerf26wInput && cfg.min_perf_26w !== undefined) minPerf26wInput.value = cfg.min_perf_26w;
+  if (stage2Chk && cfg.stage2_only !== undefined) stage2Chk.checked = Boolean(cfg.stage2_only);
+  if (weeklyStage2Chk && cfg.weekly_stage2_only !== undefined) weeklyStage2Chk.checked = Boolean(cfg.weekly_stage2_only);
+  if (powerTrendChk && cfg.power_trend_only !== undefined) powerTrendChk.checked = Boolean(cfg.power_trend_only);
+  if (rsInput && cfg.min_rs_rating !== undefined) rsInput.value = cfg.min_rs_rating;
+  if (maxHighPct && cfg.max_pct_from_52w_high !== undefined) maxHighPct.value = cfg.max_pct_from_52w_high;
+  if (hideV6Chk && cfg.hide_v6_hard !== undefined) hideV6Chk.checked = Boolean(cfg.hide_v6_hard);
+  // 風險金額屬於個人帳戶設定，載入策略預設時不覆蓋
 
   var pills = document.querySelectorAll(".screener-preset-pill");
   pills.forEach(function(p) {
@@ -4022,9 +7951,9 @@ function applyScreenerPreset(presetId) {
     else p.classList.remove("active");
   });
 
-  if (presetId !== "custom") {
+  if (presetId !== "custom" && !presetId.startsWith("custom_")) {
     var universeSel = document.getElementById("screenerUniverseSelect");
-    if (universeSel) universeSel.value = "us_momentum";
+    if (universeSel) universeSel.value = "all_us";
     var sWrap = document.getElementById("screenerSearchWrap");
     if (sWrap) sWrap.style.display = "none";
     var cIn = document.getElementById("screenerCustomInput");
@@ -4034,12 +7963,28 @@ function applyScreenerPreset(presetId) {
   runStockScreen();
 }
 
+var _scanSeq = 0;
+var _scanAbort = null;
+
 function runStockScreen() {
   var scanBtn = document.getElementById("runScreenerScanBtn");
   var statsBadge = document.getElementById("screenerStatsBadge");
   var benchBadge = document.getElementById("screenerBenchBadge");
   var emptyState = document.getElementById("screenerEmptyState");
   var tableBody = document.getElementById("screenerTableBody");
+
+  if (_scanAbort) {
+    try {
+      _scanAbort.abort();
+    } catch (e) {}
+  }
+  var ctrl = (_scanAbort = new AbortController());
+  var seq = ++_scanSeq;
+  var timer = setTimeout(function() {
+    try {
+      ctrl.abort();
+    } catch (e) {}
+  }, 25000);
 
   if (scanBtn) {
     scanBtn.disabled = true;
@@ -4048,11 +7993,12 @@ function runStockScreen() {
   if (statsBadge) statsBadge.textContent = "正在量化計算 (Semaphore=8)...";
 
   var universeSel = document.getElementById("screenerUniverseSelect");
-  var universeType = universeSel ? universeSel.value : "us_momentum";
+  var universeType = universeSel ? universeSel.value : "all_us";
   var customInput = document.getElementById("screenerCustomInput");
   var customSyms = (universeType === "custom" && customInput) ? customInput.value : "";
 
   if (universeType === "custom" && (!customSyms || !customSyms.trim())) {
+    clearTimeout(timer);
     if (scanBtn) {
       scanBtn.disabled = false;
       scanBtn.textContent = "🚀 開始篩選";
@@ -4066,33 +8012,45 @@ function runStockScreen() {
   }
 
   var rsInput = document.getElementById("scMinRsRating");
-  var mansfieldChk = document.getElementById("scMansfieldZero");
   var stage2Chk = document.getElementById("scStage2Only");
   var weeklyStage2Chk = document.getElementById("scWeeklyStage2Only");
   var powerTrendChk = document.getElementById("scPowerTrendOnly");
-  var squeezeChk = document.getElementById("scAtrSqueezeOnly");
-  var maxAtrPct = document.getElementById("scMaxAtrPercentile");
   var maxHighPct = document.getElementById("scMaxPctFromHigh");
   var minVol = document.getElementById("scMinVolRatio");
+  var minPriceInput = document.getElementById("scMinPrice");
+  var minAvgVolInput = document.getElementById("scMinAvgVol");
+  var minEpsInput = document.getElementById("scMinEpsYoY");
+  var minRevInput = document.getElementById("scMinRevYoY");
+  var minRoeInput = document.getElementById("scMinRoe");
+  var allowMissingChk = document.getElementById("scAllowMissingFundamentals");
+  var minPerf26wInput = document.getElementById("scMinPerf26W");
+  var hideV6Chk = document.getElementById("scHideV6Hard");
   var riskInput = document.getElementById("scRiskDollar");
 
-  var riskDollar = riskInput ? (parseFloat(riskInput.value) || 500.0) : 500.0;
+  var riskDollar = getRiskDollar();
+  var minEpsVal = minEpsInput ? parseFloat(minEpsInput.value) : null;
+  var minRevVal = minRevInput ? parseFloat(minRevInput.value) : null;
+  var minRoeVal = minRoeInput ? parseFloat(minRoeInput.value) : null;
 
   var payload = {
     universe: universeType,
     custom_symbols: customSyms,
     risk_dollar: riskDollar,
     criteria: {
-      min_rs_rating: rsInput ? parseInt(rsInput.value, 10) : 80,
-      mansfield_above_zero: mansfieldChk ? mansfieldChk.checked : true,
+      min_price: minPriceInput ? parseFloat(minPriceInput.value) : 10.0,
+      min_avg_vol: minAvgVolInput ? parseInt(minAvgVolInput.value, 10) : 300000,
+      min_eps_yoy: minEpsVal && minEpsVal > 0 ? minEpsVal : null,
+      min_rev_yoy: minRevVal && minRevVal > 0 ? minRevVal : null,
+      min_roe: minRoeVal && minRoeVal > 0 ? minRoeVal : null,
+      allow_missing_fundamentals: allowMissingChk ? allowMissingChk.checked : false,
+      min_volume_ratio: minVol ? parseFloat(minVol.value) : 1.0,
+      min_perf_26w: minPerf26wInput ? parseFloat(minPerf26wInput.value) : 0.0,
       stage2_only: stage2Chk ? stage2Chk.checked : true,
       weekly_stage2_only: weeklyStage2Chk ? weeklyStage2Chk.checked : false,
       power_trend_only: powerTrendChk ? powerTrendChk.checked : false,
-      atr_squeeze_only: squeezeChk ? squeezeChk.checked : true,
-      max_atr_percentile: maxAtrPct ? parseFloat(maxAtrPct.value) : 20.0,
-      max_pct_from_52w_high: maxHighPct ? parseFloat(maxHighPct.value) : 15.0,
-      min_volume_ratio: minVol ? parseFloat(minVol.value) : 1.1,
-      min_rev_growth_yoy: activeMinRevGrowth,
+      min_rs_rating: rsInput ? parseInt(rsInput.value, 10) : 70,
+      max_pct_from_52w_high: maxHighPct ? parseFloat(maxHighPct.value) : 25.0,
+      hide_v6_hard: hideV6Chk ? hideV6Chk.checked : false,
       risk_dollar: riskDollar,
       stop_atr_mult: 2.0,
       mansfield_length: 252
@@ -4102,13 +8060,19 @@ function runStockScreen() {
   fetch("/api/screener/scan", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal: ctrl.signal
   })
   .then(function(res) {
-    if (!res.ok) throw new Error("HTTP " + res.status);
+    if (!res.ok) {
+      return res.text().then(function(t) {
+        throw new Error("HTTP " + res.status + " " + (t || "").slice(0, 100));
+      });
+    }
     return res.json();
   })
   .then(function(data) {
+    if (seq !== _scanSeq) return;
     lastScreenerResults = data.items || [];
     lastBenchmarkStatus = data.benchmark_status || { symbol: "SPY", close: 0, regime: "NEUTRAL" };
 
@@ -4126,14 +8090,18 @@ function runStockScreen() {
     renderScreenerTable(lastScreenerResults);
   })
   .catch(function(err) {
+    if (err.name === "AbortError" || seq !== _scanSeq) return;
     if (statsBadge) statsBadge.textContent = "篩選異常: " + err.message;
     if (tableBody) tableBody.innerHTML = "";
     if (emptyState) emptyState.style.display = "flex";
   })
   .finally(function() {
-    if (scanBtn) {
-      scanBtn.disabled = false;
-      scanBtn.textContent = "🚀 開始篩選";
+    clearTimeout(timer);
+    if (seq === _scanSeq) {
+      if (scanBtn) {
+        scanBtn.disabled = false;
+        scanBtn.textContent = "🚀 開始篩選";
+      }
     }
   });
 }
@@ -4151,141 +8119,147 @@ function renderScreenerTable(items) {
   if (emptyState) emptyState.style.display = "none";
 
   items.forEach(function(item) {
+    var symId = item.id || (item.exchange ? item.exchange + ":" + item.symbol : "NASDAQ:" + item.symbol);
     var tr = document.createElement("tr");
-    tr.className = "screener-row" + (item.id === activeSymbol ? " active-row" : "");
-    tr.setAttribute("data-symbol", item.id);
+    tr.className = "screener-row" + (symId === activeSymbol ? " active-row" : "");
+    tr.setAttribute("data-symbol", symId);
 
     var chgClass = (item.change_pct || 0) >= 0 ? "val-green" : "val-red";
     var chgSign = (item.change_pct || 0) >= 0 ? "+" : "";
-    var mRsClass = (item.mansfield_rs || 0) >= 0 ? "val-green" : "val-red";
-    var mRsSign = (item.mansfield_rs || 0) >= 0 ? "+" : "";
 
-    var regimeBadgeClass = "regime-neutral";
-    if (item.trend_regime === "STAGE_2_STRONG_UPTREND") regimeBadgeClass = "regime-stage2";
-    else if (item.trend_regime === "STAGE_2_UPTREND_PULLBACK") regimeBadgeClass = "regime-pullback";
-    else if (item.trend_regime === "STAGE_4_DOWNTREND") regimeBadgeClass = "regime-downtrend";
-
-    var squeezeBadge = item.is_squeeze ? '<span class="badge-squeeze-tag">SQUEEZE</span>' : '';
-    var breakoutBadge = item.is_breakout ? '<span class="badge-breakout-tag">BREAKOUT</span>' : '';
-    var powerTrendBadge = item.power_trend ? '<span class="badge-breakout-tag" style="background:rgba(56,189,248,0.15);border-color:#38bdf8;color:#38bdf8;">POWER</span>' : '';
-
-    var isAlreadyInWl = symbolsList.some(function(s) { return s.id === item.id; });
+    var isAlreadyInWl = symbolsList.some(function(s) { return s.id === symId || s.symbol === item.symbol; });
     var btnText = isAlreadyInWl ? "✓ 已加入" : "+ 自選";
     var btnClass = "btn-table-add" + (isAlreadyInWl ? " added" : "");
 
-    // 1. Symbol
+    // 1. Tier / Frameworks
+    var tdTier = document.createElement("td");
+    var tierName = item.tier || "Watch";
+    var tierCls = "tier-watch";
+    if (tierName === "Tier 1") tierCls = "tier-1";
+    else if (tierName === "Tier 2") tierCls = "tier-2";
+    else if (tierName === "Tier 3") tierCls = "tier-3";
+    var tierBadge = document.createElement("span");
+    tierBadge.className = "tier-badge " + tierCls;
+    tierBadge.textContent = tierName;
+    tdTier.appendChild(tierBadge);
+    if (Array.isArray(item.frameworks)) {
+      item.frameworks.forEach(function(fw) {
+        var fwTag = document.createElement("span");
+        fwTag.className = "fw-tag";
+        fwTag.textContent = fw;
+        tdTier.appendChild(fwTag);
+      });
+    }
+    tr.appendChild(tdTier);
+
+    // 2. Symbol
     var tdSym = document.createElement("td");
     tdSym.className = "sym-col";
     tdSym.textContent = item.symbol || "";
     tr.appendChild(tdSym);
 
-    // 2. Name
+    // 3. Name
     var tdName = document.createElement("td");
     tdName.className = "name-col";
-    tdName.title = item.name || "";
-    tdName.textContent = item.name || "";
+    var compName = item.company_name || item.name || item.symbol || "";
+    tdName.title = compName;
+    tdName.textContent = compName;
     tr.appendChild(tdName);
 
-    // 3. Price
+    // 4. Close Price
     var tdPrice = document.createElement("td");
     tdPrice.style.fontFamily = "var(--font-mono, monospace)";
     tdPrice.style.fontWeight = "600";
     tdPrice.textContent = item.close ? "$" + item.close.toFixed(2) : "--";
     tr.appendChild(tdPrice);
 
-    // 4. 24H Change%
+    // 5. 24H Change%
     var tdChg = document.createElement("td");
     tdChg.className = chgClass;
     tdChg.textContent = chgSign + (item.change_pct !== undefined ? item.change_pct.toFixed(2) : "0.00") + "%";
     tr.appendChild(tdChg);
 
-    // 5. Trend Regime
-    var tdRegime = document.createElement("td");
-    var regimeSpan = document.createElement("span");
-    regimeSpan.className = "badge-regime " + regimeBadgeClass;
-    regimeSpan.textContent = item.trend_regime || "NEUTRAL";
-    tdRegime.appendChild(regimeSpan);
-    if (item.power_trend) {
-      tdRegime.appendChild(document.createTextNode(" "));
-      var powerSpan = document.createElement("span");
-      powerSpan.className = "badge-breakout-tag";
-      powerSpan.style.background = "rgba(56,189,248,0.15)";
-      powerSpan.style.borderColor = "#38bdf8";
-      powerSpan.style.color = "#38bdf8";
-      powerSpan.textContent = "POWER";
-      tdRegime.appendChild(powerSpan);
-    }
-    if (item.weekly_stage2) {
-      tdRegime.appendChild(document.createTextNode(" "));
-      var wSpan = document.createElement("span");
-      wSpan.className = "badge-breakout-tag";
-      wSpan.style.background = "rgba(16,185,129,0.15)";
-      wSpan.style.borderColor = "#10b981";
-      wSpan.style.color = "#10b981";
-      wSpan.textContent = "1W S2";
-      tdRegime.appendChild(wSpan);
-    }
-    tr.appendChild(tdRegime);
-
-    // 6. Mansfield RS
-    var tdMRs = document.createElement("td");
-    tdMRs.className = mRsClass;
-    tdMRs.textContent = mRsSign + (item.mansfield_rs !== undefined ? item.mansfield_rs.toFixed(2) : "--");
-    tr.appendChild(tdMRs);
+    // 6. Streak (Consecutive days >= 2 filters)
+    var tdStreak = document.createElement("td");
+    var sDays = item.streak_days || 0;
+    var streakBadge = document.createElement("span");
+    streakBadge.className = "streak-badge" + (sDays >= 3 ? " streak-hot" : "");
+    streakBadge.textContent = sDays + "d";
+    tdStreak.appendChild(streakBadge);
+    var delta = item.filter_delta || "NEW";
+    var deltaSpan = document.createElement("span");
+    var deltaCls = "delta-tag";
+    if (delta === "NEW") deltaCls += " new";
+    else if (delta.startsWith("+")) deltaCls += " pos";
+    else if (delta.startsWith("-")) deltaCls += " neg";
+    deltaSpan.className = deltaCls;
+    deltaSpan.textContent = " (" + delta + ")";
+    tdStreak.appendChild(deltaSpan);
+    tr.appendChild(tdStreak);
 
     // 7. RS Rating
-    var tdRsRating = document.createElement("td");
-    var rsRatingSpan = document.createElement("span");
-    if (item.rs_rating >= 80) rsRatingSpan.className = "badge-rs-high";
-    rsRatingSpan.textContent = item.rs_rating !== undefined ? String(item.rs_rating) : "--";
-    tdRsRating.appendChild(rsRatingSpan);
-    tr.appendChild(tdRsRating);
+    var tdRs = document.createElement("td");
+    var rsSpan = document.createElement("span");
+    if ((item.rs_rating || 0) >= 80) rsSpan.className = "badge-rs-high";
+    rsSpan.textContent = item.rs_rating !== undefined ? String(item.rs_rating) : "--";
+    tdRs.appendChild(rsSpan);
+    tr.appendChild(tdRs);
 
-    // 8. ATR% & Badges
-    var tdAtr = document.createElement("td");
-    var atrText = (item.atr_pct !== undefined ? item.atr_pct.toFixed(2) + "%" : "--") +
-      " (" + (item.atr_percentile !== undefined ? item.atr_percentile.toFixed(0) + "%" : "--") + ")";
-    tdAtr.textContent = atrText;
-    if (item.is_squeeze) {
-      tdAtr.appendChild(document.createTextNode(" "));
-      var sqSpan = document.createElement("span");
-      sqSpan.className = "badge-squeeze-tag";
-      sqSpan.textContent = "SQUEEZE";
-      tdAtr.appendChild(sqSpan);
-    }
-    if (item.is_breakout) {
-      tdAtr.appendChild(document.createTextNode(" "));
-      var boSpan = document.createElement("span");
-      boSpan.className = "badge-breakout-tag";
-      boSpan.textContent = "BREAKOUT";
-      tdAtr.appendChild(boSpan);
-    }
-    tr.appendChild(tdAtr);
+    // 8. EPS / Revenue YoY
+    var tdFund = document.createElement("td");
+    tdFund.style.fontFamily = "var(--font-mono, monospace)";
+    var epsStr = item.eps_yoy !== undefined && item.eps_yoy !== null && item.eps_yoy !== 0 ? item.eps_yoy.toFixed(1) + "%" : "--";
+    var revStr = item.rev_yoy !== undefined && item.rev_yoy !== null && item.rev_yoy !== 0 ? item.rev_yoy.toFixed(1) + "%" : "--";
+    tdFund.textContent = epsStr + " / " + revStr;
+    tr.appendChild(tdFund);
 
-    // 9. 52W High Pct
+    // 9. V6 Earnings Risk
+    var tdV6 = document.createElement("td");
+    var v6Risk = item.v6_risk || "Clear";
+    var v6Tag = document.createElement("span");
+    var v6Cls = "v6-clear";
+    if (v6Risk === "V6-Hard") v6Cls = "v6-hard";
+    else if (v6Risk === "V6-Soft") v6Cls = "v6-soft";
+    v6Tag.className = "v6-tag " + v6Cls;
+    v6Tag.textContent = v6Risk;
+    if (item.earnings_release_next_date) {
+      v6Tag.title = "Next: " + item.earnings_release_next_date;
+    }
+    tdV6.appendChild(v6Tag);
+    tr.appendChild(tdV6);
+
+    // 10. 52W High Pct
     var tdPct52w = document.createElement("td");
     tdPct52w.style.fontFamily = "var(--font-mono, monospace)";
     tdPct52w.textContent = item.pct_from_52w_high !== undefined ? item.pct_from_52w_high.toFixed(2) + "%" : "--";
     tr.appendChild(tdPct52w);
 
-    // 10. Volume Ratio 50D
+    // 11. 50D Volume Ratio
     var tdVolRatio = document.createElement("td");
     tdVolRatio.style.fontFamily = "var(--font-mono, monospace)";
     tdVolRatio.textContent = item.volume_ratio_50 !== undefined ? item.volume_ratio_50.toFixed(2) + "x" : "--";
     tr.appendChild(tdVolRatio);
 
-    // 11. Suggested Shares
+    // 12. Suggested Shares
     var tdShares = document.createElement("td");
     tdShares.className = "shares-col cell-suggested-shares";
     tdShares.setAttribute("data-atr", String(item.atr || 0));
-    tdShares.textContent = (item.suggested_shares || 0) + " 股";
+    tdShares.setAttribute("data-close", String(item.close || 0));
+    var initialShares = computeAtrPositionSizing({
+      close: item.close,
+      atr: item.atr,
+      stopMult: 2.0,
+      riskDollar: getRiskDollar(),
+      timeframe: "1D"
+    }).shares;
+    tdShares.textContent = initialShares + " 股";
     tr.appendChild(tdShares);
 
-    // 12. Actions
+    // 13. Actions
     var tdAction = document.createElement("td");
     var addBtn = document.createElement("button");
     addBtn.className = btnClass;
-    addBtn.setAttribute("data-id", item.id);
+    addBtn.setAttribute("data-id", symId);
     addBtn.textContent = btnText;
     tdAction.appendChild(addBtn);
     tr.appendChild(tdAction);
@@ -4295,22 +8269,38 @@ function renderScreenerTable(items) {
         r.classList.remove("active-row");
       });
       tr.classList.add("active-row");
-      switchSymbol(item.id);
+      switchSymbol(symId);
     };
 
-    var addBtn = tr.querySelector(".btn-table-add");
     if (addBtn && !isAlreadyInWl) {
       addBtn.onclick = function(e) {
         e.stopPropagation();
-        selectAndSubscribeSymbol({
-          id: item.id,
+        var origText = addBtn.textContent;
+        addBtn.disabled = true;
+        addBtn.textContent = "加入中...";
+        var symToSub = {
+          id: symId,
           pair: item.symbol,
-          name: item.name,
-          exchange: item.id.indexOf(":") !== -1 ? item.id.split(":")[0] : "NASDAQ",
+          name: compName,
+          exchange: symId.indexOf(":") !== -1 ? symId.split(":")[0] : "NASDAQ",
           type: "stock"
+        };
+        selectAndSubscribeSymbol(symToSub, function(success, data, err) {
+          addBtn.disabled = false;
+          if (success) {
+            watchlistGroups[symId] = "leaders";
+            safeSetStorage("tv_watchlist_groups", JSON.stringify(watchlistGroups));
+            addBtn.textContent = "✓ 已加入";
+            addBtn.classList.add("added");
+            if (typeof renderWatchlist === "function") renderWatchlist();
+          } else {
+            addBtn.textContent = "加入失敗";
+            addBtn.classList.remove("added");
+            setTimeout(function() {
+              addBtn.textContent = origText;
+            }, 2000);
+          }
         });
-        addBtn.textContent = "✓ 已加入";
-        addBtn.classList.add("added");
       };
     }
 
@@ -4320,8 +8310,13 @@ function renderScreenerTable(items) {
 
 function onRiskDollarChanged() {
   var riskInput = document.getElementById("scRiskDollar");
-  var risk = riskInput ? (parseFloat(riskInput.value) || 500.0) : 500.0;
-  if (risk <= 0) risk = 500.0;
+  if (riskInput) {
+    var parsedRisk = parseRiskDollar(riskInput.value);
+    if (parsedRisk !== null) {
+      setRiskDollar(parsedRisk);
+    }
+  }
+  var risk = getRiskDollar();
 
   var th = document.getElementById("thSuggestedShares");
   if (th) {
@@ -4335,22 +8330,32 @@ function onRiskDollarChanged() {
   if (Array.isArray(lastScreenerResults)) {
     for (var i = 0; i < lastScreenerResults.length; i++) {
       var it = lastScreenerResults[i];
-      var stopDist = (it.atr && it.atr > 0) ? (it.atr * 2.0) : 0;
-      it.suggested_shares = stopDist > 0 ? Math.floor(risk / stopDist) : 0;
+      it.suggested_shares = computeAtrPositionSizing({
+        close: it.close,
+        atr: it.atr,
+        stopMult: 2.0,
+        riskDollar: risk,
+        timeframe: "1D"
+      }).shares;
     }
   }
 
   var cells = document.querySelectorAll(".cell-suggested-shares");
   cells.forEach(function(td) {
-    var atr = parseFloat(td.getAttribute("data-atr"));
-    if (atr && atr > 0) {
-      var stopDist = atr * 2.0;
-      var shares = Math.floor(risk / stopDist);
-      td.textContent = shares + " 股";
-    } else {
-      td.textContent = "0 股";
-    }
+    var closeVal = parseFloat(td.getAttribute("data-close"));
+    var atrVal = parseFloat(td.getAttribute("data-atr"));
+    var shares = computeAtrPositionSizing({
+      close: closeVal,
+      atr: atrVal,
+      stopMult: 2.0,
+      riskDollar: risk,
+      timeframe: "1D"
+    }).shares;
+    td.textContent = shares + " 股";
   });
+
+  renderPositionSizingBadge();
+  if (typeof scheduleDrawingRender === "function") scheduleDrawingRender();
 }
 
 function sortScreenerTable(col) {
@@ -4390,7 +8395,7 @@ function fetchScreenerAiSummary() {
   if (aiBtn) aiBtn.disabled = true;
 
   var riskInput = document.getElementById("scRiskDollar");
-  var currentRisk = riskInput ? (parseFloat(riskInput.value) || 500.0) : 500.0;
+  var currentRisk = getRiskDollar();
 
   fetch("/api/screener/ai-summary", {
     method: "POST",
@@ -4564,7 +8569,11 @@ function escapeCsvField(val) {
     return isFinite(val) ? String(val) : '""';
   }
   var str = String(val);
-  if (/^[=+\-@\t\r]/.test(str)) str = "'" + str;
+  if (/^[=+\-@\t\r]/.test(str)) {
+    if (!/^[-+]?\d+(\.\d+)?%?$/.test(str)) {
+      str = "'" + str;
+    }
+  }
   return '"' + str.replace(/"/g, '""') + '"';
 }
 
@@ -4599,33 +8608,35 @@ function exportScreenerCsv() {
   rows.push(headers.map(escapeCsvField).join(","));
 
   lastScreenerResults.forEach(function(item) {
-    var c = item.close ? Number(item.close) : 0.0;
-    var stopDist = (item.stop_distance !== undefined && item.stop_distance !== null)
+    var c = (item.close !== undefined && item.close !== null && !isNaN(Number(item.close))) ? Number(item.close) : null;
+    var stopDist = (item.stop_distance !== undefined && item.stop_distance !== null && !isNaN(Number(item.stop_distance)))
       ? Number(item.stop_distance)
-      : ((item.atr && item.atr > 0) ? Number(item.atr) * 2.0 : 0.0);
-    var stopPrice = Math.max(0.0, c - stopDist);
-    var shares = item.suggested_shares ? Number(item.suggested_shares) : 0;
-    var posVal = shares * c;
+      : ((item.atr !== undefined && item.atr !== null && !isNaN(Number(item.atr)) && Number(item.atr) > 0) ? Number(item.atr) * 2.0 : null);
+    var stopPrice = (c !== null && stopDist !== null) ? Math.max(0.0, c - stopDist) : null;
+    var shares = (item.suggested_shares !== undefined && item.suggested_shares !== null && !isNaN(Number(item.suggested_shares)))
+      ? Number(item.suggested_shares)
+      : null;
+    var posVal = (shares !== null && c !== null) ? (shares * c) : null;
 
     var row = [
-      escapeCsvField(item.symbol || ""),
-      escapeCsvField(item.name || ""),
-      escapeCsvField(item.sector || "Equity"),
-      escapeCsvField(Number(c.toFixed(2))),
-      escapeCsvField((item.change_pct !== undefined ? item.change_pct.toFixed(2) : "0.00") + "%"),
-      escapeCsvField(item.trend_regime || "NEUTRAL"),
-      escapeCsvField(item.weekly_stage2 ? "TRUE" : "FALSE"),
-      escapeCsvField(Number((item.mansfield_rs !== undefined ? item.mansfield_rs : 0.0).toFixed(2))),
-      escapeCsvField(Number(item.rs_rating !== undefined ? item.rs_rating : 0)),
-      escapeCsvField((item.atr_pct !== undefined ? item.atr_pct.toFixed(2) : "0.00") + "%"),
-      escapeCsvField((item.atr_percentile !== undefined ? item.atr_percentile.toFixed(1) : "50.0") + "%"),
-      escapeCsvField(item.is_squeeze ? "YES" : "NO"),
-      escapeCsvField(Number(stopDist.toFixed(2))),
-      escapeCsvField(Number(stopPrice.toFixed(2))),
+      escapeCsvField(item.symbol || null),
+      escapeCsvField(item.name || null),
+      escapeCsvField(item.sector || null),
+      escapeCsvField(c !== null ? Number(c.toFixed(2)) : null),
+      escapeCsvField((item.change_pct !== undefined && item.change_pct !== null && !isNaN(Number(item.change_pct))) ? item.change_pct.toFixed(2) + "%" : null),
+      escapeCsvField(item.trend_regime || null),
+      escapeCsvField(item.weekly_stage2 !== undefined && item.weekly_stage2 !== null ? (item.weekly_stage2 ? "TRUE" : "FALSE") : null),
+      escapeCsvField((item.mansfield_rs !== undefined && item.mansfield_rs !== null && !isNaN(Number(item.mansfield_rs))) ? Number(item.mansfield_rs.toFixed(2)) : null),
+      escapeCsvField((item.rs_rating !== undefined && item.rs_rating !== null && !isNaN(Number(item.rs_rating))) ? Number(item.rs_rating) : null),
+      escapeCsvField((item.atr_pct !== undefined && item.atr_pct !== null && !isNaN(Number(item.atr_pct))) ? item.atr_pct.toFixed(2) + "%" : null),
+      escapeCsvField((item.atr_percentile !== undefined && item.atr_percentile !== null && !isNaN(Number(item.atr_percentile))) ? item.atr_percentile.toFixed(1) + "%" : null),
+      escapeCsvField(item.is_squeeze !== undefined && item.is_squeeze !== null ? (item.is_squeeze ? "YES" : "NO") : null),
+      escapeCsvField(stopDist !== null ? Number(stopDist.toFixed(2)) : null),
+      escapeCsvField(stopPrice !== null ? Number(stopPrice.toFixed(2)) : null),
       escapeCsvField(shares),
-      escapeCsvField(Number(posVal.toFixed(2))),
-      escapeCsvField((item.volume_ratio_50 !== undefined ? item.volume_ratio_50.toFixed(2) : "1.00") + "x"),
-      escapeCsvField(item.revenue_yoy || "N/A")
+      escapeCsvField(posVal !== null ? Number(posVal.toFixed(2)) : null),
+      escapeCsvField((item.volume_ratio_50 !== undefined && item.volume_ratio_50 !== null && !isNaN(Number(item.volume_ratio_50))) ? item.volume_ratio_50.toFixed(2) + "x" : null),
+      escapeCsvField(item.revenue_yoy || null)
     ];
     rows.push(row.join(","));
   });
@@ -4642,6 +8653,306 @@ function exportScreenerCsv() {
   URL.revokeObjectURL(url);
 
   showScreenerFeedback("✅ 已匯出 18 欄量化 CSV 報表");
+}
+
+// ==========================================================================
+// Stock Theme Heatmap Controller & Renderer
+// ==========================================================================
+var heatmapReqSeq = 0;
+
+function openHeatmapModal(forceRefresh) {
+  var hmModal = document.getElementById("heatmapModal");
+  if (!hmModal) return;
+  hmModal.style.display = "flex";
+
+  var nowMs = Date.now();
+  var isCacheFresh = heatmapDataCache &&
+    heatmapDataCache.universe === activeHeatmapUniverse &&
+    (nowMs - (heatmapDataCache._cachedAt || 0) < 60000);
+
+  if (!forceRefresh && isCacheFresh) {
+    renderHeatmap();
+    return;
+  }
+  fetchHeatmapData(Boolean(forceRefresh));
+}
+
+function closeHeatmapModalHandler() {
+  var hmModal = document.getElementById("heatmapModal");
+  if (hmModal) {
+    hmModal.style.display = "none";
+  }
+}
+
+function toggleHeatmapModal() {
+  var hmModal = document.getElementById("heatmapModal");
+  if (!hmModal) return;
+  if (hmModal.style.display === "none" || !hmModal.style.display) {
+    openHeatmapModal(false);
+  } else {
+    closeHeatmapModalHandler();
+  }
+}
+
+function getHeatmapColor(item, metric) {
+  var isLight = currentTheme === "light";
+  if (item && item.no_data) {
+    return isLight ? "#94a3b8" : "#475569";
+  }
+  if (metric === "rs") {
+    var rs = typeof item.rs_rating === "number" ? item.rs_rating : 50;
+    if (rs >= 90) return isLight ? "#1d4ed8" : "#2563eb";
+    if (rs >= 80) return isLight ? "#0d9488" : "#059669";
+    if (rs >= 65) return isLight ? "#475569" : "#334155";
+    if (rs >= 50) return isLight ? "#b45309" : "#d97706";
+    return isLight ? "#b91c1c" : "#dc2626";
+  } else {
+    var chg = typeof item.change_pct === "number" ? item.change_pct : 0;
+    if (chg >= 3.0) return isLight ? "#15803d" : "#007a3d";
+    if (chg >= 1.5) return isLight ? "#16a34a" : "#0f9d58";
+    if (chg > 0.0) return isLight ? "#22c55e" : "#1e7e34";
+    if (chg === 0.0) return isLight ? "#64748b" : "#334155";
+    if (chg > -1.5) return isLight ? "#f87171" : "#b91c1c";
+    if (chg > -3.0) return isLight ? "#ef4444" : "#dc2626";
+    return isLight ? "#b91c1c" : "#7f1d1d";
+  }
+}
+
+function fetchHeatmapData(refresh) {
+  var currentSeq = ++heatmapReqSeq;
+  isHeatmapLoading = true;
+
+  var loadingEl = document.getElementById("heatmapLoading");
+  var gridEl = document.getElementById("heatmapGrid");
+  var emptyEl = document.getElementById("heatmapEmptyState");
+
+  if (loadingEl) loadingEl.style.display = "flex";
+  if (gridEl) gridEl.style.display = "none";
+  if (emptyEl) emptyEl.style.display = "none";
+
+  var url = "/api/heatmap?universe=" + encodeURIComponent(activeHeatmapUniverse) + (refresh ? "&refresh=true" : "");
+  fetch(url)
+    .then(function(res) {
+      if (currentSeq !== heatmapReqSeq) return null;
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    })
+    .then(function(data) {
+      if (currentSeq !== heatmapReqSeq || !data) return;
+      isHeatmapLoading = false;
+      data._cachedAt = Date.now();
+      heatmapDataCache = data;
+      renderHeatmap();
+    })
+    .catch(function(err) {
+      if (currentSeq !== heatmapReqSeq) return;
+      isHeatmapLoading = false;
+      if (loadingEl) loadingEl.style.display = "none";
+      if (emptyEl) {
+        emptyEl.style.display = "flex";
+        var titleEl = document.getElementById("heatmapEmptyTitle");
+        var dict = i18n[currentLang] || i18n.en;
+        if (titleEl) titleEl.textContent = (dict.heatmapEmpty || "No theme data") + " (" + (err.message || "Network Error") + ")";
+      }
+    });
+}
+
+function renderHeatmap() {
+  var loadingEl = document.getElementById("heatmapLoading");
+  var gridEl = document.getElementById("heatmapGrid");
+  var emptyEl = document.getElementById("heatmapEmptyState");
+
+  if (loadingEl) loadingEl.style.display = "none";
+
+  if (!heatmapDataCache || !Array.isArray(heatmapDataCache.themes) || heatmapDataCache.themes.length === 0) {
+    if (gridEl) gridEl.style.display = "none";
+    if (emptyEl) emptyEl.style.display = "flex";
+    return;
+  }
+
+  if (emptyEl) emptyEl.style.display = "none";
+  if (gridEl) {
+    gridEl.style.display = "grid";
+    gridEl.innerHTML = "";
+  } else {
+    return;
+  }
+
+  var data = heatmapDataCache;
+  var benchBadge = document.getElementById("heatmapBenchBadge");
+  if (benchBadge && data.benchmark) {
+    var bChg = typeof data.benchmark.change_pct === "number" ? data.benchmark.change_pct : 0;
+    var timeStr = "";
+    if (data.updated_at) {
+      try {
+        var dt = new Date(data.updated_at);
+        var nyParts = new Intl.DateTimeFormat("en-US", {
+          timeZone: "America/New_York",
+          year: "numeric", month: "2-digit", day: "2-digit",
+          hour: "2-digit", minute: "2-digit", hour12: false
+        }).formatToParts(dt);
+        var p = {};
+        for (var pi = 0; pi < nyParts.length; pi++) {
+          p[nyParts[pi].type] = nyParts[pi].value;
+        }
+        if (p.year && p.month && p.day && p.hour && p.minute) {
+          timeStr = " (" + p.year + "-" + p.month + "-" + p.day + " " + p.hour + ":" + p.minute + " ET)";
+        }
+      } catch (e) {
+        timeStr = " (" + String(data.updated_at).slice(0, 16) + ")";
+      }
+    }
+    benchBadge.textContent = "SPY: " + (bChg >= 0 ? "+" : "") + bChg.toFixed(2) + "%" + timeStr;
+    benchBadge.style.color = bChg >= 0 ? "#10b981" : "#ef4444";
+  }
+
+  var themeGroups = data.themes.slice();
+  if (activeHeatmapSort === "rs") {
+    themeGroups.sort(function(a, b) {
+      var rsa = typeof a.avg_rs_rating === "number" ? a.avg_rs_rating : 0;
+      var rsb = typeof b.avg_rs_rating === "number" ? b.avg_rs_rating : 0;
+      return rsb - rsa;
+    });
+  } else {
+    themeGroups.sort(function(a, b) {
+      var cha = typeof a.avg_change_pct === "number" ? a.avg_change_pct : 0;
+      var chb = typeof b.avg_change_pct === "number" ? b.avg_change_pct : 0;
+      return chb - cha;
+    });
+  }
+
+  for (var ti = 0; ti < themeGroups.length; ti++) {
+    var theme = themeGroups[ti];
+    if (!theme || !Array.isArray(theme.items) || theme.items.length === 0) continue;
+
+    var card = document.createElement("div");
+    card.className = "heatmap-card";
+
+    var header = document.createElement("div");
+    header.className = "heatmap-card-header";
+
+    var titleEl = document.createElement("div");
+    titleEl.className = "theme-card-title";
+    var themeName = currentLang === "zh" ? (theme.name_zh || theme.name_en || theme.id) : (theme.name_en || theme.name_zh || theme.id);
+    titleEl.textContent = themeName + " (" + theme.items.length + ")";
+
+    var metricsEl = document.createElement("div");
+    metricsEl.className = "theme-card-metrics";
+
+    var avgEl = document.createElement("span");
+    avgEl.className = "theme-metric-avg";
+    if (activeHeatmapMetric === "rs") {
+      var rVal = typeof theme.avg_rs_rating === "number" ? theme.avg_rs_rating : 50;
+      avgEl.textContent = "RS " + rVal.toFixed(1);
+      var isLight = currentTheme === "light";
+      avgEl.style.color = rVal >= 80 ? (isLight ? "#0284c7" : "#38bdf8") : (rVal >= 60 ? "var(--text-main)" : (isLight ? "#d97706" : "#f59e0b"));
+    } else {
+      var cVal = typeof theme.avg_change_pct === "number" ? theme.avg_change_pct : 0;
+      avgEl.textContent = (cVal >= 0 ? "+" : "") + cVal.toFixed(2) + "%";
+      avgEl.style.color = cVal >= 0 ? "#10b981" : "#ef4444";
+    }
+    metricsEl.appendChild(avgEl);
+
+    if (theme.advancing !== undefined && theme.total !== undefined) {
+      var ratioEl = document.createElement("span");
+      ratioEl.className = "theme-metric-ratio";
+      ratioEl.textContent = theme.advancing + "/" + theme.total + " ↗";
+      metricsEl.appendChild(ratioEl);
+    }
+
+    header.appendChild(titleEl);
+    header.appendChild(metricsEl);
+    card.appendChild(header);
+
+    var body = document.createElement("div");
+    body.className = "theme-card-body";
+
+    var items = theme.items.slice();
+    if (activeHeatmapSort === "rs") {
+      items.sort(function(a, b) {
+        var ra = typeof a.rs_rating === "number" ? a.rs_rating : 0;
+        var rb = typeof b.rs_rating === "number" ? b.rs_rating : 0;
+        return rb - ra;
+      });
+    } else {
+      items.sort(function(a, b) {
+        var ca = typeof a.change_pct === "number" ? a.change_pct : 0;
+        var cb = typeof b.change_pct === "number" ? b.change_pct : 0;
+        return cb - ca;
+      });
+    }
+
+    for (var ii = 0; ii < items.length; ii++) {
+      var item = items[ii];
+      var box = document.createElement("div");
+      box.className = "heatmap-item-box";
+
+      var volRatio = (typeof item.volume_ratio_50 === "number" && isFinite(item.volume_ratio_50)) ? item.volume_ratio_50 : 1.0;
+      var flexGrow = Math.max(0.85, Math.min(2.2, volRatio));
+      box.style.flexGrow = flexGrow.toFixed(2);
+      box.style.backgroundColor = getHeatmapColor(item, activeHeatmapMetric);
+
+      var symDiv = document.createElement("div");
+      symDiv.className = "hb-symbol";
+      symDiv.textContent = item.symbol || item.id;
+      if (item.stage2) {
+        var star = document.createElement("span");
+        star.style.fontSize = "9px";
+        star.style.color = "#facc15";
+        star.style.marginLeft = "3px";
+        star.title = "Stage 2 Momentum";
+        star.textContent = "★";
+        symDiv.appendChild(star);
+      }
+      box.appendChild(symDiv);
+
+      var bottomDiv = document.createElement("div");
+      bottomDiv.className = "hb-bottom";
+
+      var valSpan = document.createElement("span");
+      valSpan.className = "hb-value";
+      if (item.no_data) {
+        valSpan.textContent = currentLang === "zh" ? "無資料" : "No Data";
+      } else if (activeHeatmapMetric === "rs") {
+        valSpan.textContent = "RS " + (item.rs_rating !== undefined ? item.rs_rating : "--");
+      } else {
+        var cp = typeof item.change_pct === "number" ? item.change_pct : 0;
+        valSpan.textContent = (cp >= 0 ? "+" : "") + cp.toFixed(2) + "%";
+      }
+      bottomDiv.appendChild(valSpan);
+
+      var volSpan = document.createElement("span");
+      volSpan.className = "hb-vol";
+      volSpan.textContent = volRatio.toFixed(1) + "x";
+      bottomDiv.appendChild(volSpan);
+
+      box.appendChild(bottomDiv);
+
+      var tooltipLines = [
+        item.symbol + (item.name ? " (" + item.name + ")" : ""),
+        "Price: $" + (typeof item.close === "number" ? item.close.toFixed(2) : "--"),
+        "1D Change: " + (item.change_pct >= 0 ? "+" : "") + (item.change_pct !== undefined ? item.change_pct.toFixed(2) + "%" : "--"),
+        "RS Rating: " + (item.rs_rating !== undefined ? item.rs_rating : "--"),
+        "50D Vol Ratio: " + volRatio.toFixed(2) + "x",
+        "Stage 2: " + (item.stage2 ? (currentLang === "zh" ? "是 (Stage 2 成長動能)" : "Yes (Stage 2 Momentum)") : (currentLang === "zh" ? "否" : "No"))
+      ];
+      box.setAttribute("title", tooltipLines.join("\n"));
+
+      (function(targetItem) {
+        box.onclick = function() {
+          closeHeatmapModalHandler();
+          if (typeof switchSymbol === "function") {
+            switchSymbol(targetItem.id || targetItem.symbol);
+          }
+        };
+      })(item);
+
+      body.appendChild(box);
+    }
+
+    card.appendChild(body);
+    gridEl.appendChild(card);
+  }
 }
 
 function syncIndicatorCheckboxes() {
@@ -4864,6 +9175,7 @@ function parseAndApplyPineScript() {
 }
 
 function initEventListeners() {
+  startDrawingCoordLoop();
   if (openSearchBtn) openSearchBtn.onclick = openSearch;
   if (addSymbolBtn) addSymbolBtn.onclick = openSearch;
   if (closeSearchModal) closeSearchModal.onclick = closeSearch;
@@ -4919,6 +9231,89 @@ function initEventListeners() {
     };
   }
 
+  // Stock Theme Heatmap Event Listeners
+  if (heatmapBtn) {
+    heatmapBtn.onclick = function() {
+      toggleHeatmapModal();
+    };
+  }
+  if (closeHeatmapModal) {
+    closeHeatmapModal.onclick = function() {
+      closeHeatmapModalHandler();
+    };
+  }
+  if (closeHeatmapFooterBtn) {
+    closeHeatmapFooterBtn.onclick = function() {
+      closeHeatmapModalHandler();
+    };
+  }
+  if (heatmapRefreshBtn) {
+    heatmapRefreshBtn.onclick = function() {
+      openHeatmapModal(true);
+    };
+  }
+  if (heatmapModal) {
+    heatmapModal.onclick = function(e) {
+      if (e.target === heatmapModal) {
+        closeHeatmapModalHandler();
+      }
+    };
+  }
+
+  var univBtns = document.querySelectorAll ? document.querySelectorAll("#heatmapUniverseGroup .heatmap-pill-btn") : [];
+  for (var ubi = 0; ubi < univBtns.length; ubi++) {
+    (function(btn) {
+      btn.onclick = function() {
+        var u = btn.getAttribute("data-universe");
+        if (!u || u === activeHeatmapUniverse) return;
+        activeHeatmapUniverse = u;
+        for (var j = 0; j < univBtns.length; j++) {
+          univBtns[j].classList.toggle("active", univBtns[j] === btn);
+        }
+        var loadingEl = document.getElementById("heatmapLoading");
+        var gridEl = document.getElementById("heatmapGrid");
+        var emptyEl = document.getElementById("heatmapEmptyState");
+        if (gridEl) {
+          gridEl.innerHTML = "";
+          gridEl.style.display = "none";
+        }
+        if (emptyEl) emptyEl.style.display = "none";
+        if (loadingEl) loadingEl.style.display = "flex";
+        openHeatmapModal(false);
+      };
+    })(univBtns[ubi]);
+  }
+
+  var metricBtns = document.querySelectorAll ? document.querySelectorAll("#heatmapMetricGroup .heatmap-pill-btn") : [];
+  for (var mbi = 0; mbi < metricBtns.length; mbi++) {
+    (function(btn) {
+      btn.onclick = function() {
+        var m = btn.getAttribute("data-metric");
+        if (!m || m === activeHeatmapMetric) return;
+        activeHeatmapMetric = m;
+        for (var j = 0; j < metricBtns.length; j++) {
+          metricBtns[j].classList.toggle("active", metricBtns[j] === btn);
+        }
+        renderHeatmap();
+      };
+    })(metricBtns[mbi]);
+  }
+
+  var sortBtns = document.querySelectorAll ? document.querySelectorAll("#heatmapSortGroup .heatmap-pill-btn") : [];
+  for (var sbi = 0; sbi < sortBtns.length; sbi++) {
+    (function(btn) {
+      btn.onclick = function() {
+        var s = btn.getAttribute("data-sort");
+        if (!s || s === activeHeatmapSort) return;
+        activeHeatmapSort = s;
+        for (var j = 0; j < sortBtns.length; j++) {
+          sortBtns[j].classList.toggle("active", sortBtns[j] === btn);
+        }
+        renderHeatmap();
+      };
+    })(sortBtns[sbi]);
+  }
+
   // Stock Screener Event Listeners
   var scBtn = document.getElementById("screenerBtn");
   if (scBtn) scBtn.onclick = openScreenerModal;
@@ -4934,6 +9329,15 @@ function initEventListeners() {
 
   var runScanBtn = document.getElementById("runScreenerScanBtn");
   if (runScanBtn) runScanBtn.onclick = runStockScreen;
+
+  var scBatchAddBtn = document.getElementById("screenerBatchAddBtn");
+  if (scBatchAddBtn) scBatchAddBtn.onclick = batchAddTier12ToWatchlist;
+
+  var scSavePresetBtn = document.getElementById("screenerSavePresetBtn");
+  if (scSavePresetBtn) scSavePresetBtn.onclick = saveCurrentAsCustomPreset;
+
+  var scDelPresetBtn = document.getElementById("screenerDeletePresetBtn");
+  if (scDelPresetBtn) scDelPresetBtn.onclick = deleteCurrentCustomPreset;
 
   var scAiBtn = document.getElementById("screenerAiBtn");
   if (scAiBtn) scAiBtn.onclick = fetchScreenerAiSummary;
@@ -4954,7 +9358,14 @@ function initEventListeners() {
   if (scExportCsvBtn) scExportCsvBtn.onclick = exportScreenerCsv;
 
   var scRiskIn = document.getElementById("scRiskDollar");
-  if (scRiskIn) scRiskIn.oninput = onRiskDollarChanged;
+  if (scRiskIn) {
+    var savedRiskDollar = parseRiskDollar(safeGetStorage("tv_risk_dollar", ""));
+    if (savedRiskDollar !== null) {
+      scRiskIn.value = String(savedRiskDollar);
+    }
+    scRiskIn.oninput = onRiskDollarChanged;
+    onRiskDollarChanged();
+  }
 
   var uSel = document.getElementById("screenerUniverseSelect");
   if (uSel) {
@@ -4969,6 +9380,7 @@ function initEventListeners() {
   }
 
   var screenerAcTimer = null;
+  var screenerSearchSeq = 0;
   var screenerCustomIn = document.getElementById("screenerCustomInput");
   var screenerAcDropdown = document.getElementById("screenerAutocompleteDropdown");
   var screenerClearBtn = document.getElementById("screenerSearchClearBtn");
@@ -4994,9 +9406,15 @@ function initEventListeners() {
       }
 
       screenerAcTimer = setTimeout(function() {
+        var curSeq = ++screenerSearchSeq;
         fetch("/api/symbols/search?q=" + encodeURIComponent(currentTerm))
-          .then(function(res) { return res.json(); })
+          .then(function(res) {
+            if (curSeq !== screenerSearchSeq) return null;
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            return res.json();
+          })
           .then(function(data) {
+            if (curSeq !== screenerSearchSeq || !data) return;
             var results = data.results || [];
             if (results.length === 0) {
               screenerAcDropdown.style.display = "none";
@@ -5035,8 +9453,15 @@ function initEventListeners() {
             });
             screenerAcDropdown.style.display = "block";
           })
-          .catch(function() {
-            screenerAcDropdown.style.display = "none";
+          .catch(function(e) {
+            if (curSeq !== screenerSearchSeq) return;
+            screenerAcDropdown.innerHTML = "";
+            var errItem = document.createElement("div");
+            errItem.className = "screener-ac-item error";
+            errItem.style.color = "#ef5350";
+            errItem.textContent = "搜尋失敗";
+            screenerAcDropdown.appendChild(errItem);
+            screenerAcDropdown.style.display = "block";
           });
       }, 150);
     };
@@ -5093,26 +9518,29 @@ function initEventListeners() {
   }
 
   var _tfBuf = "", _tfTimer = null;
-  function _addQuickPriceLine(isAlert) {
-    if (!candleSeries || !window.LightweightCharts) return;
+  _addQuickPriceLine = function(isAlert) {
+    var lw = window.LightweightCharts || (typeof LightweightCharts !== "undefined" ? LightweightCharts : null);
+    if (!candleSeries || !lw) return;
     var p = (typeof lastCrosshairPrice === "number" && isFinite(lastCrosshairPrice)) ? lastCrosshairPrice : (latestBarData ? latestBarData.close : null);
     if (p === null) return;
     var line = candleSeries.createPriceLine({
       price: p,
       color: isAlert ? "#f59e0b" : "#3b82f6",
       lineWidth: 1,
-      lineStyle: isAlert ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Dashed,
+      lineStyle: isAlert ? lw.LineStyle.Dotted : lw.LineStyle.Dashed,
       axisLabelVisible: true,
-      title: isAlert ? "ALERT" : "LVL"
+      title: isAlert ? "ALERT (未啟用提醒)" : "LVL"
     });
     tvPriceLineHandles.push(line);
-  }
-  var btnMagnet = document.getElementById("btnMagnet");
-  if (btnMagnet) {
-    btnMagnet.onclick = function() {
-      magnetMode = !magnetMode;
-      btnMagnet.classList.toggle("active", magnetMode);
-    };
+    if (activeSymbol) {
+      try {
+        var existing = safeGetStorage("tv_price_lines_" + activeSymbol, null);
+        var list = existing ? JSON.parse(existing) : [];
+        if (!Array.isArray(list)) list = [];
+        list.push({ price: p, isAlert: Boolean(isAlert) });
+        safeSetStorage("tv_price_lines_" + activeSymbol, JSON.stringify(list));
+      } catch (e) {}
+    }
   }
   var chartLegendEl = document.getElementById("chartLegend");
   if (chartLegendEl) {
@@ -5129,6 +9557,15 @@ function initEventListeners() {
   }
   window.addEventListener("keydown", function(e) {
     var k = e.key.toLowerCase();
+    var code = e.code || "";
+    var isKeyS = (k === "s" || code === "KeyS");
+    var isKeyL = (k === "l" || code === "KeyL");
+    var isKeyP = (k === "p" || code === "KeyP");
+    var isKeyR = (k === "r" || code === "KeyR");
+    var isKeyH = (k === "h" || code === "KeyH");
+    var isKeyA = (k === "a" || code === "KeyA");
+    var isKeyM = (k === "m" || code === "KeyM");
+
     if ((e.metaKey || e.ctrlKey) && k === "k") {
       e.preventDefault(); openSearch();
     } else if (e.key === "Escape") {
@@ -5137,35 +9574,49 @@ function initEventListeners() {
       if (fundamentalsModal) fundamentalsModal.style.display = "none";
       if (aiLensModal) aiLensModal.style.display = "none";
       closeScreenerModal(); closeChatModal();
-      if (currentDrawTool !== "cursor" || drawingInProgress) {
-        currentDrawTool = "cursor";
-        drawingInProgress = null;
-        var allDrawBtns = document.querySelectorAll ? document.querySelectorAll(".draw-tool-btn[data-tool]:not(.draw-tool-toggle)") : [];
-        for (var dti = 0; dti < allDrawBtns.length; dti++) {
-          allDrawBtns[dti].classList.toggle("active", allDrawBtns[dti].getAttribute("data-tool") === "cursor");
-        }
-        var dwc = document.getElementById("drawingCanvas");
-        if (dwc) dwc.classList.remove("drawing-active");
-        if (typeof renderDrawingCanvas === "function") renderDrawingCanvas();
-      }
+      closeHeatmapModalHandler();
+      closeRrEditModal();
+      resetDrawToolToCursor();
+      if (typeof renderDrawingCanvas === "function") renderDrawingCanvas();
       updateCrosshairLegend(latestBarData);
-    } else if ((e.altKey && k === "s") || ((e.metaKey || e.ctrlKey) && e.shiftKey && k === "s")) {
+    } else if ((e.altKey && isKeyS) || ((e.metaKey || e.ctrlKey) && e.shiftKey && isKeyS)) {
       e.preventDefault(); toggleScreenerModal();
-    } else if (e.altKey && k === "l") {
+    } else if (e.altKey && isKeyL) {
       e.preventDefault(); setPriceScaleMode(currentPriceScaleMode === "log" ? "normal" : "log");
-    } else if (e.altKey && k === "p") {
+    } else if (e.altKey && isKeyP) {
       e.preventDefault(); setPriceScaleMode(currentPriceScaleMode === "percent" ? "normal" : "percent");
-    } else if (e.altKey && k === "r") {
-      e.preventDefault(); setAutoScale(true); if (chart) chart.timeScale().fitContent();
-    } else if (e.altKey && k === "h") {
+    } else if (e.altKey && isKeyR) {
+      e.preventDefault();
+      setAutoScale(true);
+      resetChartView(chart, getMainTimeAxis().length);
+    } else if (e.altKey && isKeyH) {
       e.preventDefault(); _addQuickPriceLine(false);
-    } else if (e.altKey && k === "a") {
+    } else if (e.altKey && isKeyA) {
       e.preventDefault(); _addQuickPriceLine(true);
+    } else if ((e.altKey && isKeyM) || ((e.metaKey || e.ctrlKey) && e.shiftKey && isKeyM)) {
+      e.preventDefault(); toggleHeatmapModal();
     } else if (!e.metaKey && !e.ctrlKey && !e.altKey) {
       var tag = e.target && e.target.tagName;
-      var modalOpen = (searchModal && searchModal.style.display === "flex") || (indicatorModal && indicatorModal.style.display === "flex");
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || modalOpen) return;
-      if (e.key === "/") {
+      var isContentEditable = Boolean(e.target && (e.target.isContentEditable || (typeof e.target.getAttribute === "function" && e.target.getAttribute("contenteditable") === "true")));
+      var avwapModalEl = document.getElementById("avwapSettingsModal");
+      var heatmapModalEl = document.getElementById("heatmapModal");
+      var rrEditModalEl = document.getElementById("rrEditModal");
+      var modalOpen = (searchModal && searchModal.style.display !== "none" && searchModal.style.display !== "") ||
+                      (indicatorModal && indicatorModal.style.display !== "none" && indicatorModal.style.display !== "") ||
+                      (fundamentalsModal && fundamentalsModal.style.display !== "none" && fundamentalsModal.style.display !== "") ||
+                      (aiLensModal && aiLensModal.style.display !== "none" && aiLensModal.style.display !== "") ||
+                      (screenerModal && screenerModal.style.display !== "none" && screenerModal.style.display !== "") ||
+                      (avwapModalEl && avwapModalEl.style.display !== "none" && avwapModalEl.style.display !== "") ||
+                      (heatmapModalEl && heatmapModalEl.style.display !== "none" && heatmapModalEl.style.display !== "") ||
+                      (rrEditModalEl && rrEditModalEl.style.display !== "none" && rrEditModalEl.style.display !== "");
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || isContentEditable || modalOpen) return;
+      if (e.key === " " || e.key === "Spacebar" || e.code === "Space" || e.key === "ArrowDown") {
+        e.preventDefault();
+        navigateWatchlist(1);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        navigateWatchlist(-1);
+      } else if (e.key === "/") {
         e.preventDefault(); if (typeof syncIndicatorCheckboxes === "function") syncIndicatorCheckboxes(); if (indicatorModal) indicatorModal.style.display = "flex";
       } else if (/^[0-9]$/.test(e.key) || (_tfBuf && (k === "d" || k === "w"))) {
         _tfBuf += e.key.toUpperCase(); clearTimeout(_tfTimer); _tfTimer = setTimeout(function() { _tfBuf = ""; }, 900);
@@ -5306,6 +9757,7 @@ function initEventListeners() {
   window.addEventListener("resize", resizeDrawingCanvas);
 
   renderDrawingCanvas = function() {
+    if (!Array.isArray(drawings)) drawings = [];
     if (!candlestickSeries && candleSeries) candlestickSeries = candleSeries;
     if (!drawingCanvas || !chart || !candlestickSeries) return;
     var ctx = drawingCanvas.getContext("2d");
@@ -5328,7 +9780,7 @@ function initEventListeners() {
       var firstOnScreenIdx = -1;
       for (var avi = 0; avi < currentAvwapData.avwap.length; avi++) {
         var aItem = currentAvwapData.avwap[avi];
-        var aX = timeScale.timeToCoordinate(aItem.time);
+        var aX = safeTimeToCoordinate(timeScale, aItem.time);
         var aYVwap = candlestickSeries.priceToCoordinate(aItem.value);
         var aYUp = aItem.upper !== undefined ? candlestickSeries.priceToCoordinate(aItem.upper) : aYVwap;
         var aYLo = aItem.lower !== undefined ? candlestickSeries.priceToCoordinate(aItem.lower) : aYVwap;
@@ -5420,7 +9872,7 @@ function initEventListeners() {
 
         // 4. Anchor Badge Marker
         if (avwapConfig.showAnchorLbl && currentAvwapData.anchorBar) {
-          var rawMarkX = timeScale.timeToCoordinate(currentAvwapData.anchorBar.time);
+          var rawMarkX = safeTimeToCoordinate(timeScale, currentAvwapData.anchorBar.time);
           var markY = candlestickSeries.priceToCoordinate(currentAvwapData.anchorBar.price);
           if (markY !== null && !isNaN(markY)) {
             var markX = (rawMarkX !== null && !isNaN(rawMarkX)) ? Math.max(28, rawMarkX) : 28;
@@ -5436,12 +9888,13 @@ function initEventListeners() {
             var bHeight = 18;
             var bLeft = markX - bWidth / 2;
             var bTop = markY + 14;
-            ctx.fillStyle = "rgba(30, 34, 45, 0.95)";
+            var canvasPalette = getChartThemePalette();
+            ctx.fillStyle = canvasPalette.anchorBg;
             ctx.fillRect(bLeft, bTop, bWidth, bHeight);
             ctx.strokeStyle = "#787b86";
             ctx.strokeRect(bLeft, bTop, bWidth, bHeight);
 
-            ctx.fillStyle = "#ffffff";
+            ctx.fillStyle = canvasPalette.anchorText;
             ctx.font = "bold 10px -apple-system, BlinkMacSystemFont, sans-serif";
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
@@ -5454,150 +9907,200 @@ function initEventListeners() {
 
     for (var i = 0; i < drawings.length; i++) {
       var d = drawings[i];
-      if (d.type === "hline") {
-        var y = candlestickSeries.priceToCoordinate(d.price);
-        if (y !== null && !isNaN(y)) {
-          ctx.strokeStyle = d.color || "#3b82f6";
-          ctx.lineWidth = 1.5;
-          ctx.setLineDash([4, 4]);
-          ctx.beginPath();
-          ctx.moveTo(0, y);
-          ctx.lineTo(drawingCanvas.width, y);
-          ctx.stroke();
-          ctx.setLineDash([]);
+      if (!d || typeof d !== "object") continue;
+      try {
+        if (d.type === "hline") {
+          var y = candlestickSeries.priceToCoordinate(d.price);
+          if (y !== null && !isNaN(y)) {
+            ctx.strokeStyle = d.color || "#3b82f6";
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(drawingCanvas.width, y);
+            ctx.stroke();
+            ctx.setLineDash([]);
 
-          ctx.fillStyle = d.color || "#3b82f6";
-          ctx.font = "11px Inter, system-ui, sans-serif";
-          ctx.fillText(d.price.toFixed(2), drawingCanvas.width - 60, y - 4);
+            ctx.fillStyle = d.color || "#3b82f6";
+            ctx.font = "11px Inter, system-ui, sans-serif";
+            ctx.fillText(canonicalFormatPrice(d.price), drawingCanvas.width - 60, y - 4);
+          }
+        } else if (d.type === "trendline") {
+          var x1 = safeTimeToCoordinate(timeScale, d.time1);
+          var y1 = candlestickSeries.priceToCoordinate(d.price1);
+          var x2 = safeTimeToCoordinate(timeScale, d.time2);
+          var y2 = candlestickSeries.priceToCoordinate(d.price2);
+          if (x1 !== null && y1 !== null && x2 !== null && y2 !== null) {
+            ctx.strokeStyle = "#eab308";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+
+            ctx.fillStyle = "#eab308";
+            ctx.beginPath();
+            ctx.arc(x1, y1, 4, 0, Math.PI * 2);
+            ctx.arc(x2, y2, 4, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        } else if (d.type === "risk-reward") {
+          var xCenter = d.time ? safeTimeToCoordinate(timeScale, d.time) : drawingCanvas.width * 0.5;
+          if (xCenter === null || isNaN(xCenter)) xCenter = drawingCanvas.width * 0.5;
+          var boxWidth = Math.min(260, drawingCanvas.width * 0.45);
+          var left = Math.max(10, xCenter);
+          var right = left + boxWidth;
+
+          var yEntry = candlestickSeries.priceToCoordinate(d.entryPrice);
+          var yTarget = candlestickSeries.priceToCoordinate(d.targetPrice);
+          var yStop = candlestickSeries.priceToCoordinate(d.stopPrice);
+
+          if (yEntry !== null && yTarget !== null && yStop !== null) {
+            var targetTop = Math.min(yTarget, yEntry);
+            var targetHeight = Math.max(2, Math.abs(yTarget - yEntry));
+            ctx.fillStyle = "rgba(34, 197, 94, 0.08)";
+            ctx.fillRect(left, targetTop, boxWidth, targetHeight);
+            ctx.strokeStyle = "#22c55e";
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(left, targetTop, boxWidth, targetHeight);
+
+            var stopTop = Math.min(yStop, yEntry);
+            var stopHeight = Math.max(2, Math.abs(yStop - yEntry));
+            ctx.fillStyle = "rgba(239, 68, 68, 0.08)";
+            ctx.fillRect(left, stopTop, boxWidth, stopHeight);
+            ctx.strokeStyle = "#ef4444";
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(left, stopTop, boxWidth, stopHeight);
+
+            ctx.strokeStyle = "#3b82f6";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(left - 10, yEntry);
+            ctx.lineTo(right + 10, yEntry);
+            ctx.stroke();
+
+            d.targetHandleY = yTarget;
+            d.stopHandleY = yStop;
+            d.targetTop = targetTop;
+            d.targetHeight = targetHeight;
+            d.stopTop = stopTop;
+            d.stopHeight = stopHeight;
+            d.boxLeft = left;
+            d.boxRight = right;
+
+            d.closeBtnX = Math.max(20, Math.min(drawingCanvas.width - 20, right - 14));
+            d.closeBtnY = Math.max(20, Math.min(drawingCanvas.height - 20, targetTop + 14));
+            ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+            ctx.beginPath();
+            ctx.arc(d.closeBtnX, d.closeBtnY, 9, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "bold 10px sans-serif";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "alphabetic";
+            ctx.fillText("✕", d.closeBtnX - 4, d.closeBtnY + 3.5);
+
+            ctx.fillStyle = "#22c55e";
+            ctx.fillRect(left + boxWidth * 0.5 - 10, yTarget - 4, 20, 8);
+            ctx.fillStyle = "#ef4444";
+            ctx.fillRect(left + boxWidth * 0.5 - 10, yStop - 4, 20, 8);
+
+            var currentRiskDollar = getRiskDollar();
+            var rrView = computeRiskRewardView({
+              entry: d.entryPrice,
+              target: d.targetPrice,
+              stop: d.stopPrice,
+              riskDollar: currentRiskDollar
+            });
+            var targetPriceStr = canonicalFormatPrice(d.targetPrice);
+            var stopPriceStr = canonicalFormatPrice(d.stopPrice);
+
+            ctx.fillStyle = getChartThemePalette().rrTitle;
+            ctx.font = "bold 12px Inter, system-ui, sans-serif";
+            if (!rrView.error && rrView.side) {
+              var isShort = rrView.side === "short";
+              var targetSign = isShort ? "-" : "+";
+              var stopSign = isShort ? "+" : "-";
+              var actionLabel = isShort ? "建議放空" : "建議買進";
+
+              ctx.fillText("R:R Ratio: 1 : " + rrView.rr.toFixed(2), left + 10, yEntry - 8);
+
+              ctx.font = "11px Inter, system-ui, sans-serif";
+              ctx.fillStyle = "#4ade80";
+              ctx.fillText("Target: " + targetSign + rrView.rewardPct.toFixed(2) + "% (" + targetPriceStr + ")", left + 10, targetTop + 16);
+
+              ctx.fillStyle = "#f87171";
+              ctx.fillText("Stop: " + stopSign + rrView.riskPct.toFixed(2) + "% (" + stopPriceStr + ")", left + 10, stopTop + stopHeight - 8);
+
+              ctx.fillStyle = "#93c5fd";
+              ctx.fillText(actionLabel + ": " + rrView.shares + " 股 ($" + currentRiskDollar + " 風控)", left + 10, yEntry + 18);
+
+              if (d.manualQuantity !== undefined && d.manualQuantity !== null) {
+                var manualView = computeManualRiskView({
+                  view: rrView,
+                  quantity: d.manualQuantity,
+                  riskDollar: currentRiskDollar
+                });
+                if (!manualView.error && manualView.riskAmount !== null) {
+                  ctx.fillStyle = manualView.overRisk ? "#f87171" : "#fbbf24";
+                  var manualText = "手動: " + String(d.manualQuantity) + " 股 → 風險 $" + manualView.riskAmount.toFixed(2);
+                  if (manualView.overRisk) {
+                    manualText += "  ⚠ 超過風控";
+                  }
+                  ctx.fillText(manualText, left + 10, yEntry + 32);
+                }
+              }
+            } else {
+              ctx.fillText("R:R Ratio: --", left + 10, yEntry - 8);
+
+              ctx.font = "11px Inter, system-ui, sans-serif";
+              ctx.fillStyle = "#4ade80";
+              ctx.fillText("Target: (" + targetPriceStr + ")", left + 10, targetTop + 16);
+
+              ctx.fillStyle = "#f87171";
+              ctx.fillText("Stop: (" + stopPriceStr + ")", left + 10, stopTop + stopHeight - 8);
+
+              ctx.fillStyle = "#f87171";
+              ctx.fillText("停損與目標必須在進場價兩側", left + 10, yEntry + 18);
+            }
+
+            ctx.font = "10px Inter, system-ui, sans-serif";
+            ctx.fillStyle = "rgba(148, 163, 184, 0.85)";
+            ctx.textAlign = "right";
+            ctx.fillText("雙擊編輯", right - 8, yEntry - 8);
+            ctx.textAlign = "left";
+          }
+        } else if (d.type === "ruler") {
+          var rx1 = d.time1 ? safeTimeToCoordinate(timeScale, d.time1) : d.x1;
+          var ry1 = candlestickSeries ? candlestickSeries.priceToCoordinate(d.price1) : d.y1;
+          var rx2 = d.time2 ? safeTimeToCoordinate(timeScale, d.time2) : d.x2;
+          var ry2 = candlestickSeries ? candlestickSeries.priceToCoordinate(d.price2) : d.y2;
+          if (rx1 !== null && ry1 !== null && rx2 !== null && ry2 !== null) {
+            var rLeft = Math.min(rx1, rx2);
+            var rTop = Math.min(ry1, ry2);
+            var rW = Math.max(2, Math.abs(rx2 - rx1));
+            var rH = Math.max(2, Math.abs(ry2 - ry1));
+            ctx.fillStyle = "rgba(41, 98, 255, 0.08)";
+            ctx.fillRect(rLeft, rTop, rW, rH);
+            ctx.strokeStyle = "#2962ff";
+            ctx.lineWidth = 1;
+            ctx.setLineDash([2, 2]);
+            ctx.strokeRect(rLeft, rTop, rW, rH);
+            ctx.setLineDash([]);
+            var dp = d.price2 - d.price1;
+            var dpPct = d.price1 > 0 ? (dp / d.price1) * 100 : 0;
+            ctx.fillStyle = dp >= 0 ? "#26a69a" : "#ef5350";
+            ctx.font = "bold 11px Inter, system-ui, sans-serif";
+            ctx.fillText((dp >= 0 ? "+" : "") + dp.toFixed(2) + " (" + (dpPct >= 0 ? "+" : "") + dpPct.toFixed(2) + "%)", rLeft + 6, rTop + 16);
+          }
         }
-      } else if (d.type === "trendline") {
-        var x1 = timeScale.timeToCoordinate(d.time1);
-        var y1 = candlestickSeries.priceToCoordinate(d.price1);
-        var x2 = timeScale.timeToCoordinate(d.time2);
-        var y2 = candlestickSeries.priceToCoordinate(d.price2);
-        if (x1 !== null && y1 !== null && x2 !== null && y2 !== null) {
-          ctx.strokeStyle = "#eab308";
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.moveTo(x1, y1);
-          ctx.lineTo(x2, y2);
-          ctx.stroke();
-
-          ctx.fillStyle = "#eab308";
-          ctx.beginPath();
-          ctx.arc(x1, y1, 4, 0, Math.PI * 2);
-          ctx.arc(x2, y2, 4, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      } else if (d.type === "risk-reward") {
-        var xCenter = d.time ? timeScale.timeToCoordinate(d.time) : drawingCanvas.width * 0.5;
-        if (xCenter === null || isNaN(xCenter)) xCenter = drawingCanvas.width * 0.5;
-        var boxWidth = Math.min(260, drawingCanvas.width * 0.45);
-        var left = Math.max(10, xCenter);
-        var right = left + boxWidth;
-
-        var yEntry = candlestickSeries.priceToCoordinate(d.entryPrice);
-        var yTarget = candlestickSeries.priceToCoordinate(d.targetPrice);
-        var yStop = candlestickSeries.priceToCoordinate(d.stopPrice);
-
-        if (yEntry !== null && yTarget !== null && yStop !== null) {
-          var targetTop = Math.min(yTarget, yEntry);
-          var targetHeight = Math.max(2, Math.abs(yTarget - yEntry));
-          ctx.fillStyle = "rgba(34, 197, 94, 0.08)";
-          ctx.fillRect(left, targetTop, boxWidth, targetHeight);
-          ctx.strokeStyle = "#22c55e";
-          ctx.lineWidth = 1.5;
-          ctx.strokeRect(left, targetTop, boxWidth, targetHeight);
-
-          var stopTop = Math.min(yStop, yEntry);
-          var stopHeight = Math.max(2, Math.abs(yStop - yEntry));
-          ctx.fillStyle = "rgba(239, 68, 68, 0.08)";
-          ctx.fillRect(left, stopTop, boxWidth, stopHeight);
-          ctx.strokeStyle = "#ef4444";
-          ctx.lineWidth = 1.5;
-          ctx.strokeRect(left, stopTop, boxWidth, stopHeight);
-
-          ctx.strokeStyle = "#3b82f6";
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.moveTo(left - 10, yEntry);
-          ctx.lineTo(right + 10, yEntry);
-          ctx.stroke();
-
-          d.targetHandleY = yTarget;
-          d.stopHandleY = yStop;
-          d.targetTop = targetTop;
-          d.targetHeight = targetHeight;
-          d.stopTop = stopTop;
-          d.stopHeight = stopHeight;
-          d.boxLeft = left;
-          d.boxRight = right;
-
-          d.closeBtnX = Math.max(20, Math.min(drawingCanvas.width - 20, right - 14));
-          d.closeBtnY = Math.max(20, Math.min(drawingCanvas.height - 20, targetTop + 14));
-          ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
-          ctx.beginPath();
-          ctx.arc(d.closeBtnX, d.closeBtnY, 9, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.fillStyle = "#ffffff";
-          ctx.font = "bold 10px sans-serif";
-          ctx.textAlign = "left";
-          ctx.textBaseline = "alphabetic";
-          ctx.fillText("✕", d.closeBtnX - 4, d.closeBtnY + 3.5);
-
-          ctx.fillStyle = "#22c55e";
-          ctx.fillRect(left + boxWidth * 0.5 - 10, yTarget - 4, 20, 8);
-          ctx.fillStyle = "#ef4444";
-          ctx.fillRect(left + boxWidth * 0.5 - 10, yStop - 4, 20, 8);
-
-          var rewPct = d.entryPrice > 0 ? ((d.targetPrice - d.entryPrice) / d.entryPrice) * 100 : 0;
-          var rskPct = d.entryPrice > 0 ? ((d.entryPrice - d.stopPrice) / d.entryPrice) * 100 : 0;
-          var rr = rskPct > 0 ? (rewPct / rskPct).toFixed(2) : "0.00";
-          var stopDist = Math.max(0.01, d.entryPrice - d.stopPrice);
-          var shares = Math.floor((d.riskDollar || 500) / stopDist);
-
-          ctx.fillStyle = "#ffffff";
-          ctx.font = "bold 12px Inter, system-ui, sans-serif";
-          ctx.fillText("R:R Ratio: 1 : " + rr, left + 10, yEntry - 8);
-
-          ctx.font = "11px Inter, system-ui, sans-serif";
-          ctx.fillStyle = "#4ade80";
-          ctx.fillText("Target: +" + rewPct.toFixed(2) + "% (" + d.targetPrice.toFixed(2) + ")", left + 10, targetTop + 16);
-
-          ctx.fillStyle = "#f87171";
-          ctx.fillText("Stop: -" + rskPct.toFixed(2) + "% (" + d.stopPrice.toFixed(2) + ")", left + 10, stopTop + stopHeight - 8);
-
-          ctx.fillStyle = "#93c5fd";
-          ctx.fillText("建議買進: " + shares + " 股 ($" + (d.riskDollar || 500) + " 風控)", left + 10, yEntry + 18);
-        }
-      } else if (d.type === "ruler") {
-        var rx1 = d.time1 ? timeScale.timeToCoordinate(d.time1) : d.x1;
-        var ry1 = candlestickSeries ? candlestickSeries.priceToCoordinate(d.price1) : d.y1;
-        var rx2 = d.time2 ? timeScale.timeToCoordinate(d.time2) : d.x2;
-        var ry2 = candlestickSeries ? candlestickSeries.priceToCoordinate(d.price2) : d.y2;
-        if (rx1 !== null && ry1 !== null && rx2 !== null && ry2 !== null) {
-          var rLeft = Math.min(rx1, rx2);
-          var rTop = Math.min(ry1, ry2);
-          var rW = Math.max(2, Math.abs(rx2 - rx1));
-          var rH = Math.max(2, Math.abs(ry2 - ry1));
-          ctx.fillStyle = "rgba(41, 98, 255, 0.08)";
-          ctx.fillRect(rLeft, rTop, rW, rH);
-          ctx.strokeStyle = "#2962ff";
-          ctx.lineWidth = 1;
-          ctx.setLineDash([2, 2]);
-          ctx.strokeRect(rLeft, rTop, rW, rH);
-          ctx.setLineDash([]);
-          var dp = d.price2 - d.price1;
-          var dpPct = d.price1 > 0 ? (dp / d.price1) * 100 : 0;
-          ctx.fillStyle = dp >= 0 ? "#26a69a" : "#ef5350";
-          ctx.font = "bold 11px Inter, system-ui, sans-serif";
-          ctx.fillText((dp >= 0 ? "+" : "") + dp.toFixed(2) + " (" + (dpPct >= 0 ? "+" : "") + dpPct.toFixed(2) + "%)", rLeft + 6, rTop + 16);
-        }
+      } catch (eD) {
+        console.warn("[drawings] 略過無法繪製的繪圖", i, eD);
       }
     }
 
     if (drawingInProgress && drawingInProgress.type === "trendline" && drawingInProgress.step === 1) {
-      var tx1 = timeScale.timeToCoordinate(drawingInProgress.time1);
+      var tx1 = safeTimeToCoordinate(timeScale, drawingInProgress.time1);
       var ty1 = candlestickSeries.priceToCoordinate(drawingInProgress.price1);
       if (tx1 !== null && ty1 !== null) {
         ctx.strokeStyle = "rgba(234, 179, 8, 0.7)";
@@ -5642,7 +10145,7 @@ function initEventListeners() {
       var y = e.clientY - rect.top;
       var timeScale = chart.timeScale();
       var price = candlestickSeries.coordinateToPrice(y);
-      var time = timeScale.coordinateToTime(x);
+      var time = snapTimeFromCoordinate(timeScale, x, getMainTimeAxis());
       if ((magnetMode || e.ctrlKey || e.metaKey) && currentRawBars && currentRawBars.length > 0 && timeScale.coordinateToLogical) {
         var lIdx = Math.round(timeScale.coordinateToLogical(x));
         if (isFinite(lIdx) && lIdx >= 0 && lIdx < currentRawBars.length) {
@@ -5713,8 +10216,7 @@ function initEventListeners() {
             time: time || (latestBarData ? latestBarData.time : null),
             entryPrice: price,
             targetPrice: targetP,
-            stopPrice: stopP,
-            riskDollar: 500
+            stopPrice: stopP
           });
           saveDrawingsForActiveSymbol();
           renderDrawingCanvas();
@@ -5746,8 +10248,10 @@ function initEventListeners() {
         }
       } else if (currentDrawTool === "trendline") {
         if (!drawingInProgress) {
+          if (!isValidChartTime(time)) return;
           drawingInProgress = { type: "trendline", step: 1, time1: time, price1: price, currentX: x, currentY: y };
         } else if (drawingInProgress.step === 1) {
+          if (!isValidChartTime(time)) return;
           drawings.push({
             type: "trendline",
             time1: drawingInProgress.time1,
@@ -5804,6 +10308,7 @@ function initEventListeners() {
             isDraggingHandle.drawing.entryPrice = isDraggingHandle.origEntry + bDiff;
             isDraggingHandle.drawing.targetPrice = isDraggingHandle.origTarget + bDiff;
             isDraggingHandle.drawing.stopPrice = isDraggingHandle.origStop + bDiff;
+            var timeScale = (chart && typeof chart.timeScale === "function") ? chart.timeScale() : null;
             if (timeScale && typeof timeScale.coordinateToTime === "function" && typeof timeScale.timeToCoordinate === "function") {
               var origAnchorX = timeScale.timeToCoordinate(isDraggingHandle.origTime);
               if (origAnchorX !== null && !isNaN(origAnchorX)) {
@@ -5820,7 +10325,7 @@ function initEventListeners() {
               }
             }
           }
-          renderDrawingCanvas();
+          scheduleDrawingRender();
         }
         return;
       }
@@ -5828,7 +10333,31 @@ function initEventListeners() {
       if (drawingInProgress && (drawingInProgress.type === "trendline" || drawingInProgress.type === "ruler")) {
         drawingInProgress.currentX = x;
         drawingInProgress.currentY = y;
-        renderDrawingCanvas();
+        scheduleDrawingRender();
+      }
+    });
+
+    drawingCanvas.addEventListener("dblclick", function(e) {
+      var rect = drawingCanvas.getBoundingClientRect();
+      var x = e.clientX - rect.left;
+      var y = e.clientY - rect.top;
+      for (var k = drawings.length - 1; k >= 0; k--) {
+        var rd = drawings[k];
+        if (rd.type === "risk-reward") {
+          if (rd.closeBtnX && rd.closeBtnY && Math.hypot(x - rd.closeBtnX, y - rd.closeBtnY) <= 14) {
+            return;
+          }
+          if (rd.boxLeft && rd.boxRight && x >= rd.boxLeft && x <= rd.boxRight) {
+            var bMinY = Math.min(rd.targetTop || 0, rd.stopTop || 0);
+            var bMaxY = Math.max((rd.targetTop || 0) + (rd.targetHeight || 0), (rd.stopTop || 0) + (rd.stopHeight || 0));
+            if (y >= bMinY && y <= bMaxY) {
+              e.preventDefault();
+              isDraggingHandle = null;
+              openRrEditModal(rd);
+              return;
+            }
+          }
+        }
       }
     });
 
@@ -5913,6 +10442,7 @@ function initEventListeners() {
   for (var i = 0; i < tfButtons.length; i++) {
     (function(btn) {
       btn.onclick = function() {
+        userChangedTimeframe = true;
         for (var j = 0; j < tfButtons.length; j++) tfButtons[j].classList.remove("active");
         btn.classList.add("active");
         activeTimeframe = btn.getAttribute("data-tf") || "1D";
@@ -5932,6 +10462,14 @@ function initEventListeners() {
     langToggleBtn.onclick = function() {
       var nextLang = currentLang === "zh" ? "en" : "zh";
       setLanguage(nextLang);
+    };
+  }
+
+  var themeToggleBtn = document.getElementById("themeToggleBtn");
+  if (themeToggleBtn) {
+    themeToggleBtn.onclick = function() {
+      var nextTheme = currentTheme === "dark" ? "light" : "dark";
+      setTheme(nextTheme);
     };
   }
 
@@ -5974,7 +10512,7 @@ function initEventListeners() {
       safeSetStorage("tv_candle_style", currentCandleStyle);
       updateCandleStyleUI();
       if (currentRawBars && currentRawBars.length > 0) {
-        renderChartData(currentRawBars);
+        renderChartData(currentRawBars, { keepView: true });
       }
     };
     updateCandleStyleUI();
@@ -5982,12 +10520,69 @@ function initEventListeners() {
 
   var pContainer = (typeof priceContainer !== "undefined" && priceContainer) ? priceContainer : (document.getElementById("chart") || chartContainer);
   if (pContainer) {
-    pContainer.addEventListener("dblclick", function() {
-      setAutoScale(true);
-      if (chart && chart.timeScale) {
-        chart.timeScale().fitContent();
+    pContainer.addEventListener("dblclick", handleChartDblClick);
+    (function() {
+      var dragStartX = 0;
+      var dragStartY = 0;
+      var dragActive = false;
+      var autoScaleDisabledThisDrag = false;
+
+      pContainer.addEventListener("pointerdown", function(e) {
+        if (e.button !== 0) return;
+        dragStartX = e.clientX;
+        dragStartY = e.clientY;
+        dragActive = true;
+        autoScaleDisabledThisDrag = false;
+      });
+
+      pContainer.addEventListener("pointermove", function(e) {
+        if (!dragActive || e.buttons !== 1 || autoScaleDisabledThisDrag) return;
+        var dx = e.clientX - dragStartX;
+        var dy = e.clientY - dragStartY;
+        var toolState = (typeof currentDrawTool !== "undefined" && currentDrawTool) ? currentDrawTool : "cursor";
+        var handleState = (typeof isDraggingHandle !== "undefined") ? Boolean(isDraggingHandle) : false;
+        var state = {
+          autoScale: (typeof isAutoScale !== "undefined") ? isAutoScale : true,
+          tool: toolState,
+          draggingHandle: handleState
+        };
+        if (shouldDisableAutoScaleOnDrag(dx, dy, state)) {
+          autoScaleDisabledThisDrag = true;
+          if (typeof setAutoScale === "function") {
+            setAutoScale(false);
+          }
+        }
+      });
+
+      function onPointerEnd() {
+        dragActive = false;
+        autoScaleDisabledThisDrag = false;
+        setTimeout(syncAutoScaleFromChart, 0);
       }
-    });
+
+      pContainer.addEventListener("pointerup", onPointerEnd);
+      pContainer.addEventListener("pointercancel", onPointerEnd);
+      pContainer.addEventListener("mouseup", onPointerEnd);
+
+      pContainer.addEventListener("wheel", function(e) {
+        if (!pContainer.getBoundingClientRect) return;
+        var rect = pContainer.getBoundingClientRect();
+        var axisWidth = 0;
+        if (chart && typeof chart.priceScale === "function") {
+          try {
+            var ps = chart.priceScale("right");
+            if (ps && typeof ps.width === "function") {
+              axisWidth = ps.width() || 0;
+            }
+          } catch (err) {
+            axisWidth = 0;
+          }
+        }
+        if (isPointInPriceAxis(e.clientX, rect, axisWidth)) {
+          setTimeout(syncAutoScaleFromChart, 0);
+        }
+      }, { passive: true });
+    })();
   }
 
   if (indicatorsBtn) {
@@ -6103,6 +10698,16 @@ function initEventListeners() {
       saveIndicatorConfig();
       if (currentRawBars && currentRawBars.length) {
         updateRsPane(currentRawBars, benchmarkRawBars);
+      for (var sp = 2; sp <= 4; sp++) {
+        if (typeof renderSubPaneRs === "function" && subCharts[sp] && subCharts[sp].bars) {
+          renderSubPaneRs(sp, subCharts[sp].bars, benchmarkRawBars);
+        }
+      }
+      }
+      for (var sp = 2; sp <= 4; sp++) {
+        if (typeof renderSubPaneRs === "function" && subCharts[sp] && subCharts[sp].bars) {
+          renderSubPaneRs(sp, subCharts[sp].bars, benchmarkRawBars);
+        }
       }
     };
   }
@@ -6114,6 +10719,16 @@ function initEventListeners() {
       saveIndicatorConfig();
       if (currentRawBars && currentRawBars.length) {
         updateRsPane(currentRawBars, benchmarkRawBars);
+      for (var sp = 2; sp <= 4; sp++) {
+        if (typeof renderSubPaneRs === "function" && subCharts[sp] && subCharts[sp].bars) {
+          renderSubPaneRs(sp, subCharts[sp].bars, benchmarkRawBars);
+        }
+      }
+      }
+      for (var sp = 2; sp <= 4; sp++) {
+        if (typeof renderSubPaneRs === "function" && subCharts[sp] && subCharts[sp].bars) {
+          renderSubPaneRs(sp, subCharts[sp].bars, benchmarkRawBars);
+        }
       }
     };
   }
@@ -6139,6 +10754,30 @@ function initEventListeners() {
   var btnAvwapCancel = document.getElementById("btnAvwapCancel");
   if (closeAvwapSettingsModalBtn) closeAvwapSettingsModalBtn.onclick = closeAvwapSettingsModal;
   if (btnAvwapCancel) btnAvwapCancel.onclick = closeAvwapSettingsModal;
+
+  var closeRrEditModalBtn = document.getElementById("closeRrEditModal");
+  var btnRrEditCancel = document.getElementById("btnRrEditCancel");
+  var btnRrEditApply = document.getElementById("btnRrEditApply");
+  if (closeRrEditModalBtn) closeRrEditModalBtn.onclick = closeRrEditModal;
+  if (btnRrEditCancel) btnRrEditCancel.onclick = closeRrEditModal;
+  if (btnRrEditApply) btnRrEditApply.onclick = applyRrEdit;
+
+  var rrEditInputIds = ["rrEditEntry", "rrEditStop", "rrEditTarget", "rrEditQty"];
+  for (var rri = 0; rri < rrEditInputIds.length; rri++) {
+    var rrInEl = document.getElementById(rrEditInputIds[rri]);
+    if (rrInEl) {
+      rrInEl.oninput = updateRrEditPreview;
+      rrInEl.onkeydown = function(e) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          var applyEl = document.getElementById("btnRrEditApply");
+          if (applyEl && !applyEl.disabled) {
+            applyRrEdit();
+          }
+        }
+      };
+    }
+  }
 
   var btnAvwapOk = document.getElementById("btnAvwapOk");
   var btnAvwapResetDefaults = document.getElementById("btnAvwapResetDefaults");
@@ -6173,8 +10812,28 @@ function initEventListeners() {
     };
   }
 
+  var rsToggleBtn = document.getElementById("rsToggleBtn");
+  if (rsToggleBtn) {
+    rsToggleBtn.onclick = function(e) {
+      if (e && e.stopPropagation) e.stopPropagation();
+      indicatorConfig.rsLine = !indicatorConfig.rsLine;
+      saveIndicatorConfig();
+      applyIndicatorVisibilities();
+      if (indicatorConfig.rsLine && currentRawBars && currentRawBars.length > 0) {
+        updateRsPane(currentRawBars, benchmarkRawBars);
+      for (var sp = 2; sp <= 4; sp++) {
+        if (typeof renderSubPaneRs === "function" && subCharts[sp] && subCharts[sp].bars) {
+          renderSubPaneRs(sp, subCharts[sp].bars, benchmarkRawBars);
+        }
+      }
+      }
+      if (typeof resizeAllCharts === "function") resizeAllCharts();
+    };
+  }
+
   if (rsActiveBadge) {
-    rsActiveBadge.onclick = function() {
+    rsActiveBadge.onclick = function(e) {
+      if (e && e.stopPropagation) e.stopPropagation();
       if (indicatorModal) indicatorModal.style.display = "flex";
     };
   }
@@ -6245,7 +10904,7 @@ function handleVisibilityChange() {
     rafRenderId = scheduleRaf(function() {
       rafRenderId = null;
       if (currentRawBars && currentRawBars.length > 0) {
-        renderChartData(currentRawBars);
+        renderChartDataKeepView(currentRawBars, currentRawBars.length);
       }
       hasPendingChartUpdate = false;
     });
@@ -6253,9 +10912,7 @@ function handleVisibilityChange() {
     if (elapsedMs > 60000 && activeSymbol) {
       gapBackfill(activeSymbol);
     }
-    if (activeSymbol) {
-      recoverTerminalState({ symbol: activeSymbol, timeframe: activeTimeframe });
-    }
+    requestFocusRecovery();
   }
 }
 
@@ -6266,9 +10923,7 @@ if (typeof window !== "undefined") {
   window.fetchAiLens = fetchAiLens;
   window.handleVisibilityChange = handleVisibilityChange;
   window.addEventListener("focus", function() {
-    if (activeSymbol) {
-      recoverTerminalState({ symbol: activeSymbol, timeframe: activeTimeframe });
-    }
+    requestFocusRecovery();
   });
   window.getAppNapState = function() {
     return {
@@ -6277,81 +10932,174 @@ if (typeof window !== "undefined") {
       hasPendingChartUpdate: hasPendingChartUpdate
     };
   };
+  window.executeSearch = executeSearch;
+  window.selectAndSubscribeSymbol = selectAndSubscribeSymbol;
+  window.subscribeSymbol = subscribeSymbol;
+  window.switchSymbol = switchSymbol;
+  window.openHeatmapModal = openHeatmapModal;
+  window.fetchHeatmapData = fetchHeatmapData;
+  window.renderHeatmap = renderHeatmap;
+  window._addQuickPriceLine = _addQuickPriceLine;
+  window.resetDrawToolToCursor = resetDrawToolToCursor;
+  window.checkDrawingCoordinateShift = checkDrawingCoordinateShift;
+  window.restorePriceLinesForSymbol = restorePriceLinesForSymbol;
+  window.readStoredJson = readStoredJson;
+  window.setPriceScaleMode = setPriceScaleMode;
+  window.setAutoScale = setAutoScale;
 }
 
 function bootstrap() {
-  var savedSymbol = safeGetStorage("tv_active_symbol", "NASDAQ:NVDA");
-  activeSymbol = savedSymbol || "NASDAQ:NVDA";
+  var rawSymbol = null;
+  try {
+    if (typeof localStorage !== "undefined") {
+      rawSymbol = localStorage.getItem("tv_active_symbol");
+    }
+  } catch (e) {}
 
-  var savedTf = safeGetStorage("tv_active_timeframe", "1D");
-  if (savedTf) {
-    activeTimeframe = savedTf;
-    var allTfBtns = document.querySelectorAll ? document.querySelectorAll(".tf-btn") : [];
-    allTfBtns.forEach(function(b) {
-      if (b.getAttribute("data-tf") === savedTf) b.classList.add("active");
-      else b.classList.remove("active");
-    });
+  var symbolRegex = /^[A-Z0-9_]{1,15}:[A-Z0-9._\-\^=]{1,24}$/;
+  if (rawSymbol !== null && rawSymbol !== undefined) {
+    if (typeof rawSymbol === "string" && symbolRegex.test(rawSymbol)) {
+      activeSymbol = rawSymbol;
+    } else {
+      try {
+        if (typeof localStorage !== "undefined") {
+          var bakSymKey = "tv_bak_tv_active_symbol";
+          if (!localStorage.getItem(bakSymKey)) {
+            localStorage.setItem(bakSymKey, String(rawSymbol));
+          }
+        }
+      } catch (eB) {}
+      console.warn("[storage] 無效的儲存設定 tv_active_symbol，已備份至 tv_bak_tv_active_symbol");
+      activeSymbol = "NASDAQ:NVDA";
+    }
+  } else {
+    activeSymbol = "NASDAQ:NVDA";
+  }
+
+  var rawTf = null;
+  try {
+    if (typeof localStorage !== "undefined") {
+      rawTf = localStorage.getItem("tv_active_timeframe");
+    }
+  } catch (eTf) {}
+
+  function normalizeTimeframe(tf) {
+    if (typeof tf !== "string") return null;
+    var s = tf.trim();
+    if (s === "1m") return "1m";
+    if (s === "1M") return null; // 1M (Month) is unsupported in terminal; falls back to 1D
+    var upper = s.toUpperCase();
+    if (upper === "1D") return "1D";
+    if (upper === "1W") return "1W";
+    var lower = s.toLowerCase();
+    if (lower === "5m") return "5m";
+    if (lower === "15m") return "15m";
+    if (lower === "1h") return "1h";
+    return null;
+  }
+
+  if (rawTf !== null && rawTf !== undefined) {
+    var normTf = normalizeTimeframe(rawTf);
+    if (normTf) {
+      activeTimeframe = normTf;
+    } else {
+      try {
+        if (typeof localStorage !== "undefined") {
+          var bakTfKey = "tv_bak_tv_active_timeframe";
+          if (!localStorage.getItem(bakTfKey)) {
+            localStorage.setItem(bakTfKey, String(rawTf));
+          }
+        }
+      } catch (eBt) {}
+      console.warn("[storage] 無效的儲存設定 tv_active_timeframe，已備份至 tv_bak_tv_active_timeframe");
+      activeTimeframe = "1D";
+    }
   } else {
     var activeTfBtn = document.querySelector ? document.querySelector(".tf-btn.active") : null;
     if (activeTfBtn && activeTfBtn.getAttribute("data-tf")) {
-      activeTimeframe = activeTfBtn.getAttribute("data-tf");
+      var candidateTf = normalizeTimeframe(activeTfBtn.getAttribute("data-tf"));
+      activeTimeframe = candidateTf || "1D";
+    } else {
+      activeTimeframe = "1D";
     }
+  }
+
+  var allTfBtns = document.querySelectorAll ? document.querySelectorAll(".tf-btn") : [];
+  if (allTfBtns.forEach) {
+    allTfBtns.forEach(function(b) {
+      if (b.getAttribute("data-tf") === activeTimeframe) b.classList.add("active");
+      else b.classList.remove("active");
+    });
   }
 
   window.addEventListener("beforeunload", savePreferencesImmediate);
   window.addEventListener("pagehide", savePreferencesImmediate);
 
+  setTheme(currentTheme, true);
   initChart();
+  if (typeof restorePriceLinesForSymbol === "function" && activeSymbol) {
+    try {
+      restorePriceLinesForSymbol(activeSymbol);
+    } catch (ePriceLines) {
+      console.warn("[bootstrap] 無法載入價格線", ePriceLines);
+    }
+  }
   initEventListeners();
-  syncPreferencesFromBackend();
   syncIndicatorCheckboxes();
   applyIndicatorVisibilities();
   updateCandleStyleUI();
-  setLanguage(currentLang);
+  setLanguage(currentLang, true);
 
   if (symbolsList.length > 0) {
     buildInitialDOM();
   }
 
-  fetch("/api/symbols")
-    .then(function(res) {
-      if (res.ok) return res.json();
-      return { symbols: [] };
-    })
-    .then(function(data) {
-      var freshSymbols = data.symbols || [];
-      if (freshSymbols.length > 0) {
-        symbolsList = freshSymbols;
-        safeSetStorage("tv_symbols_cache", JSON.stringify(freshSymbols));
-        for (var i = 0; i < freshSymbols.length; i++) {
-          if (freshSymbols[i].state && freshSymbols[i].id) {
-            symbolStates[freshSymbols[i].id] = Object.assign({}, symbolStates[freshSymbols[i].id] || {}, freshSymbols[i].state);
+  whenBackendReady(function() {
+    syncPreferencesFromBackend();
+
+    fetch("/api/symbols")
+      .then(function(res) {
+        if (res.ok) return res.json();
+        return { symbols: [] };
+      })
+      .then(function(data) {
+        var freshSymbols = data.symbols || [];
+        if (freshSymbols.length > 0) {
+          symbolsList = freshSymbols;
+          safeSetStorage("tv_symbols_cache", JSON.stringify(freshSymbols));
+          for (var i = 0; i < freshSymbols.length; i++) {
+            if (freshSymbols[i].state && freshSymbols[i].id) {
+              symbolStates[freshSymbols[i].id] = Object.assign({}, symbolStates[freshSymbols[i].id] || {}, freshSymbols[i].state);
+            }
+          }
+          buildInitialDOM();
+          if (activeSymbol) {
+            updateSymbolMetrics(activeSymbol, symbolStates[activeSymbol] || {}, latestBarData);
           }
         }
-        buildInitialDOM();
-      }
-      if (data.status && statusBadge && statusText) {
-        var st = String(data.status).toLowerCase();
-        if (st === "connected") {
-          statusBadge.className = "status-badge connected";
-          statusText.textContent = "CONNECTED";
+        if (data.status && statusBadge && statusText) {
+          var st = String(data.status).toLowerCase();
+          if (st === "connected") {
+            statusBadge.className = "status-badge connected";
+            statusText.textContent = "CONNECTED";
+          }
         }
-      }
-      if (!activeSymbol && symbolsList.length > 0) {
-        switchSymbol(symbolsList[0].id);
-      }
-    })
-    .catch(function(e) {});
+        if (!activeSymbol && symbolsList.length > 0) {
+          switchSymbol(symbolsList[0].id);
+        }
+      })
+      .catch(function(e) {});
 
-  connectWebSocket();
-  if (currentEngine === "C") {
-    switchChartEngine("C");
-  } else {
-    if (typeof loadBenchmarkHistory === "function") {
-      loadBenchmarkHistory(rsBenchmarkTag);
+    connectWebSocket();
+    if (currentEngine === "C") {
+      switchChartEngine("C");
+    } else {
+      if (typeof loadBenchmarkHistory === "function") {
+        loadBenchmarkHistory(rsBenchmarkTag);
+      }
+      loadHistory(activeSymbol);
     }
-    loadHistory(activeSymbol);
-  }
+  });
 }
 
 if (document.addEventListener) {
