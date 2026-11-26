@@ -178,7 +178,8 @@ def parse_tv_scan_response(
         if isinstance(raw_earn, (int, float)) and raw_earn > 0:
             try:
                 earn_date_str = datetime.fromtimestamp(raw_earn, tz=timezone.utc).strftime("%Y-%m-%d")
-            except Exception:
+            except (TypeError, ValueError, OverflowError, OSError) as err:
+                logger.debug("Invalid numeric earnings_release_next_date %r for %s: %s", raw_earn, sym, err)
                 earn_date_str = None
         elif isinstance(raw_earn, str) and raw_earn.strip():
             earn_date_str = raw_earn.strip()[:10]
@@ -294,7 +295,8 @@ def evaluate_multi_frameworks(item: Dict[str, Any], reference_date: Optional[dat
                 v6_risk = "V6-Soft"
             else:
                 v6_risk = "Clear"
-        except Exception:
+        except (TypeError, ValueError) as err:
+            logger.debug("Invalid earnings date %r for %s: %s", raw_earn, item.get("symbol"), err)
             v6_risk = "Clear"
 
     res = dict(item)

@@ -241,14 +241,14 @@ def _extract_bar_as_of_and_stale(bars: Sequence[Dict[str, Any]]) -> Tuple[str, b
             dt = datetime.fromtimestamp(t_val, tz=NY_TZ)
             bar_date = dt.date()
             data_as_of = bar_date.isoformat()
-        except Exception:
-            pass
+        except (TypeError, ValueError, OverflowError, OSError) as err:
+            logger.debug("Invalid numeric bar timestamp %r: %s", t_val, err)
     elif isinstance(t_val, str):
         data_as_of = t_val[:10]
         try:
             bar_date = datetime.strptime(data_as_of, "%Y-%m-%d").date()
-        except Exception:
-            pass
+        except (TypeError, ValueError) as err:
+            logger.debug("Invalid string bar date %r: %s", data_as_of, err)
 
     comp_date = last_completed_session_date()
     data_stale = (bar_date < comp_date) if bar_date else True
@@ -285,7 +285,8 @@ async def fetch_heatmap_universe(
         if storage_obj:
             try:
                 bars = storage_obj.get_bars(clean_sym, "1D", limit=300)
-            except Exception:
+            except Exception as err:
+                logger.warning("Heatmap SQLite bar read failed for %s: %s", clean_sym, err)
                 bars = []
 
         if fetch_func:
@@ -653,7 +654,8 @@ def _resample_1d_to_1w(bars: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
             ts = f / 1000.0 if f > 100_000_000_000 else f
             try:
                 return ts, datetime.fromtimestamp(ts, tz=timezone.utc)
-            except Exception:
+            except (TypeError, ValueError, OverflowError, OSError) as ts_err:
+                logger.debug("Invalid numeric date %r: %s", ts, ts_err)
                 return ts, None
         s = str(t).strip().replace("/", "-")
         try:
@@ -933,7 +935,8 @@ async def scan_symbol_candidate(
     if storage_obj:
         try:
             bars = storage_obj.get_bars(clean_sym, "1D", limit=300)
-        except Exception:
+        except Exception as err:
+            logger.warning("Screener SQLite bar read failed for %s: %s", clean_sym, err)
             bars = []
 
     # S1-01: When fetch_func is provided, always ask it for the latest bars.

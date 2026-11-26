@@ -939,7 +939,8 @@ def collapse_daily_bars_by_ny_date(bars: List[Dict[str, Any]]) -> List[Dict[str,
             if ny_d not in by_date:
                 by_date[ny_d] = []
             by_date[ny_d].append(b)
-        except Exception:
+        except (TypeError, ValueError, OverflowError, OSError) as err:
+            logger.debug("Skipping bar timestamp grouping fallback for %r: %s", t, err)
             passthrough.append(dict(b))
 
     collapsed: List[Dict[str, Any]] = []
@@ -961,7 +962,8 @@ def collapse_daily_bars_by_ny_date(bars: List[Dict[str, Any]]) -> List[Dict[str,
             if val is None or isinstance(val, bool):
                 return (1, 0)
             return (0, int(val))
-        except Exception:
+        except (TypeError, ValueError) as err:
+            logger.debug("Fallback sort key for non-numeric bar time %r: %s", item.get("time"), err)
             return (1, 0)
 
     collapsed.sort(key=_safe_sort_key)
@@ -1005,7 +1007,8 @@ async def fetch_historical_bars(symbol: str, timeframe: str = "1m", limit: int =
                     try:
                         last_bar_dt = datetime.fromtimestamp(last_bar_ts, tz=NY_TZ)
                         last_bar_date = last_bar_dt.date()
-                    except Exception:
+                    except (TypeError, ValueError, OverflowError, OSError) as err:
+                        logger.debug("Invalid cached last_bar_ts %r for %s: %s", last_bar_ts, symbol, err)
                         last_bar_date = None
 
                     date_ok = False
@@ -2328,7 +2331,8 @@ def build_ai_agent_lens_payload(
                     try:
                         score = int(round(100.0 / (1.0 + math.exp(-diff / 30.0))))
                         rs_rating = max(1, min(99, score))
-                    except Exception:
+                    except (TypeError, ValueError, OverflowError) as err:
+                        logger.debug("RS rating math fallback for %s: %s", symbol, err)
                         rs_rating = 50
 
     # Trend Regime Classification (Stan Weinstein / Minervini Stage Analysis)
@@ -3296,18 +3300,21 @@ async def recover_state_and_history(
 
     try:
         watchlist = storage.get_watchlist()
-    except Exception:
+    except Exception as err:
+        logger.warning("Recovery failed reading watchlist from SQLite, falling back to memory: %s", err)
         watchlist = list(WATCHLIST)
 
     try:
         preferences = storage.get_preferences()
-    except Exception:
+    except Exception as err:
+        logger.warning("Recovery failed reading preferences from SQLite: %s", err)
         preferences = {}
 
     ai_lens_report = None
     try:
         ai_lens_report = storage.get_ai_agent_lens_report(clean_sym, clean_tf)
-    except Exception:
+    except Exception as err:
+        logger.warning("Recovery failed reading AI lens cache for %s (%s): %s", clean_sym, clean_tf, err)
         ai_lens_report = None
 
     return {
@@ -3392,6 +3399,7 @@ async def save_drawing_endpoint(payload: Dict[str, Any] = Body(...)):
     except ValueError as val_err:
         raise HTTPException(status_code=409, detail=str(val_err))
     except Exception as exc:
+        logger.exception("Failed to persist drawing to SQLite")
         raise HTTPException(status_code=500, detail=f"Failed to persist drawing to SQLite: {exc}")
 
 
