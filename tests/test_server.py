@@ -39,7 +39,7 @@ class TestServerEndpoints(unittest.TestCase):
         self.original_watchlist = [dict(w) for w in server.WATCHLIST]
         self.original_symbols = list(server.SYMBOLS)
         self.fetch_patcher = patch(
-            "server.fetch_binance_history",
+            "api.history.fetch_binance_history",
             new_callable=AsyncMock,
             return_value=list(MOCK_BINANCE_BARS),
         )
@@ -112,7 +112,7 @@ class TestServerEndpoints(unittest.TestCase):
         mock_equity_bars = [
             {"time": 1731234000, "open": 220.0, "high": 225.0, "low": 219.0, "close": 223.0, "volume": 500000.0}
         ]
-        with patch("server.fetch_yahoo_history", new_callable=AsyncMock, return_value=mock_equity_bars):
+        with patch("api.history.fetch_yahoo_history", new_callable=AsyncMock, return_value=mock_equity_bars):
             with TestClient(app) as client:
                 resp = client.get("/api/history?symbol=NASDAQ:AAPL")
                 self.assertEqual(resp.status_code, 200)
@@ -439,7 +439,7 @@ class TestTenDefectsRegression(unittest.TestCase):
             "decision": {"action": "BUY"}
         }
         with patch.object(server.get_storage(), "get_ai_agent_lens_report", return_value=mock_lens_report):
-            with patch("server.call_gemini_generate", return_value="Analyzed with Stage 2 Uptrend metrics.") as mock_gemini:
+            with patch("api.ai.call_gemini_generate", return_value="Analyzed with Stage 2 Uptrend metrics.") as mock_gemini:
                 with TestClient(app) as client:
                     resp = client.post("/api/chat", json={"message": "NVDA trend", "symbol": "NASDAQ:NVDA", "timeframe": "1D"})
                     self.assertEqual(resp.status_code, 200)
@@ -556,10 +556,10 @@ class TestTenDefectsRegression(unittest.TestCase):
         server._last_remote_fetch[(test_sym, "1D")] = float(close_ts + 600)
 
         try:
-            with mock.patch("server.fetch_yahoo_history") as mock_yahoo, \
-                 mock.patch("server.is_regular_session_open", return_value=False), \
-                 mock.patch("server.last_completed_session_date", return_value=session_date), \
-                 mock.patch("server.time.time", return_value=eval_ts):
+            with mock.patch("api.history.fetch_yahoo_history") as mock_yahoo, \
+                 mock.patch("api.history.is_regular_session_open", return_value=False), \
+                 mock.patch("api.history.last_completed_session_date", return_value=session_date), \
+                 mock.patch("api.history.time.time", return_value=eval_ts):
                 mock_yahoo.side_effect = RuntimeError("Network call should not happen when cached under canonical timeframe")
                 # Query with lowercase "1d"
                 bars = asyncio.run(fetch_historical_bars(test_sym, timeframe="1d", limit=250))
@@ -590,10 +590,10 @@ class TestTenDefectsRegression(unittest.TestCase):
         server._last_remote_fetch[(test_sym, "1D")] = float(close_ts + 600)
 
         try:
-            with mock.patch("server.fetch_yahoo_history") as mock_yahoo, \
-                 mock.patch("server.is_regular_session_open", return_value=False), \
-                 mock.patch("server.last_completed_session_date", return_value=session_date), \
-                 mock.patch("server.time.time", return_value=eval_ts):
+            with mock.patch("api.history.fetch_yahoo_history") as mock_yahoo, \
+                 mock.patch("api.history.is_regular_session_open", return_value=False), \
+                 mock.patch("api.history.last_completed_session_date", return_value=session_date), \
+                 mock.patch("api.history.time.time", return_value=eval_ts):
                 mock_yahoo.side_effect = RuntimeError("Network call should not be made when cache is fresh")
                 bars = asyncio.run(fetch_historical_bars(test_sym, timeframe="1D", limit=250))
                 self.assertEqual(len(bars), 250)
@@ -613,7 +613,7 @@ class TestTenDefectsRegression(unittest.TestCase):
 
     def test_get_history_normalizes_bare_symbol_and_honors_limit(self):
         """Verifies /api/history normalizes bare tickers and slices output to the requested limit."""
-        with patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=list(MOCK_BINANCE_BARS)), \
+        with patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=list(MOCK_BINANCE_BARS)), \
              patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock):
             with TestClient(app) as client:
@@ -630,7 +630,7 @@ class TestTenDefectsRegression(unittest.TestCase):
         self.assertEqual(mgr.next_bar_seq("NASDAQ:NVDA"), 2)
         self.assertEqual(mgr.next_bar_seq("AMEX:SPY"), 1)
 
-        with patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=list(MOCK_BINANCE_BARS)), \
+        with patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=list(MOCK_BINANCE_BARS)), \
              patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock):
             with TestClient(app) as client:

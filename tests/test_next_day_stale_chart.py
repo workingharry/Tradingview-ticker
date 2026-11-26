@@ -133,9 +133,9 @@ class TestIntradayCacheFreshnessAndCryptoExclusion(unittest.TestCase):
         # Ensure _last_remote_fetch has no entry for (test_sym, "1m")
         self.assertNotIn((test_sym, "1m"), server._last_remote_fetch)
 
-        with patch("server.get_storage", return_value=mock_storage), \
-             patch("server.time.time", return_value=float(now_ts)), \
-             patch("server.fetch_yahoo_history", new_callable=AsyncMock, return_value=fresh_bars) as mock_yahoo:
+        with patch("api.deps.get_storage", return_value=mock_storage), \
+             patch("api.history.time.time", return_value=float(now_ts)), \
+             patch("api.history.fetch_yahoo_history", new_callable=AsyncMock, return_value=fresh_bars) as mock_yahoo:
             res = asyncio.run(server.fetch_historical_bars(test_sym, timeframe="1m", limit=300))
             mock_yahoo.assert_awaited_once()
             self.assertEqual(res[-1]["close"], 101.5)
@@ -155,9 +155,9 @@ class TestIntradayCacheFreshnessAndCryptoExclusion(unittest.TestCase):
         # Fetched 120s ago; for 5m (tf_seconds=300), 120 <= 300 -> fresh
         server._last_remote_fetch[(test_sym, "5m")] = float(now_ts - 120)
 
-        with patch("server.get_storage", return_value=mock_storage), \
-             patch("server.time.time", return_value=float(now_ts)), \
-             patch("server.fetch_yahoo_history", new_callable=AsyncMock) as mock_yahoo:
+        with patch("api.deps.get_storage", return_value=mock_storage), \
+             patch("api.history.time.time", return_value=float(now_ts)), \
+             patch("api.history.fetch_yahoo_history", new_callable=AsyncMock) as mock_yahoo:
             res = asyncio.run(server.fetch_historical_bars(test_sym, timeframe="5m", limit=300))
             mock_yahoo.assert_not_called()
             self.assertEqual(len(res), 40)
@@ -179,9 +179,9 @@ class TestIntradayCacheFreshnessAndCryptoExclusion(unittest.TestCase):
         mock_storage.get_bars.return_value = cached_bars
         server._last_remote_fetch[(test_sym, "5m")] = float(now_ts - 301)
 
-        with patch("server.get_storage", return_value=mock_storage), \
-             patch("server.time.time", return_value=float(now_ts)), \
-             patch("server.fetch_yahoo_history", new_callable=AsyncMock, return_value=fresh_bars) as mock_yahoo:
+        with patch("api.deps.get_storage", return_value=mock_storage), \
+             patch("api.history.time.time", return_value=float(now_ts)), \
+             patch("api.history.fetch_yahoo_history", new_callable=AsyncMock, return_value=fresh_bars) as mock_yahoo:
             res = asyncio.run(server.fetch_historical_bars(test_sym, timeframe="5m", limit=300))
             mock_yahoo.assert_awaited_once()
             self.assertEqual(res[-1]["close"], 105.5)
@@ -205,10 +205,10 @@ class TestIntradayCacheFreshnessAndCryptoExclusion(unittest.TestCase):
         mock_storage.get_bars.return_value = list(input_bars)
         now_ts = 1795470000
         server._last_remote_fetch[(test_sym, "1D")] = float(now_ts - 10)
-        with patch("server.get_storage", return_value=mock_storage), \
-             patch("server.is_regular_session_open", return_value=True), \
-             patch("server.time.time", return_value=float(now_ts)), \
-             patch("server.fetch_yahoo_history", new_callable=AsyncMock) as mock_yahoo:
+        with patch("api.deps.get_storage", return_value=mock_storage), \
+             patch("api.history.is_regular_session_open", return_value=True), \
+             patch("api.history.time.time", return_value=float(now_ts)), \
+             patch("api.history.fetch_yahoo_history", new_callable=AsyncMock) as mock_yahoo:
             res_cache = asyncio.run(server.fetch_historical_bars(test_sym, timeframe="1D", limit=1500))
             mock_yahoo.assert_not_called()
             self.assertEqual(len(res_cache), 256)
@@ -219,9 +219,9 @@ class TestIntradayCacheFreshnessAndCryptoExclusion(unittest.TestCase):
         server._last_remote_fetch.clear()
         mock_storage_remote = MagicMock()
         mock_storage_remote.get_bars.return_value = []
-        with patch("server.get_storage", return_value=mock_storage_remote), \
-             patch("server.time.time", return_value=float(now_ts)), \
-             patch("server.fetch_yahoo_history", new_callable=AsyncMock, return_value=list(input_bars)):
+        with patch("api.deps.get_storage", return_value=mock_storage_remote), \
+             patch("api.history.time.time", return_value=float(now_ts)), \
+             patch("api.history.fetch_yahoo_history", new_callable=AsyncMock, return_value=list(input_bars)):
             res_remote = asyncio.run(server.fetch_historical_bars(test_sym, timeframe="1D", limit=1500))
             self.assertEqual(len(res_remote), 256)
             self.assertEqual(res_remote[-1]["time"], 1795444200)
@@ -233,8 +233,8 @@ class TestIntradayCacheFreshnessAndCryptoExclusion(unittest.TestCase):
         server._last_remote_fetch.clear()
         mock_storage_offline = MagicMock()
         mock_storage_offline.get_bars.side_effect = [[], list(input_bars)]
-        with patch("server.get_storage", return_value=mock_storage_offline), \
-             patch("server.fetch_yahoo_history", new_callable=AsyncMock, return_value=[]):
+        with patch("api.deps.get_storage", return_value=mock_storage_offline), \
+             patch("api.history.fetch_yahoo_history", new_callable=AsyncMock, return_value=[]):
             res_offline = asyncio.run(server.fetch_historical_bars(test_sym, timeframe="1D", limit=1500))
             self.assertEqual(len(res_offline), 256)
             self.assertEqual(res_offline[-1]["time"], 1795444200)
@@ -257,8 +257,8 @@ class TestIntradayCacheFreshnessAndCryptoExclusion(unittest.TestCase):
         # Remote fetch path
         mock_storage = MagicMock()
         mock_storage.get_bars.return_value = []
-        with patch("server.get_storage", return_value=mock_storage), \
-             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=list(history)):
+        with patch("api.deps.get_storage", return_value=mock_storage), \
+             patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=list(history)):
             res_remote = asyncio.run(server.fetch_historical_bars(crypto_sym, timeframe="1D", limit=1500))
             self.assertEqual(len(res_remote), 257)
 
@@ -266,9 +266,9 @@ class TestIntradayCacheFreshnessAndCryptoExclusion(unittest.TestCase):
         now_ts = 1795470000
         server._last_remote_fetch[(crypto_sym, "1D")] = float(now_ts - 10)
         mock_storage.get_bars.return_value = list(history)
-        with patch("server.get_storage", return_value=mock_storage), \
-             patch("server.time.time", return_value=float(now_ts)), \
-             patch("server.fetch_binance_history", new_callable=AsyncMock) as mock_bin:
+        with patch("api.deps.get_storage", return_value=mock_storage), \
+             patch("api.history.time.time", return_value=float(now_ts)), \
+             patch("api.history.fetch_binance_history", new_callable=AsyncMock) as mock_bin:
             res_cache = asyncio.run(server.fetch_historical_bars(crypto_sym, timeframe="1D", limit=1500))
             mock_bin.assert_not_called()
             self.assertEqual(len(res_cache), 257)
@@ -277,8 +277,8 @@ class TestIntradayCacheFreshnessAndCryptoExclusion(unittest.TestCase):
         server._last_remote_fetch.clear()
         mock_storage_off = MagicMock()
         mock_storage_off.get_bars.side_effect = [[], list(history)]
-        with patch("server.get_storage", return_value=mock_storage_off), \
-             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]):
+        with patch("api.deps.get_storage", return_value=mock_storage_off), \
+             patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=[]):
             res_off = asyncio.run(server.fetch_historical_bars(crypto_sym, timeframe="1D", limit=1500))
             self.assertEqual(len(res_off), 257)
 
@@ -298,7 +298,7 @@ class TestYahooHistoryWarningLogging(unittest.TestCase):
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(return_value=mock_resp)
 
-        with patch("server.get_shared_client", return_value=mock_client), \
+        with patch("api.deps.get_shared_client", return_value=mock_client), \
              self.assertLogs(server.logger, level=logging.WARNING) as cm:
             bars = asyncio.run(server.fetch_yahoo_history("NASDAQ:AAPL", timeframe="1D"))
 
@@ -313,7 +313,7 @@ class TestYahooHistoryWarningLogging(unittest.TestCase):
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_resp)
 
-            with patch("server.get_shared_client", return_value=mock_client), \
+            with patch("api.deps.get_shared_client", return_value=mock_client), \
                  self.assertLogs(server.logger, level=logging.WARNING) as cm:
                 bars = asyncio.run(server.fetch_yahoo_history("NASDAQ:MSFT", timeframe="1D"))
 
@@ -324,7 +324,7 @@ class TestYahooHistoryWarningLogging(unittest.TestCase):
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(side_effect=ConnectionError("Connection reset by peer"))
 
-        with patch("server.get_shared_client", return_value=mock_client), \
+        with patch("api.deps.get_shared_client", return_value=mock_client), \
              self.assertLogs(server.logger, level=logging.WARNING) as cm:
             bars = asyncio.run(server.fetch_yahoo_history("NASDAQ:NVDA", timeframe="1D"))
 

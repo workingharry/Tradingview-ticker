@@ -17,8 +17,8 @@ class TestSearchAndSubscribe(unittest.TestCase):
             patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock),
             patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock),
             patch("engine.client.TradingViewAsyncClient.subscribe", new_callable=AsyncMock),
-            patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]),
-            patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]),
+            patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=[]),
+            patch("api.history.fetch_universal_history", new_callable=AsyncMock, return_value=[]),
         ):
             p.start()
             self.addCleanup(p.stop)
@@ -62,7 +62,7 @@ class TestSearchAndSubscribe(unittest.TestCase):
                 results = resp.json()["results"]
                 self.assertEqual(results, [])
 
-    @patch("server.tv_client")
+    @patch("api.deps.tv_client")
     def test_subscribe_symbol_endpoint(self, mock_tv):
         mock_tv.subscribe = AsyncMock()
         with TestClient(app) as client:

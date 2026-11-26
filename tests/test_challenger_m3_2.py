@@ -32,7 +32,7 @@ class TestFastAPIStaticAssetServing(unittest.TestCase):
             "engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock
         ).start()
         self.mock_fetch = patch(
-            "server.fetch_binance_history", new_callable=AsyncMock, return_value=[]
+            "api.history.fetch_binance_history", new_callable=AsyncMock, return_value=[]
         ).start()
 
     def tearDown(self):
@@ -100,7 +100,7 @@ class TestStaticPathTraversalSecurity(unittest.TestCase):
             "engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock
         ).start()
         self.mock_fetch = patch(
-            "server.fetch_binance_history", new_callable=AsyncMock, return_value=[]
+            "api.history.fetch_binance_history", new_callable=AsyncMock, return_value=[]
         ).start()
 
     def tearDown(self):
@@ -256,7 +256,7 @@ class TestDOMIntegrityAndSelectorAlignment(unittest.TestCase):
         # 1. Server delivers all 5 symbols through GET /api/symbols
         with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock):
             with patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock):
-                with patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]):
+                with patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=[]):
                     with TestClient(app) as client:
                         resp = client.get("/api/symbols")
                         self.assertEqual(resp.status_code, 200)

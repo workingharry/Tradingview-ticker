@@ -68,8 +68,8 @@ class TestReviewFindingsFixes(unittest.TestCase):
         mock_bars = [{"time": 1700000000 + i * 60, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 10.0} for i in range(5)]
         with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
-             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=mock_bars), \
-             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=mock_bars), \
+             patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=mock_bars), \
+             patch("api.history.fetch_universal_history", new_callable=AsyncMock, return_value=mock_bars), \
              TestClient(app) as client:
             resp = client.get("/api/history?symbol=BINANCE:BTCUSDT&timeframe=1m&engine=B")
             self.assertEqual(resp.status_code, 200)

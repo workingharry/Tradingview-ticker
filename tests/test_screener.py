@@ -213,8 +213,8 @@ class TestStockScreenerEngine(unittest.TestCase):
         mock_fetch.assert_called_once_with("NASDAQ:TSLA", timeframe="1D")
         self.assertEqual(len(results_cached), 1)
 
-    @patch("server.call_gemini_generate", new_callable=AsyncMock)
-    @patch("server.fetch_universal_history", new_callable=AsyncMock)
+    @patch("api.ai.call_gemini_generate", new_callable=AsyncMock)
+    @patch("api.history.fetch_universal_history", new_callable=AsyncMock)
     def test_screener_api_endpoints(self, mock_fetch_history, mock_gemini):
         """Verifies GET /api/screener/presets, POST /api/screener/scan, and /api/screener/ai-summary with offline mocks."""
         mock_fetch_history.return_value = self.target_bars
@@ -444,7 +444,7 @@ class TestStockScreenerEngine(unittest.TestCase):
             self.assertIn("weekly_stage2_only", p["criteria"])
 
         # 2. Custom input with semicolon and comma separated strings
-        with patch("server.fetch_universal_history", new_callable=AsyncMock) as mock_fetch:
+        with patch("api.history.fetch_universal_history", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = self.target_bars
             payload_str = {
                 "universe": "custom",
@@ -460,7 +460,7 @@ class TestStockScreenerEngine(unittest.TestCase):
             self.assertIn("NYSE:V", symbols)
 
         # 3. Custom input with list of lowercase strings and non-string elements
-        with patch("server.fetch_universal_history", new_callable=AsyncMock) as mock_fetch:
+        with patch("api.history.fetch_universal_history", new_callable=AsyncMock) as mock_fetch:
             mock_fetch.return_value = self.target_bars
             payload_list = {
                 "universe": "custom",

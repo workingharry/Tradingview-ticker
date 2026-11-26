@@ -139,7 +139,7 @@ class TestMegaPhase3ConnectionAndState(unittest.TestCase):
 
     def test_s7_09_backend_heartbeat(self):
         """S7-09 Backend: WS heartbeat task sends heartbeat with timestamp."""
-        with patch.object(server, "WS_HEARTBEAT_INTERVAL", 0.05):
+        with patch("api.ws.WS_HEARTBEAT_INTERVAL", 0.05):
             client = TestClient(app)
             with client.websocket_connect("/ws/live") as websocket:
                 heartbeat_received = False

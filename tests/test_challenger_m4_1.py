@@ -55,7 +55,7 @@ class TestAdversarialE2EConcurrency(unittest.TestCase):
         close_storage()
 
         self.fetch_patcher = patch(
-            "server.fetch_binance_history",
+            "api.history.fetch_binance_history",
             new_callable=AsyncMock,
             return_value=list(MOCK_HISTORICAL_KLINES),
         )

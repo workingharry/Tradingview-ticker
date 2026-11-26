@@ -323,7 +323,8 @@ class TestStaticAppFixes(unittest.TestCase):
         """Part B3: Verifies /api/heatmap FastAPI endpoint response structure, change_pct and advancing counts."""
         from unittest.mock import patch
         from fastapi.testclient import TestClient
-        from server import app, _HEATMAP_CACHE
+        from server import app
+        from api.screener import _HEATMAP_CACHE
 
         _HEATMAP_CACHE.clear()
 
@@ -344,8 +345,8 @@ class TestStaticAppFixes(unittest.TestCase):
         fake_storage.get_bars.return_value = []
         fake_storage.get_watchlist.return_value = []
 
-        with patch("server.get_storage", return_value=fake_storage), \
-             patch("server.fetch_universal_history", side_effect=fake_fetch):
+        with patch("api.deps.get_storage", return_value=fake_storage), \
+             patch("api.history.fetch_universal_history", side_effect=fake_fetch):
             res = client.get("/api/heatmap?universe=themes&refresh=true")
             self.assertEqual(res.status_code, 200)
             data = res.json()

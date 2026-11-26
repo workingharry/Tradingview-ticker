@@ -57,7 +57,7 @@ class TestChatEndpoint(unittest.TestCase):
 
     def test_chat_valid_message_offline_fallback(self):
         """Verifies that a valid message returns HTTP 200 and structured fallback response offline."""
-        with patch("server.call_gemini_generate", new_callable=AsyncMock, return_value=None):
+        with patch("api.ai.call_gemini_generate", new_callable=AsyncMock, return_value=None):
             resp = self.client.post(
                 "/api/chat",
                 json={
@@ -91,7 +91,7 @@ class TestChatEndpoint(unittest.TestCase):
 
     def test_chat_symbol_normalization_offline(self):
         """Verifies bare ticker normalization to NASDAQ:FAST completely offline."""
-        with patch("server.call_gemini_generate", new_callable=AsyncMock, return_value=None):
+        with patch("api.ai.call_gemini_generate", new_callable=AsyncMock, return_value=None):
             resp = self.client.post(
                 "/api/chat",
                 json={
@@ -104,7 +104,7 @@ class TestChatEndpoint(unittest.TestCase):
             data = resp.json()
             self.assertEqual(data.get("symbol"), "NASDAQ:FAST")
 
-    @patch("server.call_gemini_generate")
+    @patch("api.ai.call_gemini_generate")
     def test_chat_mocked_gemini_success(self, mock_gemini):
         """Verifies that when Gemini returns an answer, /api/chat wraps and returns it."""
         mock_gemini.return_value = "根據當前走勢，NVDA 處於第二階段上升趨勢，關鍵支撐在 140 美元。"

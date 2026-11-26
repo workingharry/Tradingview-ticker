@@ -242,7 +242,7 @@ class TestStorageAndAppNap(unittest.TestCase):
         ]
 
         async def _test():
-            with patch("server.fetch_binance_history", new_callable=AsyncMock) as mock_fetch:
+            with patch("api.history.fetch_binance_history", new_callable=AsyncMock) as mock_fetch:
                 mock_fetch.return_value = mock_remote_bars
                 bars = await server.fetch_historical_bars("BINANCE:BTCUSDT", timeframe="1m")
                 self.assertEqual(len(bars), 5)
@@ -272,14 +272,14 @@ class TestStorageAndAppNap(unittest.TestCase):
         storage.save_bars("NASDAQ:AAPL", "1m", pre_cached)
 
         async def _test():
-            with patch("server.fetch_yahoo_history", new_callable=AsyncMock) as mock_yahoo:
+            with patch("api.history.fetch_yahoo_history", new_callable=AsyncMock) as mock_yahoo:
                 mock_yahoo.return_value = []
                 bars = await server.fetch_historical_bars("NASDAQ:AAPL", timeframe="1m")
                 self.assertEqual(len(bars), 3)
                 self.assertEqual(bars[0]["time"], 1690000000)
                 self.assertEqual(bars[-1]["close"], 52.0)
 
-            with patch("server.fetch_yahoo_history", new_callable=AsyncMock) as mock_yahoo_err:
+            with patch("api.history.fetch_yahoo_history", new_callable=AsyncMock) as mock_yahoo_err:
                 mock_yahoo_err.side_effect = RuntimeError("Network connection refused")
                 bars_err = await server.fetch_historical_bars("NASDAQ:AAPL", timeframe="1m")
                 self.assertEqual(len(bars_err), 3)
@@ -445,7 +445,7 @@ class TestStorageAndAppNap(unittest.TestCase):
         ]
         with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
-             patch("server.fetch_binance_history", new_callable=AsyncMock) as mock_binance:
+             patch("api.history.fetch_binance_history", new_callable=AsyncMock) as mock_binance:
             mock_binance.side_effect = [pre_sleep, [], [], post_sleep]
             with TestClient(server.app) as client:
                 initial = client.get("/api/history?symbol=BINANCE:BTCUSDT&timeframe=1m")

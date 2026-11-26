@@ -108,7 +108,7 @@ class TestMegaPhase7BackendSecurity(unittest.TestCase):
 
     def test_s3_09_dev_mode_rest_origin_validation(self):
         """S3-09: In dev mode, REST POST/PUT/DELETE from untrusted origin returns 403; GET and trusted allowed."""
-        with patch("server.is_desktop_mode", return_value=False):
+        with patch("api.deps.is_desktop_mode", return_value=False):
             # 1. POST with hostile Origin -> 403 Forbidden
             resp_evil_post = self.client.post(
                 "/api/watchlist",
@@ -149,7 +149,7 @@ class TestMegaPhase7BackendSecurity(unittest.TestCase):
 
     def test_s3_09_dev_mode_websocket_origin_validation(self):
         """S3-09: In dev mode, WebSocket connection with untrusted origin is rejected with code 1008."""
-        with patch("server.is_desktop_mode", return_value=False):
+        with patch("api.deps.is_desktop_mode", return_value=False):
             # 1. Untrusted origin -> rejected with code 1008
             with self.assertRaises(Exception) as ctx:
                 with self.client.websocket_connect(

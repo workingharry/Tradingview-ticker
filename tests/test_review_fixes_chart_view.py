@@ -454,9 +454,9 @@ class TestReviewFixesChartView(unittest.TestCase):
                 await event_hold.wait()
                 return _mk_bars(300)
 
-            with patch.object(server, "aggregator", agg1), \
-                 patch.object(server, "fetch_historical_bars", side_effect=slow_fetch), \
-                 patch.object(server, "get_storage", return_value=fake_storage1):
+            with patch("api.deps.aggregator", agg1), \
+                 patch("api.history.fetch_historical_bars", side_effect=slow_fetch), \
+                 patch("api.deps.get_storage", return_value=fake_storage1):
 
                 t1 = asyncio.create_task(
                     server.get_history(symbol="NASDAQ:MANH", timeframe="1m", seed=True, backfill=False, engine="A", limit=None)
@@ -483,9 +483,9 @@ class TestReviewFixesChartView(unittest.TestCase):
             fake_storage2 = MagicMock()
             fake_storage2.get_bars.return_value = _mk_bars(50)
 
-            with patch.object(server, "aggregator", agg2), \
-                 patch.object(server, "fetch_historical_bars", new=AsyncMock(return_value=[])), \
-                 patch.object(server, "get_storage", return_value=fake_storage2):
+            with patch("api.deps.aggregator", agg2), \
+                 patch("api.history.fetch_historical_bars", new=AsyncMock(return_value=[])), \
+                 patch("api.deps.get_storage", return_value=fake_storage2):
 
                 r_cache = await server.get_history(
                     symbol="NASDAQ:MANH", timeframe="1m", seed=True, backfill=False, engine="A", limit=None
@@ -500,9 +500,9 @@ class TestReviewFixesChartView(unittest.TestCase):
             fake_storage3.get_bars.return_value = []
             fetch_mock3 = AsyncMock(return_value=_mk_bars(300))
 
-            with patch.object(server, "aggregator", agg3), \
-                 patch.object(server, "fetch_universal_history", new=fetch_mock3), \
-                 patch.object(server, "get_storage", return_value=fake_storage3):
+            with patch("api.deps.aggregator", agg3), \
+                 patch("api.history.fetch_universal_history", new=fetch_mock3), \
+                 patch("api.deps.get_storage", return_value=fake_storage3):
 
                 # seed=False on equity symbol with 1 bar -> no network fetch
                 r_no_seed = await server.get_history(
@@ -709,10 +709,10 @@ class TestReviewFixesChartView(unittest.TestCase):
 
             t1 = None
             try:
-                with patch.object(server, "ONE_MIN_INFLIGHT_WAIT_SEC", 0.05), \
-                     patch.object(server, "aggregator", agg), \
-                     patch.object(server, "fetch_historical_bars", side_effect=stalled_fetch), \
-                     patch.object(server, "get_storage", return_value=fake_storage):
+                with patch("api.history.ONE_MIN_INFLIGHT_WAIT_SEC", 0.05), \
+                     patch("api.deps.aggregator", agg), \
+                     patch("api.history.fetch_historical_bars", side_effect=stalled_fetch), \
+                     patch("api.deps.get_storage", return_value=fake_storage):
                     t1 = asyncio.create_task(
                         server.get_history(symbol="NASDAQ:MANH", timeframe="1m", seed=True, backfill=False, engine="A", limit=None)
                     )
@@ -858,10 +858,10 @@ class TestReviewFixesChartView(unittest.TestCase):
 
             bg_task = None
             try:
-                with patch.object(server, "ONE_MIN_INFLIGHT_WAIT_SEC", 0.05), \
-                     patch.object(server, "aggregator", agg_a), \
-                     patch.object(server, "fetch_historical_bars", side_effect=stalled_fetch_a), \
-                     patch.object(server, "get_storage", return_value=fake_storage):
+                with patch("api.history.ONE_MIN_INFLIGHT_WAIT_SEC", 0.05), \
+                     patch("api.deps.aggregator", agg_a), \
+                     patch("api.history.fetch_historical_bars", side_effect=stalled_fetch_a), \
+                     patch("api.deps.get_storage", return_value=fake_storage):
                     bg_task = asyncio.create_task(server.fetch_universal_history("NASDAQ:TSLA", timeframe="1m"))
                     await started_a.wait()
 
@@ -898,10 +898,10 @@ class TestReviewFixesChartView(unittest.TestCase):
 
             t1 = None
             try:
-                with patch.object(server, "ONE_MIN_INFLIGHT_WAIT_SEC", 0.05), \
-                     patch.object(server, "aggregator", agg_b), \
-                     patch.object(server, "fetch_historical_bars", side_effect=stalled_fetch_b), \
-                     patch.object(server, "get_storage", return_value=fake_storage):
+                with patch("api.history.ONE_MIN_INFLIGHT_WAIT_SEC", 0.05), \
+                     patch("api.deps.aggregator", agg_b), \
+                     patch("api.history.fetch_historical_bars", side_effect=stalled_fetch_b), \
+                     patch("api.deps.get_storage", return_value=fake_storage):
                     t1 = asyncio.create_task(
                         server.get_history(symbol="NASDAQ:NVDA", timeframe="1m", seed=True, backfill=False, engine="A", limit=None)
                     )

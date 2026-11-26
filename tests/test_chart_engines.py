@@ -28,7 +28,7 @@ class TestChartEngines(unittest.TestCase):
         mock_bars = [{"time": 1731234000, "open": 68000.0, "high": 68050.0, "low": 67950.0, "close": 68020.0, "volume": 10.0}]
         with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
-             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=mock_bars):
+             patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=mock_bars):
             with TestClient(app) as client:
                 resp = client.get("/api/history?symbol=BINANCE:BTCUSDT&timeframe=1m&engine=A")
                 self.assertEqual(resp.status_code, 200)
@@ -52,7 +52,7 @@ class TestChartEngines(unittest.TestCase):
         mock_bars = [{"time": 1731234000, "open": 68000.0, "high": 68050.0, "low": 67950.0, "close": 68020.0, "volume": 10.0}]
         with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
-             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=mock_bars):
+             patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=mock_bars):
             with TestClient(app) as client:
                 resp = client.get("/api/history?symbol=BINANCE:BTCUSDT&timeframe=1m&engine=B")
                 self.assertEqual(resp.status_code, 200)

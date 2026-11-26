@@ -65,8 +65,8 @@ class TestYahooSessionAndFundamentals(unittest.TestCase):
         with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
              patch.object(YahooSessionManager, "get_session", new_callable=AsyncMock, return_value=({"B": "1"}, "crumb")), \
-             patch("server.get_shared_client", return_value=mock_cli), \
-             patch("server.call_gemini_generate", new_callable=AsyncMock, return_value="Offline mocked summary"):
+             patch("api.deps.get_shared_client", return_value=mock_cli), \
+             patch("api.ai.call_gemini_generate", new_callable=AsyncMock, return_value="Offline mocked summary"):
             with TestClient(app) as client:
                 res = client.get("/api/fundamentals?symbol=NASDAQ:NVDA&refresh=true")
                 self.assertEqual(res.status_code, 200)
@@ -99,7 +99,7 @@ class TestYahooSessionAndFundamentals(unittest.TestCase):
         """Verifies /api/chat responds cleanly offline when AI helper is mocked."""
         with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
-             patch("server.call_gemini_generate", new_callable=AsyncMock, return_value=None):
+             patch("api.ai.call_gemini_generate", new_callable=AsyncMock, return_value=None):
             with TestClient(app) as client:
                 res = client.post(
                     "/api/chat",
