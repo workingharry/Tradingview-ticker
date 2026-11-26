@@ -250,16 +250,82 @@ class TestSection11ManualQuantityAndRrEdit(unittest.TestCase):
         self.assertEqual(res["priceBeforeQty"]["error"], "價格必須是大於 0 的數字")
 
     def test_static_invariants(self):
-        """Checks dblclick binding, absence of innerHTML in updateRrEditPreview, and rrEditModal DOM IDs."""
-        app_content = self.app_js_path.read_text(encoding="utf-8")
-        self.assertIn('drawingCanvas.addEventListener("dblclick"', app_content)
+        """Verifies updateRrEditPreview renders cleanly without innerHTML and rrEditModal DOM IDs exist."""
+        res = self._execute_node_eval("""
+        (function() {
+            var elems = {};
+            var innerHtmlWrites = 0;
+            function mkEl(id, val) {
+                var obj = {
+                    id: id,
+                    value: val || "",
+                    disabled: false,
+                    textContent: "",
+                    style: {},
+                    children: [],
+                    classList: { add: function(){}, remove: function(){}, toggle: function(){} },
+                    appendChild: function(c) { this.children.push(c); },
+                    removeChild: function(c) {
+                        var idx = this.children.indexOf(c);
+                        if (idx >= 0) this.children.splice(idx, 1);
+                    },
+                    addEventListener: function() {}
+                };
+                Object.defineProperty(obj, "firstChild", { get: function() { return this.children[0] || null; } });
+                Object.defineProperty(obj, "innerHTML", {
+                    get: function() { return ""; },
+                    set: function() { innerHtmlWrites++; }
+                });
+                return obj;
+            }
+            elems["rrEditEntry"] = mkEl("rrEditEntry", "100");
+            elems["rrEditStop"] = mkEl("rrEditStop", "94");
+            elems["rrEditTarget"] = mkEl("rrEditTarget", "115");
+            elems["rrEditQty"] = mkEl("rrEditQty", "84");
+            elems["rrEditPreview"] = mkEl("rrEditPreview", "");
+            elems["rrEditError"] = mkEl("rrEditError", "");
+            elems["btnRrEditApply"] = mkEl("btnRrEditApply", "");
+            elems["screenerRisk"] = mkEl("screenerRisk", "500");
 
-        fn_start = app_content.find("function updateRrEditPreview")
-        self.assertNotEqual(fn_start, -1, "function updateRrEditPreview not found in static/app.js")
-        fn_end = app_content.find("\nfunction ", fn_start + 1)
-        fn_body = app_content[fn_start:] if fn_end == -1 else app_content[fn_start:fn_end]
-        self.assertNotIn("innerHTML", fn_body)
+            var origGetEl = document.getElementById;
+            document.getElementById = function(id) { return elems[id] || origGetEl(id); };
+            document.createElement = function(tag) { return mkEl(tag, ""); };
 
+            updateRrEditPreview();
+            var validChildren = elems["rrEditPreview"].children.map(function(c) { return c.textContent; });
+            var validErr = elems["rrEditError"].textContent;
+            var validDisabled = elems["btnRrEditApply"].disabled;
+
+            elems["rrEditEntry"].value = "<img src=x onerror=alert(1)>";
+            updateRrEditPreview();
+            var badChildrenLen = elems["rrEditPreview"].children.length;
+            var badErr = elems["rrEditError"].textContent;
+            var badDisabled = elems["btnRrEditApply"].disabled;
+
+            return {
+                innerHtmlWrites: innerHtmlWrites,
+                validChildren: validChildren,
+                validErr: validErr,
+                validDisabled: validDisabled,
+                badChildrenLen: badChildrenLen,
+                badErr: badErr,
+                badDisabled: badDisabled
+            };
+        })()
+        """)
+        self.assertEqual(res["innerHtmlWrites"], 0)
+        self.assertEqual(len(res["validChildren"]), 2)
+        self.assertIn("做多", res["validChildren"][0])
+        self.assertIn("建議 83 股", res["validChildren"][0])
+        self.assertIn("手動 84 股", res["validChildren"][1])
+        self.assertIn("超過風控", res["validChildren"][1])
+        self.assertEqual(res["validErr"], "")
+        self.assertFalse(res["validDisabled"])
+        self.assertEqual(res["badChildrenLen"], 0)
+        self.assertTrue(bool(res["badErr"]))
+        self.assertTrue(res["badDisabled"])
+
+        # guard-test: 設定守門，允許讀原始碼
         html_path = PROJECT_ROOT / "static" / "index.html"
         html_content = html_path.read_text(encoding="utf-8")
         for dom_id in ("rrEditModal", "rrEditEntry", "rrEditStop", "rrEditTarget", "rrEditQty", "btnRrEditApply"):

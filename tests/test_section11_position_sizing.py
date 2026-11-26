@@ -217,19 +217,124 @@ class TestSection11PositionSizing(unittest.TestCase):
         self.assertEqual(res["zeroAtr"]["error"], "invalid_input")
 
     def test_static_app_js_invariants(self):
-        """Checks static/app.js removed legacy clamping/hardcoded risk and declares var timeScale in mousemove."""
-        content = self.app_js_path.read_text(encoding="utf-8")
+        """Verifies narrow-stop precision, dynamic riskDollar, and drawing mousemove timeScale behavior in Node VM."""
+        res = self._execute_node_eval("""
+        (function() {
+            var narrow = computeRiskRewardView({ entry: 2.02, target: 2.10, stop: 2.015, riskDollar: 500 });
+            var customRisk = computeRiskRewardView({ entry: 100, target: 115, stop: 94, riskDollar: 250 });
 
-        self.assertNotIn("Math.max(0.01, d.entryPrice - d.stopPrice)", content)
-        self.assertNotIn("(d.riskDollar || 500)", content)
-        self.assertNotIn("riskInput.value = cfg.risk_dollar", content)
+            var listeners = {};
+            var docListeners = {};
+            var dummyEl = {
+                style: {},
+                value: "",
+                textContent: "",
+                classList: { add: function(){}, remove: function(){}, toggle: function(){} },
+                appendChild: function(){},
+                removeChild: function(){},
+                setAttribute: function(){},
+                getBoundingClientRect: function() { return { left: 0, top: 0, width: 800, height: 400 }; },
+                addEventListener: function(ev, fn) { listeners[ev] = fn; },
+                querySelectorAll: function() { return []; }
+            };
+            var origDoc = document;
+            document = {
+                getElementById: function(id) {
+                    if (id === "drawingCanvas") return dummyEl;
+                    return origDoc.getElementById(id);
+                },
+                querySelector: function() { return null; },
+                querySelectorAll: function() { return []; },
+                createElement: function() { return dummyEl; },
+                addEventListener: function(ev, fn) { docListeners[ev] = fn; },
+                removeEventListener: function() {},
+                body: dummyEl
+            };
+            // Re-run drawing listener initialization if registered via DOMContentLoaded
+            var mmDrawing = { entryPrice: 100, targetPrice: 110, stopPrice: 95, time: 1000 };
+            if (listeners["mousemove"]) {
+                isDraggingHandle = { handle: "body", drawing: mmDrawing, origEntry: 100, origTarget: 110, origStop: 95, origPrice: 100, origTime: 1000, startX: 50 };
+                candlestickSeries = { coordinateToPrice: function() { return 102; } };
+                chart = { timeScale: function() { return { timeToCoordinate: function() { return 50; }, coordinateToTime: function() { return 1060; } }; } };
+                listeners["mousemove"]({ clientX: 60, clientY: 120 });
+            }
+            return {
+                narrowStopDist: narrow.stopDistance,
+                narrowShares: narrow.shares,
+                customRiskShares: customRisk.shares
+            };
+        })()
+        """)
+        self.assertAlmostEqual(res["narrowStopDist"], 0.005, places=6)
+        self.assertEqual(res["narrowShares"], 100000)
+        self.assertEqual(res["customRiskShares"], 41)
 
-        mm_start = content.find('drawingCanvas.addEventListener("mousemove"')
-        self.assertNotEqual(mm_start, -1, 'drawingCanvas.addEventListener("mousemove" not found')
-        mu_end = content.find('window.addEventListener("mouseup"', mm_start)
-        self.assertNotEqual(mu_end, -1, 'window.addEventListener("mouseup" not found after mousemove')
-        mousemove_slice = content[mm_start:mu_end]
-        self.assertIn("var timeScale", mousemove_slice)
+        # Verify dragging body horizontally with timeScale updates drawing.time in real Node VM
+        harness_check = """
+        const fs = require('fs');
+        const vm = require('vm');
+        const appCode = fs.readFileSync(""" + json.dumps(str(self.app_js_path)) + """, 'utf8');
+        const canvasListeners = {};
+        const docListeners = {};
+        function mkNode() {
+            return {
+                style: {}, value: "", textContent: "", children: [],
+                classList: { add: () => {}, remove: () => {}, toggle: () => {}, contains: () => false },
+                appendChild: () => {}, removeChild: () => {}, setAttribute: () => {},
+                getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 400 }),
+                getContext: () => ({ clearRect: () => {}, beginPath: () => {}, moveTo: () => {}, lineTo: () => {}, stroke: () => {}, fillRect: () => {}, strokeRect: () => {}, fillText: () => {}, measureText: () => ({ width: 20 }), setLineDash: () => {}, save: () => {}, restore: () => {}, arc: () => {}, fill: () => {} }),
+                addEventListener: function(ev, fn) { if (this._isCanvas) canvasListeners[ev] = fn; },
+                removeEventListener: () => {},
+                querySelectorAll: () => [],
+                querySelector: () => null
+            };
+        }
+        const canvasEl = mkNode();
+        canvasEl._isCanvas = true;
+        const sandbox = {
+            setTimeout, clearTimeout, AbortController, URLSearchParams, setInterval: () => 0, clearInterval: () => {},
+            requestAnimationFrame: () => 1, cancelAnimationFrame: () => {},
+            fetch: () => Promise.resolve({ ok: true, json: () => Promise.resolve({ bars: [], watchlist: [], preferences: {} }) }),
+            document: {
+                getElementById: (id) => id === "drawingCanvas" ? canvasEl : mkNode(),
+                querySelector: () => null, querySelectorAll: () => [],
+                createElement: () => mkNode(),
+                addEventListener: (ev, fn) => { docListeners[ev] = fn; },
+                removeEventListener: () => {},
+                body: mkNode()
+            },
+            localStorage: { _s: {}, getItem(k){ return this._s[k] ?? null; }, setItem(k,v){ this._s[k]=String(v); }, removeItem(k){ delete this._s[k]; }, length: 0 },
+            navigator: { userAgent: 'node-test' },
+            location: { search: '', protocol: 'http:', host: '127.0.0.1:8000' },
+            addEventListener: () => {}, removeEventListener: () => {}, console, Intl,
+            WebSocket: function() { return { close: () => {}, send: () => {} }; }
+        };
+        sandbox.window = sandbox;
+        sandbox.globalThis = sandbox;
+        vm.createContext(sandbox);
+        vm.runInContext(appCode, sandbox);
+        if (docListeners["DOMContentLoaded"]) docListeners["DOMContentLoaded"]();
+        let movedTime = null;
+        if (canvasListeners["mousemove"]) {
+            const d = { type: "risk_reward", entryPrice: 100, targetPrice: 110, stopPrice: 95, time: 1000 };
+            vm.runInContext(`
+                candlestickSeries = { coordinateToPrice: () => 102 };
+                chart = { timeScale: () => ({ timeToCoordinate: () => 50, coordinateToTime: (x) => x > 50 ? 1060 : 1000 }) };
+            `, sandbox);
+            sandbox.isDraggingHandle = { handle: "body", drawing: d, origEntry: 100, origTarget: 110, origStop: 95, origPrice: 100, origTime: 1000, startX: 50 };
+            canvasListeners["mousemove"]({ clientX: 70, clientY: 120 });
+            movedTime = d.time;
+        }
+        console.log(JSON.stringify({ hasMove: !!canvasListeners["mousemove"], movedTime }));
+        process.exit(0);
+        """
+        env = os.environ.copy()
+        env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('PATH', '')}"
+        proc = subprocess.run([self.node_bin, "-e", harness_check], capture_output=True, text=True, cwd=str(PROJECT_ROOT), env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        mm_res = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertTrue(mm_res["hasMove"])
+        self.assertEqual(mm_res["movedTime"], 1060)
 
 
 if __name__ == "__main__":

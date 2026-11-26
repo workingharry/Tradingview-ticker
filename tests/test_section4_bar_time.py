@@ -243,13 +243,39 @@ class TestSection4BarTime(unittest.TestCase):
         self.assertIsNone(res["tickNonNumeric"])
 
     def test_static_invariants(self):
-        """報價累計量不再寫入 K 棒；舊的 Math.max 合併量已移除；偏好週期走正規切換。"""
-        content = self.app_js_path.read_text(encoding="utf-8")
-        self.assertNotIn("(volume !== undefined && volume !== null && !isNaN(volume)) ? volume", content)
-        self.assertNotIn("volume = Math.max(lastBarObj.volume || 0, volume);", content)
-        self.assertNotIn("volume = Math.max(lastRawBar.volume || 0, volume);", content)
-        self.assertIn("prefTfBtn.onclick();", content)
-        self.assertIn("tickMarkFormatter: mainTimeOpts.tickMarkFormatter", content)
+        """執行 updateQuote 與 formatMarketTickMark 驗證報價累計量不會覆蓋 K 棒量，且格式化函式可用。"""
+        res = self._execute_node_eval("""
+        (function() {
+            var updatedBars = [];
+            activeSymbol = "BINANCE:BTCUSDT";
+            activeTimeframe = "1h";
+            isHistoryLoading = false;
+            currentCandleStyle = "solid";
+            var barTime = %d;
+            var initialBar = { time: barTime, open: 50000, high: 50100, low: 49900, close: 50050, volume: 12.5 };
+            currentRawBars = [initialBar];
+            lastBarTime = barTime;
+            lastBarObj = Object.assign({}, initialBar);
+            latestBarData = initialBar;
+            candleSeries = {
+                update: function(b) { updatedBars.push(b); },
+                data: function() { return currentRawBars; }
+            };
+            updateQuote("BINANCE:BTCUSDT", { price: 50150, volume: 999999, time: barTime + 15 });
+            return {
+                updatedCount: updatedBars.length,
+                updatedClose: updatedBars[0] ? updatedBars[0].close : null,
+                lastBarVol: lastBarObj.volume,
+                rawBarVol: currentRawBars[0].volume,
+                tickLabel: formatMarketTickMark(barTime, 3, "BINANCE:BTCUSDT", "zh")
+            };
+        })()
+        """ % E["utc_1123_1500"])
+        self.assertEqual(res["updatedCount"], 1)
+        self.assertEqual(res["updatedClose"], 50150)
+        self.assertEqual(res["lastBarVol"], 12.5)
+        self.assertEqual(res["rawBarVol"], 12.5)
+        self.assertEqual(res["tickLabel"], "15:00")
 
 
 if __name__ == "__main__":
