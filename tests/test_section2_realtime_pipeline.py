@@ -135,9 +135,16 @@ class TestSection2RealTimePipeline(unittest.TestCase):
             def fake_clock():
                 return simulated_time
 
+            done_event = asyncio.Event()
+
             async def fake_sleep(d):
                 sleep_durations.append(d)
-                # Return immediately to avoid test delay
+                if len(sleep_durations) >= 4:
+                    done_event.set()
+                    await asyncio.sleep(0.05)
+                else:
+                    # Yield control to the event loop across all Python versions (incl. 3.12)
+                    await asyncio.sleep(0)
 
             connect_attempts = 0
 
@@ -181,10 +188,10 @@ class TestSection2RealTimePipeline(unittest.TestCase):
                 task = asyncio.create_task(client._connection_loop())
 
                 # Wait until we have 4 sleeps recorded
-                for _ in range(50):
-                    if len(sleep_durations) >= 4:
-                        break
-                    await asyncio.sleep(0.01)
+                try:
+                    await asyncio.wait_for(done_event.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    pass
 
                 client.running = False
                 task.cancel()
