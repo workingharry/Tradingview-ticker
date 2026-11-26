@@ -30,9 +30,11 @@ class TestMegaPhase6DrawingsAndLines(unittest.TestCase):
         const elements = {{}};
         function getOrCreateEl(id) {{
             if (!elements[id]) {{
+                const listeners = {{}};
                 const el = {{
                     _id: id,
                     _text: '',
+                    _listeners: listeners,
                     title: '',
                     className: '',
                     style: {{}},
@@ -48,8 +50,18 @@ class TestMegaPhase6DrawingsAndLines(unittest.TestCase):
                     children: [],
                     appendChild: function(c) {{ el.children.push(c); }},
                     insertBefore: function(c, ref) {{ el.children.push(c); }},
-                    addEventListener: function() {{}},
+                    addEventListener: function(evt, fn) {{
+                        listeners[evt] = listeners[evt] || [];
+                        listeners[evt].push(fn);
+                    }},
                     removeEventListener: function() {{}},
+                    dispatchEvent: function(evt, obj) {{
+                        (listeners[evt] || []).forEach(function(fn) {{ fn(obj); }});
+                    }},
+                    getBoundingClientRect: function() {{
+                        return {{ left: 0, top: 0, width: 800, height: 600 }};
+                    }},
+                    getContext: function() {{ return null; }},
                     setAttribute: function(k, v) {{ el[k] = v; if (k === 'id') {{ el._id = v; elements[v] = el; }} }},
                     getAttribute: function(k) {{ return el[k] || null; }},
                     querySelector: function(s) {{ return null; }},
@@ -86,11 +98,14 @@ class TestMegaPhase6DrawingsAndLines(unittest.TestCase):
 
         const storageStore = {{}};
         const keyListeners = [];
+        const winListeners = {{}};
 
         const sandbox = {{
             window: {{
                 addEventListener: function(evt, handler) {{
                     if (evt === 'keydown') keyListeners.push(handler);
+                    winListeners[evt] = winListeners[evt] || [];
+                    winListeners[evt].push(handler);
                 }},
                 removeEventListener: function() {{}},
                 LightweightCharts: {{
@@ -126,6 +141,8 @@ class TestMegaPhase6DrawingsAndLines(unittest.TestCase):
             location: {{ search: '', protocol: 'http:', host: '127.0.0.1:8000', origin: 'http://127.0.0.1:8000' }},
             addEventListener: function(evt, handler) {{
                 if (evt === 'keydown') keyListeners.push(handler);
+                winListeners[evt] = winListeners[evt] || [];
+                winListeners[evt].push(handler);
             }},
             removeEventListener: () => {{}},
             console: console,
@@ -137,6 +154,9 @@ class TestMegaPhase6DrawingsAndLines(unittest.TestCase):
             clearTimeout: clearTimeout,
             _dispatchKeydown: function(evtObj) {{
                 keyListeners.forEach(fn => fn(evtObj));
+            }},
+            _dispatchWindowEvent: function(evt, evtObj) {{
+                (winListeners[evt] || []).forEach(fn => fn(evtObj));
             }}
         }};
         sandbox.globalThis = sandbox;
@@ -371,6 +391,119 @@ class TestMegaPhase6DrawingsAndLines(unittest.TestCase):
         res = self._execute_node_eval(js_code)
         self.assertTrue(res["toggleScreenerCalled"])
         self.assertEqual(res["lastPriceLineTitle"], "ALERT (未啟用提醒)")
+
+    def test_rr_box_coexistence_allows_drawing_lines_and_preserves_cursor_edit(self):
+        """Regression test for P0 drawing bug:
+        (a) With an existing risk-reward box on canvas, clicking inside the box with
+            trendline / hline / ruler succeeds in adding new drawings.
+        (b) In cursor mode, dragging R:R body and clicking close (X) still work.
+        (c) In non-cursor mode, clicking directly on close (X) does NOT delete the R:R box.
+        """
+        js_code = """
+        initEventListeners();
+
+        chart = {
+            timeScale: function() {
+                return {
+                    coordinateToTime: function(x) { return 1700000000 + Math.round(x) * 60; },
+                    timeToCoordinate: function(t) { return (t - 1700000000) / 60; },
+                    coordinateToLogical: function(x) { return Math.round(x / 10); }
+                };
+            }
+        };
+        candlestickSeries = {
+            coordinateToPrice: function(y) { return 200 - y * 0.25; },
+            priceToCoordinate: function(p) { return (200 - p) / 0.25; }
+        };
+        renderDrawingCanvas = function() {};
+        activeSymbol = "NASDAQ:AXON";
+
+        var rrBox = {
+            type: "risk-reward",
+            time: 1700012000,
+            entryPrice: 150,
+            targetPrice: 175,
+            stopPrice: 125,
+            boxLeft: 200,
+            boxRight: 400,
+            targetTop: 100,
+            targetHeight: 100,
+            stopTop: 200,
+            stopHeight: 100,
+            targetHandleY: 100,
+            stopHandleY: 300,
+            closeBtnX: 386,
+            closeBtnY: 114
+        };
+        drawings = [rrBox];
+
+        var canvasEl = document.getElementById("drawingCanvas");
+        function clickAt(x, y) {
+            canvasEl.dispatchEvent("mousedown", { clientX: x, clientY: y, ctrlKey: false, metaKey: false });
+        }
+
+        // (c) Non-cursor mode clicking directly on R:R close button X must NOT delete R:R box
+        currentDrawTool = "trendline";
+        clickAt(386, 114);
+        var rrPreservedOnCloseClick = drawings.some(function(d) { return d.type === "risk-reward"; });
+        var startedOverCloseBtn = Boolean(drawingInProgress && drawingInProgress.type === "trendline");
+
+        // (a1) Complete trendline second click inside R:R box body
+        clickAt(320, 220);
+        var countAfterTrendline = drawings.length;
+        var dragDuringTrendline = isDraggingHandle;
+
+        // (a2) Horizontal line inside R:R box body
+        currentDrawTool = "hline";
+        clickAt(280, 180);
+        var countAfterHline = drawings.length;
+
+        // (a3) Ruler two clicks inside R:R box body
+        currentDrawTool = "ruler";
+        clickAt(240, 150);
+        clickAt(340, 240);
+        var countAfterRuler = drawings.length;
+        var typesAdded = drawings.slice(1).map(function(d) { return d.type; });
+
+        // (b1) Cursor mode dragging R:R body
+        currentDrawTool = "cursor";
+        clickAt(260, 160);
+        var dragHandleInCursor = isDraggingHandle ? isDraggingHandle.handle : null;
+        canvasEl.dispatchEvent("mousemove", { clientX: 280, clientY: 140 });
+        var entryAfterDrag = rrBox.entryPrice;
+        _dispatchWindowEvent("mouseup", {});
+        var dragClearedAfterMouseup = isDraggingHandle === null;
+
+        // (b2) Cursor mode clicking X deletes R:R box
+        clickAt(386, 114);
+        var rrCountAfterCursorClose = drawings.filter(function(d) { return d.type === "risk-reward"; }).length;
+
+        return {
+            rrPreservedOnCloseClick: rrPreservedOnCloseClick,
+            startedOverCloseBtn: startedOverCloseBtn,
+            countAfterTrendline: countAfterTrendline,
+            dragDuringTrendline: dragDuringTrendline,
+            countAfterHline: countAfterHline,
+            countAfterRuler: countAfterRuler,
+            typesAdded: typesAdded,
+            dragHandleInCursor: dragHandleInCursor,
+            entryMovedUp: entryAfterDrag > 150,
+            dragClearedAfterMouseup: dragClearedAfterMouseup,
+            rrCountAfterCursorClose: rrCountAfterCursorClose
+        };
+        """
+        res = self._execute_node_eval(js_code)
+        self.assertTrue(res["rrPreservedOnCloseClick"])
+        self.assertTrue(res["startedOverCloseBtn"])
+        self.assertEqual(res["countAfterTrendline"], 2)
+        self.assertIsNone(res["dragDuringTrendline"])
+        self.assertEqual(res["countAfterHline"], 3)
+        self.assertEqual(res["countAfterRuler"], 4)
+        self.assertEqual(res["typesAdded"], ["trendline", "hline", "ruler"])
+        self.assertEqual(res["dragHandleInCursor"], "body")
+        self.assertTrue(res["entryMovedUp"])
+        self.assertTrue(res["dragClearedAfterMouseup"])
+        self.assertEqual(res["rrCountAfterCursorClose"], 0)
 
 
 if __name__ == "__main__":

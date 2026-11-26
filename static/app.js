@@ -10161,51 +10161,52 @@ function initEventListeners() {
         }
       }
 
-      for (var k = drawings.length - 1; k >= 0; k--) {
-        var rd = drawings[k];
-        if (rd.type === "risk-reward") {
-          if (rd.closeBtnX && rd.closeBtnY && Math.hypot(x - rd.closeBtnX, y - rd.closeBtnY) <= 14) {
-            drawings.splice(k, 1);
-            saveDrawingsForActiveSymbol();
-            if (drawingCanvas) drawingCanvas.classList.remove("interactive", "cursor-move", "cursor-ns-resize", "cursor-pointer");
-            renderDrawingCanvas();
-            return;
-          }
-          if (rd.boxLeft && rd.boxRight && x >= rd.boxLeft && x <= rd.boxRight) {
-            if (Math.abs(y - rd.targetHandleY) <= 10) {
-              isDraggingHandle = { drawing: rd, handle: "target" };
+      if (currentDrawTool === "cursor") {
+        for (var k = drawings.length - 1; k >= 0; k--) {
+          var rd = drawings[k];
+          if (rd.type === "risk-reward") {
+            if (rd.closeBtnX && rd.closeBtnY && Math.hypot(x - rd.closeBtnX, y - rd.closeBtnY) <= 14) {
+              drawings.splice(k, 1);
+              saveDrawingsForActiveSymbol();
+              if (drawingCanvas) drawingCanvas.classList.remove("interactive", "cursor-move", "cursor-ns-resize", "cursor-pointer");
+              renderDrawingCanvas();
               return;
             }
-            if (Math.abs(y - rd.stopHandleY) <= 10) {
-              isDraggingHandle = { drawing: rd, handle: "stop" };
-              return;
-            }
-            var yEntCoord = candlestickSeries ? candlestickSeries.priceToCoordinate(rd.entryPrice) : null;
-            if (yEntCoord !== null && Math.abs(y - yEntCoord) <= 10) {
-              isDraggingHandle = { drawing: rd, handle: "entry" };
-              return;
-            }
-            var bMinY = Math.min(rd.targetTop || 0, rd.stopTop || 0);
-            var bMaxY = Math.max((rd.targetTop || 0) + (rd.targetHeight || 0), (rd.stopTop || 0) + (rd.stopHeight || 0));
-            if (y >= bMinY && y <= bMaxY) {
-              isDraggingHandle = {
-                drawing: rd,
-                handle: "body",
-                startX: x,
-                startY: y,
-                origPrice: price || rd.entryPrice,
-                origTime: rd.time,
-                origEntry: rd.entryPrice,
-                origTarget: rd.targetPrice,
-                origStop: rd.stopPrice
-              };
-              return;
+            if (rd.boxLeft && rd.boxRight && x >= rd.boxLeft && x <= rd.boxRight) {
+              if (Math.abs(y - rd.targetHandleY) <= 10) {
+                isDraggingHandle = { drawing: rd, handle: "target" };
+                return;
+              }
+              if (Math.abs(y - rd.stopHandleY) <= 10) {
+                isDraggingHandle = { drawing: rd, handle: "stop" };
+                return;
+              }
+              var yEntCoord = candlestickSeries ? candlestickSeries.priceToCoordinate(rd.entryPrice) : null;
+              if (yEntCoord !== null && Math.abs(y - yEntCoord) <= 10) {
+                isDraggingHandle = { drawing: rd, handle: "entry" };
+                return;
+              }
+              var bMinY = Math.min(rd.targetTop || 0, rd.stopTop || 0);
+              var bMaxY = Math.max((rd.targetTop || 0) + (rd.targetHeight || 0), (rd.stopTop || 0) + (rd.stopHeight || 0));
+              if (y >= bMinY && y <= bMaxY) {
+                isDraggingHandle = {
+                  drawing: rd,
+                  handle: "body",
+                  startX: x,
+                  startY: y,
+                  origPrice: price || rd.entryPrice,
+                  origTime: rd.time,
+                  origEntry: rd.entryPrice,
+                  origTarget: rd.targetPrice,
+                  origStop: rd.stopPrice
+                };
+                return;
+              }
             }
           }
         }
+        return;
       }
-
-      if (currentDrawTool === "cursor") return;
 
       if (currentDrawTool === "risk-reward") {
         if (price) {
