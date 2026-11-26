@@ -30,6 +30,21 @@ jobs:
         run: |
           python scripts/build_sidecar.py
 
+      - name: Cache Cargo and Tauri Target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Pre-compile Rust Test Binary
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --no-run
+
       - name: Run Backend Pytest Suite
         env:
           PYTHONUNBUFFERED: "1"
