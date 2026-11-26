@@ -225,15 +225,33 @@ class TestRemainingP0P1Fixes(unittest.TestCase):
         self.assertIn("AbortError", ai_body)
 
     def test_server_screener_accepts_min_rev_yoy(self):
-        """Verifies server.py falls back to min_rev_yoy when min_rev_growth_yoy is absent."""
-        srv = self.server_py_path.read_text(encoding="utf-8")
-        self.assertIn('raw_criteria.get("min_rev_yoy")', srv)
-        idx = srv.find("min_rev_growth: Optional[float] = None")
-        self.assertNotEqual(idx, -1)
-        snippet = srv[idx:idx + 350]
-        self.assertIn("min_rev_yoy", snippet)
+        """Verifies POST /api/screener/scan maps legacy min_rev_yoy into min_rev_growth_yoy cleanly."""
+        from unittest.mock import AsyncMock, patch
+        from fastapi.testclient import TestClient
+        import server
+
+        captured = {}
+
+        async def fake_scan_universe(universe, criteria, **kwargs):
+            captured["min_rev_growth_yoy"] = criteria.min_rev_growth_yoy
+            return []
+
+        with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
+             patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
+             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
+             patch("server.scan_universe", side_effect=fake_scan_universe), \
+             TestClient(server.app) as client:
+            resp = client.post("/api/screener/scan", json={
+                "universe": "us_momentum",
+                "criteria": {"min_rev_yoy": 25.0}
+            })
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.json().get("status"), "ok")
+            self.assertEqual(captured.get("min_rev_growth_yoy"), 25.0)
 
     def test_tauri_graceful_sidecar_shutdown(self):
+        # guard-test: 設定守門，允許讀原始碼
         """Verifies src-tauri/src/lib.rs sends SIGTERM and waits before SIGKILL fallback."""
         lib_rs = self.lib_rs_path.read_text(encoding="utf-8")
         self.assertIn("fn terminate_child_gracefully", lib_rs)

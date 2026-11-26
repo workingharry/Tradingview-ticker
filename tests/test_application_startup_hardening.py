@@ -128,11 +128,28 @@ class TestApplicationStartupHardening(unittest.TestCase):
             sock.close()
 
     def test_tradingview_client_user_agent_header(self):
-        """Validates that TradingViewAsyncClient sets user_agent_header in websocket connection."""
-        import inspect
-        source = inspect.getsource(TradingViewAsyncClient._connection_loop)
-        self.assertIn("user_agent_header", source)
-        self.assertIn("Mozilla/5.0", source)
+        """Validates that TradingViewAsyncClient passes Mozilla/5.0 User-Agent header to websockets.connect."""
+        import asyncio
+        from unittest.mock import patch
+
+        captured = {}
+
+        def fake_connect(*args, user_agent_header=None, **kwargs):
+            captured["user_agent_header"] = user_agent_header
+            captured["kwargs"] = kwargs
+            client.running = False
+            raise ConnectionRefusedError("stop after handshake check")
+
+        client = TradingViewAsyncClient(symbols=["BINANCE:BTCUSDT"])
+        client.running = True
+
+        async def _run():
+            with patch("websockets.connect", new=fake_connect):
+                await client._connection_loop()
+
+        asyncio.run(_run())
+        self.assertIn("user_agent_header", captured)
+        self.assertIn("Mozilla/5.0", str(captured["user_agent_header"] or ""))
 
     def test_target_debug_launcher_resolves_in_dev_topology(self):
         """Validates that server binary launcher located in src-tauri/target/debug executes properly."""
@@ -185,6 +202,7 @@ class TestApplicationStartupHardening(unittest.TestCase):
                 corrupt_path.unlink()
 
     def test_tauri_conf_resources_and_csp_integrity(self):
+        # guard-test: 設定守門，允許讀原始碼
         """Validates that tauri.conf.json has empty resources (to prevent symlink flattening) and complete CSP."""
         import json
         conf_path = PROJECT_ROOT / "src-tauri" / "tauri.conf.json"

@@ -213,6 +213,8 @@ class TestAuditTenFindingsFixes(unittest.TestCase):
     # 2.4 Watchlist Eviction Broadcast and Auto-Increment Sort Order
     def test_item_2_4_watchlist_auto_increment_sort_order_and_eviction_broadcast(self):
         """Verifies that add_watchlist_item auto-increments sort_order and subscribe_symbol broadcasts symbol_removed."""
+        import asyncio
+        from unittest.mock import patch, MagicMock, AsyncMock
         storage = self.storage
         storage.add_watchlist_item({"id": "NASDAQ:SYM1", "name": "Sym 1"})
         storage.add_watchlist_item({"id": "NASDAQ:SYM2", "name": "Sym 2"})
@@ -222,9 +224,30 @@ class TestAuditTenFindingsFixes(unittest.TestCase):
         self.assertEqual(order_map["NASDAQ:SYM1"], 0)
         self.assertEqual(order_map["NASDAQ:SYM2"], 1)
 
-        # Test app.js handles symbol_removed
-        app_js_text = Path("static/app.js").read_text(encoding="utf-8")
-        self.assertIn('msg.type === "symbol_removed"', app_js_text)
+        # Verify backend actually broadcasts symbol_removed on eviction
+        orig_wl = [dict(w) for w in server.WATCHLIST]
+        orig_syms = list(server.SYMBOLS)
+        try:
+            server.WATCHLIST.clear()
+            server.SYMBOLS.clear()
+            for i in range(50):
+                sym_id = f"{'CORE' if i < 5 else 'DYN'}:EV{i}"
+                server.WATCHLIST.append({"id": sym_id, "name": sym_id, "exchange": "DYN", "pair": f"EV{i}", "type": "stock"})
+                server.SYMBOLS.append(sym_id)
+            expected_evicted = server.WATCHLIST[5]["id"]
+            broadcasts = []
+            with patch.object(server.manager, "broadcast_nowait", side_effect=lambda m: broadcasts.append(m)), \
+                 patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]):
+                asyncio.run(server.subscribe_symbol({"symbol": "NASDAQ:EVICTED99"}))
+            self.assertTrue(
+                any(m.get("type") == "symbol_removed" and m.get("symbol") == expected_evicted for m in broadcasts),
+                f"Expected symbol_removed broadcast for {expected_evicted}, got {broadcasts}",
+            )
+        finally:
+            server.WATCHLIST.clear()
+            server.WATCHLIST.extend(orig_wl)
+            server.SYMBOLS.clear()
+            server.SYMBOLS.extend(orig_syms)
 
     # 2.5 TradingView Client Reconnect Cleanup
     def test_item_2_5_tv_client_reconnect_cleanup(self):

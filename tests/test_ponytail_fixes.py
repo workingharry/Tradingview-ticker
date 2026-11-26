@@ -95,17 +95,80 @@ class TestPonytailReviewFixes(unittest.IsolatedAsyncioTestCase):
             server.tv_client = None
 
     def test_default_server_binding_is_localhost(self):
-        """Verifies that server.py main uvicorn invocation defaults to 127.0.0.1 (not 0.0.0.0)."""
-        server_code = Path("server.py").read_text(encoding="utf-8")
-        self.assertIn('host="127.0.0.1"', server_code)
-        self.assertNotIn('host="0.0.0.0"', server_code)
+        """Verifies that server.run_server defaults to host='127.0.0.1' and passes it to uvicorn.run."""
+        import inspect
+        sig = inspect.signature(server.run_server)
+        self.assertEqual(sig.parameters["host"].default, "127.0.0.1")
+
+        with patch("uvicorn.run") as mock_uvicorn_run:
+            server.run_server(port=8000, desktop_mode=False)
+            mock_uvicorn_run.assert_called_once()
+            _, kwargs = mock_uvicorn_run.call_args
+            self.assertEqual(kwargs.get("host"), "127.0.0.1")
+            self.assertEqual(kwargs.get("port"), 8000)
 
     def test_safe_set_storage_defined_in_app_js(self):
-        """Verifies that static/app.js defines safeSetStorage with try/catch protection."""
-        app_code = Path("static/app.js").read_text(encoding="utf-8")
-        self.assertIn("function safeSetStorage", app_code)
-        self.assertIn("safeSetStorage(\"tv_chart_engine\"", app_code)
-        self.assertIn("safeSetStorage(\"tv_terminal_lang\"", app_code)
+        """Verifies safeSetStorage/safeGetStorage in static/app.js handle QuotaExceededError safely in Node VM."""
+        import json
+        import os
+        import shutil
+        import subprocess
+
+        node_bin = (
+            shutil.which("node")
+            or ("/opt/homebrew/bin/node" if os.path.exists("/opt/homebrew/bin/node") else None)
+            or ("/usr/local/bin/node" if os.path.exists("/usr/local/bin/node") else None)
+        )
+        if not node_bin:
+            self.skipTest("Node.js binary not found")
+
+        app_js = str(Path("static/app.js").resolve())
+        harness = f"""
+        const fs = require('fs');
+        const vm = require('vm');
+        const code = fs.readFileSync({json.dumps(app_js)}, 'utf8');
+        let stored = {{}};
+        const sandbox = {{
+            setTimeout, clearTimeout, console, Intl,
+            fetch: () => Promise.resolve({{ ok: true, json: () => Promise.resolve({{}}) }}),
+            document: {{ getElementById: () => null, querySelector: () => null, querySelectorAll: () => [], createElement: () => ({{ style: {{}}, classList: {{ add: () => {{}}, remove: () => {{}}, toggle: () => {{}} }}, appendChild: () => {{}}, addEventListener: () => {{}} }}), addEventListener: () => {{}}, removeEventListener: () => {{}} }},
+            navigator: {{ userAgent: 'node-test' }},
+            location: {{ search: '', protocol: 'http:', host: '127.0.0.1:8000' }},
+            addEventListener: () => {{}},
+            removeEventListener: () => {{}},
+            localStorage: {{
+                _throw: false,
+                getItem: function(k) {{ if (this._throw) throw new Error('SecurityError'); return stored[k] ?? null; }},
+                setItem: function(k, v) {{ if (this._throw) throw new Error('QuotaExceededError'); stored[k] = String(v); }},
+                removeItem: function(k) {{ delete stored[k]; }}
+            }}
+        }};
+        sandbox.window = sandbox;
+        sandbox.globalThis = sandbox;
+        vm.createContext(sandbox);
+        vm.runInContext(code, sandbox);
+        const res = vm.runInContext(`(() => {{
+            safeSetStorage("tv_chart_engine", "B");
+            const okVal = safeGetStorage("tv_chart_engine", "A");
+            localStorage._throw = true;
+            let threw = false;
+            try {{
+                safeSetStorage("tv_terminal_lang", "en");
+            }} catch (e) {{
+                threw = true;
+            }}
+            const fallbackVal = safeGetStorage("tv_terminal_lang", "zh-TW");
+            return {{ okVal, threw, fallbackVal }};
+        }})()`, sandbox);
+        console.log(JSON.stringify(res));
+        process.exit(0);
+        """
+        proc = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, timeout=15)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout.strip())
+        self.assertEqual(data["okVal"], "B")
+        self.assertFalse(data["threw"])
+        self.assertEqual(data["fallbackVal"], "zh-TW")
 
 
 if __name__ == "__main__":
