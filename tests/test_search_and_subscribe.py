@@ -13,6 +13,15 @@ class TestSearchAndSubscribe(unittest.TestCase):
     def setUp(self):
         self._orig_watchlist = [dict(w) for w in WATCHLIST]
         self._orig_symbols = list(SYMBOLS)
+        for p in (
+            patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock),
+            patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock),
+            patch("engine.client.TradingViewAsyncClient.subscribe", new_callable=AsyncMock),
+            patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]),
+            patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
 
     def tearDown(self):
         WATCHLIST.clear()

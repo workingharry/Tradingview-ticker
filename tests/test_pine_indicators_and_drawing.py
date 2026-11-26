@@ -551,10 +551,15 @@ class TestPineIndicatorsAndDrawing(unittest.TestCase):
 
     def test_screener_global_search_and_custom_warning(self):
         """Verifies search endpoint indexes full universe and custom screener handles empty inputs safely."""
+        from unittest.mock import AsyncMock, patch
         from fastapi.testclient import TestClient
         from server import app
 
-        with TestClient(app) as client:
+        with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
+             patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
+             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
+             TestClient(app) as client:
             # 1. Search endpoint includes momentum universe (e.g. MRNA, PRCH, CART)
             res = client.get("/api/symbols/search?q=PRCH")
             self.assertEqual(res.status_code, 200)

@@ -347,7 +347,11 @@ class TestS104ModelTracking(unittest.TestCase):
 
     def test_chat_endpoint_model_null_when_gemini_fails(self):
         """When Gemini fails, /api/chat returns model=None and source='rule_based'."""
-        with patch("server.call_gemini_generate_with_model", new_callable=AsyncMock, return_value=(None, None)):
+        with patch("server.call_gemini_generate_with_model", new_callable=AsyncMock, return_value=(None, None)), \
+             patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
+             patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
+             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]):
             with TestClient(app) as client:
                 resp = client.post("/api/chat", json={"message": "how is NVDA", "symbol": "NASDAQ:NVDA"})
                 self.assertEqual(resp.status_code, 200)
@@ -486,7 +490,10 @@ class TestS108ScreenerCriteriaValidation(unittest.TestCase):
 
     def test_invalid_criteria_returns_422(self):
         """min_rs_rating='abc' -> 422 with 'min_rs_rating' in error fields."""
-        with TestClient(app) as client:
+        with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
+             patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
+             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             TestClient(app) as client:
             resp = client.post("/api/screener/scan", json={
                 "universe": "us_momentum",
                 "criteria": {"min_rs_rating": "abc"}
@@ -498,7 +505,10 @@ class TestS108ScreenerCriteriaValidation(unittest.TestCase):
 
     def test_null_criteria_returns_200_with_defaults(self):
         """null values for criteria use default values and return 200."""
-        with patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
+        with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
+             patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
+             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
              patch("server.scan_universe", new_callable=AsyncMock, return_value=[]):
             with TestClient(app) as client:
                 resp = client.post("/api/screener/scan", json={

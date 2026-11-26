@@ -61,6 +61,16 @@ class TestAiAgentLensAndRecovery(unittest.TestCase):
         self.original_watchlist = [dict(w) for w in server.WATCHLIST]
         self.original_symbols = list(server.SYMBOLS)
         self.storage = Storage(":memory:")
+        for p in (
+            patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock),
+            patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock),
+            patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]),
+            patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=_generate_synthetic_bars(count=60)),
+            patch("server.call_gemini_generate", new_callable=AsyncMock, return_value=None),
+            patch("server.call_gemini_generate_with_model", new_callable=AsyncMock, return_value=(None, None)),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
 
     def tearDown(self):
         server.WATCHLIST.clear()

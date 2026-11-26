@@ -12,6 +12,7 @@ Tests verify behaviors strictly at public seams:
 import json
 import re
 import unittest
+from unittest.mock import AsyncMock, patch
 from pathlib import Path
 from fastapi.testclient import TestClient
 
@@ -53,7 +54,11 @@ class TestFeedbackFixesTDD(unittest.TestCase):
             "rsBenchmarkTag": "AMEX:SPY"
         }
 
-        with TestClient(app) as client:
+        with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
+             patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
+             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
+             TestClient(app) as client:
             # 1. Save preferences via POST
             post_resp = client.post("/api/preferences", json=test_payload)
             self.assertEqual(post_resp.status_code, 200)
@@ -84,7 +89,11 @@ class TestFeedbackFixesTDD(unittest.TestCase):
 
     def test_seam2_watchlist_unsubscribe_and_storage_sync(self):
         """Seam 2: Unsubscribe endpoint evicts symbol and frontend calls POST with auth."""
-        with TestClient(app) as client:
+        with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
+             patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
+             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
+             TestClient(app) as client:
             resp = client.post("/api/symbols/unsubscribe?symbol=NASDAQ:AMZN")
             self.assertEqual(resp.status_code, 200)
             data = resp.json()

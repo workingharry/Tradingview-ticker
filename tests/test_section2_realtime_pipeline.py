@@ -209,7 +209,11 @@ class TestSection2RealTimePipeline(unittest.TestCase):
 
     def test_s2_01_health_endpoint_includes_upstream(self):
         """Verifies /api/health returns upstream health dict and preserves all original fields."""
-        with TestClient(server.app) as client:
+        with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
+             patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
+             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
+             TestClient(server.app) as client:
             resp = client.get("/api/health")
             self.assertEqual(resp.status_code, 200)
             data = resp.json()

@@ -98,7 +98,12 @@ class TestArchitecturalHardening(unittest.TestCase):
 
     def test_subscribe_supports_id_or_symbol(self):
         """Validates that POST /api/symbols/subscribe accepts either 'symbol' or 'id'."""
-        with TestClient(app) as client:
+        with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
+             patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
+             patch("engine.client.TradingViewAsyncClient.subscribe", new_callable=AsyncMock), \
+             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
+             TestClient(app) as client:
             resp1 = client.post("/api/symbols/subscribe", json={
                 "id": "NASDAQ:MSFT",
                 "name": "Microsoft Corp.",
