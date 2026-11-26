@@ -506,7 +506,7 @@ class TestTenDefectsRegression(unittest.TestCase):
             mgr.client_loops[ws] = loop
 
             # Remove _loop if present to simulate Python 3.12+
-            if hasattr(queue, "_loop"):
+            if "_loop" in vars(queue):
                 delattr(queue, "_loop")
 
             mgr.broadcast_nowait({"type": "test", "data": 123})
