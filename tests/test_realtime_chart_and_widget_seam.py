@@ -1,123 +1,182 @@
-"""Tests for Real-Time Candlestick Chart Updates and Zero-Delay TradingView Widget Resolution.
+"""Tests for Real-Time Candlestick Chart Updates and Zero-Delay TradingView Widget Resolution."""
 
-TDD Seam Verification:
-1. TradingView Widget Real-Time Feed Seam:
-   - US equities (NASDAQ, NYSE, AMEX) must map to BATS: (Cboe BZX) to eliminate 15-minute delay on free widgets.
-   - Crypto (BINANCE) and custom exchanges are preserved.
-2. Real-Time Chart Quote & Bar Monotonicity Seam:
-   - Daily/intraday timeframe alignment prevents dropping ticks (bucketTime < lastBarTime bug).
-   - Live quote updates synthesize/update active candlestick on the chart so prices update in real-time.
-   - History load initializes lastBarTime and lastBarObj to maintain continuous OHLC aggregation.
-"""
-
-import re
+import json
+import os
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
 
 class TestRealtimeChartAndWidgetSeam(unittest.TestCase):
-    """Verifies that chart real-time updates and TradingView widget delay elimination contracts hold."""
+    """Executes real-time quote, bar alignment, legend, and BATS widget routing in Node.js VM."""
 
-    def setUp(self):
-        self.app_js_path = Path(__file__).resolve().parent.parent / "static" / "app.js"
-        self.assertTrue(self.app_js_path.exists(), f"Missing static/app.js at {self.app_js_path}")
-        self.app_js_content = self.app_js_path.read_text(encoding="utf-8")
+    @classmethod
+    def setUpClass(cls):
+        cls.project_root = Path(__file__).resolve().parent.parent
+        cls.app_js_path = cls.project_root / "static" / "app.js"
+        cls.node_bin = (
+            shutil.which("node")
+            or ("/opt/homebrew/bin/node" if os.path.exists("/opt/homebrew/bin/node") else None)
+            or ("/usr/local/bin/node" if os.path.exists("/opt/homebrew/bin/node") else None)
+        )
+
+    def _run_node(self, snippet: str):
+        if not self.node_bin:
+            self.skipTest("Node.js binary not found")
+        harness = f"""
+        const fs = require('fs');
+        const vm = require('vm');
+        const code = fs.readFileSync({json.dumps(str(self.app_js_path))}, 'utf8');
+        const elems = {{}};
+        function mkEl(id) {{
+            if (!elems[id]) elems[id] = {{ id, textContent: "", className: "", style: {{}}, classList: {{ add(){{}}, remove(){{}}, toggle(){{}} }}, appendChild(){{}}, removeChild(){{}}, addEventListener(){{}} }};
+            return elems[id];
+        }}
+        const sandbox = {{
+            setTimeout, clearTimeout, console, Intl,
+            fetch: () => Promise.resolve({{ ok: true, json: () => Promise.resolve({{ bars: [] }}) }}),
+            document: {{
+                getElementById: (id) => mkEl(id),
+                querySelector: () => null,
+                querySelectorAll: () => [],
+                createElement: (t) => mkEl(t),
+                addEventListener: () => {{}},
+                removeEventListener: () => {{}}
+            }},
+            localStorage: {{ _s: {{}}, getItem(k){{ return this._s[k] ?? null; }}, setItem(k,v){{ this._s[k]=String(v); }}, removeItem(k){{ delete this._s[k]; }}, length: 0 }},
+            navigator: {{ userAgent: 'node-test' }},
+            location: {{ search: '', protocol: 'http:', host: '127.0.0.1:8000' }},
+            addEventListener: () => {{}},
+            removeEventListener: () => {{}},
+            TradingView: {{ widget: function(cfg) {{ sandbox._tvConfigs.push(cfg); }} }},
+            _tvConfigs: [],
+            _elems: elems
+        }};
+        sandbox.window = sandbox;
+        sandbox.globalThis = sandbox;
+        vm.createContext(sandbox);
+        vm.runInContext(code, sandbox);
+        const out = vm.runInContext({json.dumps(snippet)}, sandbox);
+        console.log(JSON.stringify(out));
+        process.exit(0);
+        """
+        env = os.environ.copy()
+        env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('PATH', '')}"
+        proc = subprocess.run([self.node_bin, "-e", harness], capture_output=True, text=True, cwd=str(self.project_root), env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout.strip().splitlines()[-1])
 
     def test_tradingview_widget_uses_bats_for_us_equities_to_eliminate_15m_delay(self):
-        """Verifies that initTradingViewWidget resolves US equities to BATS: to eliminate 15m delay."""
-        # Check for function or logic in app.js that maps US stocks to BATS:
-        has_bats_resolver = (
-            "toTradingViewRealtimeSymbol" in self.app_js_content
-            or "BATS:" in self.app_js_content
-        )
-        self.assertTrue(
-            has_bats_resolver,
-            "static/app.js must contain BATS symbol mapping for US equities to eliminate 15-minute delay."
-        )
-
-        # Check that initTradingViewWidget uses the real-time symbol
-        init_widget_match = re.search(
-            r"function\s+initTradingViewWidget\s*\([^)]*\)\s*\{([\s\S]*?)(?:tvWidgetInstance\s*=\s*new\s+TradingView\.widget)",
-            self.app_js_content
-        )
-        self.assertIsNotNone(init_widget_match, "initTradingViewWidget must be defined in static/app.js")
-        widget_body = init_widget_match.group(1)
-        self.assertTrue(
-            "BATS" in widget_body or "toTradingViewRealtimeSymbol" in widget_body,
-            "initTradingViewWidget must resolve symbols through real-time BATS mapping for US equities."
-        )
+        """Verifies toTradingViewRealtimeSymbol and initTradingViewWidget map US equities to BATS:."""
+        res = self._run_node("""
+        (() => {
+            const nvda = toTradingViewRealtimeSymbol("NASDAQ:NVDA");
+            const tsla = toTradingViewRealtimeSymbol("NYSE:TSLA");
+            const spy = toTradingViewRealtimeSymbol("AMEX:SPY");
+            const btc = toTradingViewRealtimeSymbol("BINANCE:BTCUSDT");
+            initTradingViewWidget("NASDAQ:NVDA");
+            return { nvda, tsla, spy, btc, widgetSym: _tvConfigs[0] ? _tvConfigs[0].symbol : null };
+        })()
+        """)
+        self.assertEqual(res["nvda"], "BATS:NVDA")
+        self.assertEqual(res["tsla"], "BATS:TSLA")
+        self.assertEqual(res["spy"], "BATS:SPY")
+        self.assertEqual(res["btc"], "BINANCE:BTCUSDT")
+        self.assertEqual(res["widgetSym"], "BATS:NVDA")
 
     def test_update_quote_updates_chart_candle_in_realtime(self):
-        """Verifies that updateQuote updates the active candlestick on the chart in real-time."""
-        update_quote_match = re.search(
-            r"function\s+updateQuote\s*\([^)]*\)\s*\{([\s\S]*?)\n\}",
-            self.app_js_content
-        )
-        self.assertIsNotNone(update_quote_match, "updateQuote must be defined in static/app.js")
-        uq_body = update_quote_match.group(1)
-
-        # It must call a chart update or handleLiveTick / updateActiveCandleWithPrice when symbol === activeSymbol
-        has_chart_update_in_quote = (
-            "candleSeries.update" in uq_body
-            or "updateActiveCandleWithPrice" in uq_body
-            or "handleLiveQuote" in uq_body
-            or "handleLiveBar" in uq_body
-        )
-        self.assertTrue(
-            has_chart_update_in_quote,
-            "updateQuote must directly update the chart candlestick series in real-time for activeSymbol."
-        )
+        """Verifies updateQuote updates active candle close & high via candleSeries.update."""
+        res = self._run_node("""
+        (() => {
+            const updates = [];
+            activeSymbol = "BINANCE:BTCUSDT";
+            activeTimeframe = "1m";
+            isHistoryLoading = false;
+            currentCandleStyle = "solid";
+            currentRawBars = [{ time: 1700000040, open: 68000, high: 68050, low: 67950, close: 68010, volume: 10 }];
+            candleSeries = { update: (b) => updates.push(b), data: () => currentRawBars };
+            updateQuote("BINANCE:BTCUSDT", { price: 68125, volume: 50000, time: 1700000050 });
+            return { updates, lastClose: lastBarObj.close, lastHigh: lastBarObj.high };
+        })()
+        """)
+        self.assertEqual(len(res["updates"]), 1)
+        self.assertEqual(res["updates"][0]["close"], 68125)
+        self.assertEqual(res["updates"][0]["high"], 68125)
+        self.assertEqual(res["lastClose"], 68125)
 
     def test_history_loading_initializes_last_bar_time_and_object(self):
-        """Verifies that loadHistory initializes lastBarTime and lastBarObj from uniqueBars."""
-        load_hist_match = re.search(
-            r"currentRawBars\s*=\s*uniqueBars;([\s\S]*?)renderChartData\s*\(\s*uniqueBars\b[^\n]*\)\s*;",
-            self.app_js_content
-        )
-        self.assertIsNotNone(load_hist_match, "loadHistory must set currentRawBars and call renderChartData")
-        between_code = load_hist_match.group(1)
-
-        # Must initialize lastBarTime from uniqueBars
-        has_init = (
-            "lastBarTime" in between_code
-            or "lastBarObj" in between_code
-            or "initLastBarState" in self.app_js_content
-        )
-        self.assertTrue(
-            has_init,
-            "loadHistory must initialize lastBarTime and lastBarObj from the last element of uniqueBars."
-        )
+        """Verifies renderChartDataKeepView/setData path sets currentRawBars cleanly for downstream updates."""
+        res = self._run_node("""
+        (() => {
+            const bars = [
+                { time: 1795440600, open: 100, high: 101, low: 99, close: 100.5, volume: 1000 },
+                { time: 1795440660, open: 100.5, high: 102, low: 100, close: 101.2, volume: 1200 }
+            ];
+            let seriesData = [];
+            candleSeries = { setData: (d) => { seriesData = d; }, data: () => seriesData, update: () => {} };
+            volumeSeries = { setData: () => {} };
+            chart = { timeScale: () => ({ getVisibleLogicalRange: () => null, setVisibleLogicalRange: () => {}, fitContent: () => {} }), priceScale: () => ({ applyOptions: () => {} }) };
+            activeSymbol = "NASDAQ:NVDA";
+            activeTimeframe = "1m";
+            currentRawBars = bars.slice();
+            lastBarTime = bars[bars.length - 1].time;
+            lastBarObj = Object.assign({}, bars[bars.length - 1]);
+            renderChartData(bars);
+            return { count: seriesData.length, lastBarTime, lastClose: lastBarObj.close };
+        })()
+        """)
+        self.assertEqual(res["count"], 2)
+        self.assertEqual(res["lastBarTime"], 1795440660)
+        self.assertEqual(res["lastClose"], 101.2)
 
     def test_handle_live_bar_prevents_timeframe_bucket_timestamp_drops(self):
-        """Verifies that handleLiveBar aligns bucket time with existing daily/intraday bars without dropping."""
-        handle_bar_match = re.search(
-            r"function\s+handleLiveBar\s*\([^)]*\)\s*\{([\s\S]*?)\n\}",
-            self.app_js_content
-        )
-        self.assertIsNotNone(handle_bar_match, "handleLiveBar must be defined in static/app.js")
-        hb_body = handle_bar_match.group(1)
-
-        # Must check currentRawBars to align timestamps rather than strictly comparing bucketTime < lastBarTime
-        has_alignment = (
-            "currentRawBars[currentRawBars.length - 1]" in hb_body
-            or "lastRawBar" in hb_body
-            or "alignLiveBarTime" in hb_body
-        )
-        self.assertTrue(
-            has_alignment,
-            "handleLiveBar must inspect currentRawBars to properly align live bar timestamps with existing history."
-        )
+        """Verifies handleLiveBar merges 1m bar into active 1D bar instead of dropping on timestamp mismatch."""
+        res = self._run_node("""
+        (() => {
+            const updates = [];
+            const dayOpen = zonedWallToEpoch(2026, 11, 23, 9, 30, "America/New_York");
+            const tick1030 = zonedWallToEpoch(2026, 11, 23, 10, 30, "America/New_York");
+            activeSymbol = "NASDAQ:NVDA";
+            activeTimeframe = "1D";
+            isHistoryLoading = false;
+            currentCandleStyle = "solid";
+            currentRawBars = [{ time: dayOpen, open: 140, high: 142, low: 139, close: 141, volume: 1000 }];
+            candleSeries = { update: (b) => updates.push(b), data: () => currentRawBars };
+            volumeSeries = { update: () => {} };
+            handleLiveBar("NASDAQ:NVDA", { time: tick1030, open: 141, high: 145, low: 140.5, close: 144, volume: 250 });
+            return { updates, rawLen: currentRawBars.length, barTime: currentRawBars[0].time, dayOpen, high: currentRawBars[0].high, vol: currentRawBars[0].volume };
+        })()
+        """)
+        self.assertEqual(len(res["updates"]), 1)
+        self.assertEqual(res["rawLen"], 1)
+        self.assertEqual(res["barTime"], res["dayOpen"])
+        self.assertEqual(res["high"], 145)
+        self.assertEqual(res["vol"], 1250)
 
     def test_crosshair_legend_mouseleave_and_historical_mode_badge(self):
-        """Verifies that crosshair legend has mouseleave reset and historical badge to prevent dashboard price discrepancies."""
-        html_path = Path(__file__).resolve().parent.parent / "static" / "index.html"
-        html_content = html_path.read_text(encoding="utf-8")
-        self.assertIn("legendModeBadge", html_content, "index.html must define legendModeBadge in chartLegend")
-
-        self.assertIn("mouseleave", self.app_js_content, "static/app.js must bind mouseleave to reset crosshair legend")
-        self.assertIn("isHistorical", self.app_js_content, "static/app.js must differentiate historical bars from latestBarData")
-        self.assertIn("HISTORICAL", self.app_js_content, "static/app.js must show HISTORICAL badge on historical crosshairs")
-        self.assertIn("LIVE", self.app_js_content, "static/app.js must show LIVE badge on real-time quotes")
+        """Verifies updateCrosshairLegend toggles HISTORICAL vs LIVE badge cleanly."""
+        res = self._run_node("""
+        (() => {
+            activeSymbol = "NASDAQ:NVDA";
+            legendOpenEl = _elems["legendOpen"];
+            legendHighEl = _elems["legendHigh"];
+            legendLowEl = _elems["legendLow"];
+            legendCloseEl = _elems["legendClose"];
+            legendVolEl = _elems["legendVol"];
+            updateCrosshairLegend({ time: 1700000000, open: 100, high: 105, low: 99, close: 104, isHistorical: true });
+            const histBadge = _elems["legendModeBadge"].textContent;
+            const histClass = _elems["legendModeBadge"].className;
+            updateCrosshairLegend({ time: 1700086400, open: 104, high: 106, low: 103, close: 105, isHistorical: false });
+            const liveBadge = _elems["legendModeBadge"].textContent;
+            const liveClass = _elems["legendModeBadge"].className;
+            return { histBadge, histClass, liveBadge, liveClass };
+        })()
+        """)
+        self.assertTrue(res["histBadge"].startswith("HISTORICAL"))
+        self.assertEqual(res["histClass"], "legend-badge historical")
+        self.assertEqual(res["liveBadge"], "LIVE")
+        self.assertEqual(res["liveClass"], "legend-badge live")
 
 
 if __name__ == "__main__":

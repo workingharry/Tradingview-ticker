@@ -353,18 +353,84 @@ class TestStorageAndAppNap(unittest.TestCase):
         close_storage()
 
     def test_app_js_app_nap_and_backfill(self):
-        """Verifies that static/app.js implements visibilitychange listener, RAF pause/resume, and gap backfill."""
-        js_path = Path("static/app.js")
-        self.assertTrue(js_path.exists())
-        content = js_path.read_text("utf-8")
-
-        self.assertIn("visibilitychange", content)
-        self.assertIn("document.hidden", content)
-        self.assertIn("isAppNapSuspended", content)
-        self.assertIn("requestAnimationFrame", content)
-        self.assertIn("cancelAnimationFrame", content)
-        self.assertIn("gapBackfill", content)
-        self.assertIn("60000", content)
+        """Executes handleVisibilityChange in Node VM to verify App Nap RAF pause and >60s gap backfill."""
+        import json
+        import os
+        import shutil
+        import subprocess
+        node_bin = (
+            shutil.which("node")
+            or ("/opt/homebrew/bin/node" if os.path.exists("/opt/homebrew/bin/node") else None)
+            or ("/usr/local/bin/node" if os.path.exists("/usr/local/bin/node") else None)
+        )
+        if not node_bin:
+            self.skipTest("Node.js binary not found")
+        app_js = str(Path("static/app.js").resolve())
+        harness = f"""
+        const fs = require('fs');
+        const vm = require('vm');
+        const code = fs.readFileSync({json.dumps(app_js)}, 'utf8');
+        const origDateNow = Date.now;
+        const doc = {{
+            hidden: false,
+            getElementById: () => null,
+            querySelector: () => null,
+            querySelectorAll: () => [],
+            createElement: () => ({{ style: {{}}, classList: {{ add(){{}}, remove(){{}}, toggle(){{}} }}, appendChild(){{}}, addEventListener(){{}} }}),
+            addEventListener: () => {{}},
+            removeEventListener: () => {{}}
+        }};
+        const sandbox = {{
+            setTimeout, clearTimeout, AbortController, URLSearchParams, console, Intl,
+            _nowVal: 1700000000000,
+            _cancelled: 0,
+            _rafScheduled: 0,
+            _fetches: [],
+            Date: Object.assign(Date, {{ now: () => sandbox._nowVal }}),
+            requestAnimationFrame: (cb) => {{ sandbox._rafScheduled++; return sandbox._rafScheduled; }},
+            cancelAnimationFrame: () => {{ sandbox._cancelled++; }},
+            fetch: (url) => {{ sandbox._fetches.push(String(url)); return Promise.resolve({{ ok: true, json: () => Promise.resolve({{ bars: [] }}) }}); }},
+            document: doc,
+            localStorage: {{ _s: {{}}, getItem(k){{ return this._s[k] ?? null; }}, setItem(k,v){{ this._s[k]=String(v); }}, removeItem(k){{ delete this._s[k]; }} }},
+            navigator: {{ userAgent: 'node-test' }},
+            location: {{ search: '', protocol: 'http:', host: '127.0.0.1:8000' }},
+            addEventListener: () => {{}},
+            removeEventListener: () => {{}}
+        }};
+        sandbox.window = sandbox;
+        sandbox.globalThis = sandbox;
+        vm.createContext(sandbox);
+        vm.runInContext(code, sandbox);
+        const res = vm.runInContext(`(() => {{
+            activeSymbol = "NASDAQ:NVDA";
+            activeTimeframe = "1D";
+            rafRenderId = 99;
+            document.hidden = true;
+            handleVisibilityChange();
+            const hiddenSuspended = isAppNapSuspended;
+            _nowVal += 65000;
+            document.hidden = false;
+            handleVisibilityChange();
+            return {{
+                hiddenSuspended,
+                resumedSuspended: isAppNapSuspended,
+                cancelled: _cancelled,
+                rafScheduled: _rafScheduled,
+                fetches: _fetches
+            }};
+        }})()`, sandbox);
+        Date.now = origDateNow;
+        console.log(JSON.stringify(res));
+        process.exit(0);
+        """
+        proc = subprocess.run([node_bin, "-e", harness], capture_output=True, text=True, timeout=15)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertTrue(data["hiddenSuspended"])
+        self.assertFalse(data["resumedSuspended"])
+        self.assertGreaterEqual(data["cancelled"], 1)
+        self.assertGreaterEqual(data["rafScheduled"], 1)
+        self.assertTrue(any("backfill=true" in u for u in data["fetches"]), f"Expected backfill=true fetch, got {data['fetches']}")
 
     def test_server_app_nap_backfill_heals_aggregator_gap(self):
         """Verifies GET /api/history with backfill=true fetches and merges missing bars into a pre-seeded aggregator."""

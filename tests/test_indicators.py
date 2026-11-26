@@ -45,14 +45,39 @@ class TestIndicators(unittest.TestCase):
         # Benchmark switching is purely dynamic
         self.assertNotEqual(rs_spy, rs_qqq)
 
+    def _run_indicators_node(self, js_expr):
+        import json, os, shutil, subprocess
+        node_bin = shutil.which("node") or (
+            "/opt/homebrew/bin/node" if os.path.exists("/opt/homebrew/bin/node") else None
+        ) or (
+            "/usr/local/bin/node" if os.path.exists("/usr/local/bin/node") else None
+        )
+        if not node_bin:
+            self.skipTest("Node.js binary not found on system PATH")
+        script = f"const ind = require('./static/indicators.js'); const out = ({js_expr}); console.log(JSON.stringify(out));"
+        proc = subprocess.run([node_bin, "-e", script], capture_output=True, text=True, check=True)
+        return json.loads(proc.stdout.strip())
+
     def test_indicators_js_two_pointer_forward_fill_contract(self):
-        """Verifies that static/indicators.js contains two-pointer O(N+M) forward-fill alignment."""
-        from pathlib import Path
-        content = Path("static/indicators.js").read_text("utf-8")
-        self.assertIn("calcRelativeStrength", content)
-        self.assertIn("validBench", content)
-        self.assertIn("bIdx", content)
-        self.assertIn("isFinite(b.close)", content)
+        """Executes calcRelativeStrength in Node.js verifying two-pointer forward-fill and invalid-bar filtering."""
+        res = self._run_indicators_node("""(() => {
+            const target = [
+                { time: 100, close: 100 },
+                { time: 105, close: 105 },
+                { time: 110, close: 110 }
+            ];
+            const bench = [
+                { time: 95, close: 0 },
+                { time: 100, close: 50 },
+                { time: 104, close: NaN },
+                { time: 110, close: 55 }
+            ];
+            return ind.calcRelativeStrength(target, bench);
+        })()""")
+        self.assertEqual(len(res), 3)
+        self.assertEqual(res[0], {"time": 100, "value": 200.0})
+        self.assertEqual(res[1], {"time": 105, "value": 210.0})
+        self.assertEqual(res[2], {"time": 110, "value": 200.0})
 
     def test_relative_strength_forward_fill_algorithm(self):
         """Verifies the two-pointer forward-fill algorithm on 24/7 crypto bars against market-hours benchmark."""
@@ -108,12 +133,22 @@ class TestIndicators(unittest.TestCase):
         self.assertEqual(len(valid_bench), 0, "All hostile benchmark bars must be filtered out")
 
     def test_indicators_js_bollinger_and_rs_boundary_guards(self):
-        """Verifies that static/indicators.js enforces non-negative variance and finite RS checks."""
-        from pathlib import Path
-        content = Path("static/indicators.js").read_text("utf-8")
-        self.assertIn("Math.max(0, varianceSum / period)", content)
-        self.assertIn("isFinite(upVal) && isFinite(lowVal)", content)
-        self.assertIn("bClose > 0", content)
+        """Executes calcBollinger & calcRelativeStrength in Node.js verifying zero-variance and zero-close safety."""
+        res = self._run_indicators_node("""(() => {
+            const flat = [
+                { time: 1, close: 100 },
+                { time: 2, close: 100 },
+                { time: 3, close: 100 },
+                { time: 4, close: 100 }
+            ];
+            const bb = ind.calcBollingerBands(flat, 3, 2);
+            const rsZero = ind.calcRelativeStrength(flat, [{ time: 1, close: 0 }, { time: 2, close: -5 }]);
+            return { bb, rsZero };
+        })()""")
+        self.assertEqual(len(res["bb"]["middle"]), 2)
+        self.assertEqual(res["bb"]["upper"][0]["value"], 100.0)
+        self.assertEqual(res["bb"]["lower"][0]["value"], 100.0)
+        self.assertEqual(res["rsZero"], [])
 
     def test_rs_rating_calculation_bounds_and_null_safety(self):
         """Verifies that RS Rating logic bounds output to 1..99 and gracefully handles empty/corrupt bars."""
@@ -172,13 +207,22 @@ class TestIndicators(unittest.TestCase):
         self.assertEqual(series[0]["time"], 1120)
 
     def test_indicators_js_vwap_and_atr_exports(self):
-        """Verifies that static/indicators.js defines and exports calcVWAP and calcATR."""
-        from pathlib import Path
-        content = Path("static/indicators.js").read_text("utf-8")
-        self.assertIn("function calcVWAP", content)
-        self.assertIn("function calcATR", content)
-        self.assertIn("calcVWAP,", content)
-        self.assertIn("calcATR", content)
+        """Executes calcVWAP and calcATR from static/indicators.js in Node.js verifying finite calculations."""
+        res = self._run_indicators_node("""(() => {
+            const bars = [
+                { time: 1700000000, open: 100, high: 104, low: 98, close: 102, volume: 1000 },
+                { time: 1700000060, open: 102, high: 106, low: 100, close: 104, volume: 2000 },
+                { time: 1700000120, open: 104, high: 108, low: 102, close: 106, volume: 1500 }
+            ];
+            return {
+                vwap: ind.calcVWAP(bars, { timeframe: "1m", symbol: "NASDAQ:NVDA" }),
+                atr: ind.calcATR(bars, 2)
+            };
+        })()""")
+        self.assertEqual(len(res["vwap"]), 3)
+        self.assertGreater(res["vwap"][-1]["value"], 100.0)
+        self.assertGreater(len(res["atr"]), 0)
+        self.assertGreater(res["atr"][-1]["value"], 0.0)
 
 
 if __name__ == "__main__":
