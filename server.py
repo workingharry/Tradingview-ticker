@@ -424,7 +424,7 @@ class DesktopAuthMiddleware(BaseHTTPMiddleware):
     """Enforces session token verification for REST endpoints when desktop mode is active."""
 
     async def dispatch(self, request: Request, call_next):
-        csp = "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com https://s3.tradingview.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* https://*.tradingview.com wss://*.tradingview.com; frame-src 'self' https://s.tradingview.com https://*.tradingview.com;"
+        csp = "default-src 'self'; script-src 'self' 'unsafe-inline' https://s3.tradingview.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* https://*.tradingview.com wss://*.tradingview.com; frame-src 'self' https://s.tradingview.com https://*.tradingview.com;"
         if not is_desktop_mode():
             if request.method in ("POST", "PUT", "DELETE"):
                 origin = request.headers.get("origin")
