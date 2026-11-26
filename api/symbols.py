@@ -1,6 +1,7 @@
 """Health, symbol search, watchlist subscription/unsubscribe, and ordering endpoints."""
 
 import asyncio
+import time
 import urllib.parse
 from typing import Any, Dict, List, Optional
 
@@ -8,39 +9,35 @@ import httpx
 from fastapi import APIRouter, Body, Query
 from fastapi.responses import JSONResponse
 
-from api import get_server_module
-from api.deps import (
+import api.deps as deps
+import api.history as history_mod
+from api.bootstrap import logger
+from api.config import (
     ALLOWED_ASSET_TYPES,
     POPULAR_SEARCH_INDEX,
     SYMBOLS,
     WATCHLIST,
     YAHOO_EXCHANGE_MAP,
-    aggregator,
-    current_status,
-    get_desktop_port,
-    get_shared_client,
     is_crypto_symbol,
-    is_desktop_mode,
     is_valid_symbol_id,
-    logger,
-    manager,
+    is_valid_ticker,
     normalize_symbol_id,
-    tv_client,
 )
-from api.history import fetch_universal_history
 from engine.screener import US_MOMENTUM_UNIVERSE
-from engine.storage import get_storage
 
 router = APIRouter()
 
+
+@router.get("/api/health")
+@router.get("/api/health/")
 async def health_check():
     """Health check endpoint for Tauri sidecar process manager and monitoring."""
     return {
         "status": "ok",
-        "desktop_mode": (getattr(get_server_module(), 'is_desktop_mode', is_desktop_mode) if get_server_module() else is_desktop_mode)(),
-        "port": get_desktop_port(),
+        "desktop_mode": deps.is_desktop_mode(),
+        "port": deps.get_desktop_port(),
         "timestamp": time.time(),
-        "upstream": (getattr(get_server_module(), 'tv_client', tv_client) if get_server_module() else tv_client).get_health() if (getattr(get_server_module(), 'tv_client', tv_client) if get_server_module() else tv_client) else None,
+        "upstream": deps.tv_client.get_health() if deps.tv_client else None,
     }
 
 
@@ -50,12 +47,12 @@ async def get_symbols():
     data = []
     for item in WATCHLIST:
         sym = item["id"]
-        st = (getattr(get_server_module(), 'tv_client', tv_client) if get_server_module() else tv_client).states.get(sym, {}) if (getattr(get_server_module(), 'tv_client', tv_client) if get_server_module() else tv_client) else {}
+        st = deps.tv_client.states.get(sym, {}) if deps.tv_client else {}
         data.append({
             **item,
             "state": st
         })
-    return {"symbols": data, "status": (getattr(get_server_module(), 'current_status', current_status) if get_server_module() else current_status)}
+    return {"symbols": data, "status": deps.current_status}
 
 
 @router.get("/api/symbols/search")
@@ -102,7 +99,7 @@ async def search_symbols(q: str = Query(default="")):
     # 2. Live remote search via Yahoo Finance API
     try:
         y_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={urllib.parse.quote(query)}&quotesCount=15&newsCount=0"
-        shared = (getattr(get_server_module(), 'get_shared_client', get_shared_client) if get_server_module() else get_shared_client)()
+        shared = deps.get_shared_client()
         cli = shared or httpx.AsyncClient(timeout=4.0)
         should_close = shared is None
         try:
@@ -186,11 +183,13 @@ def _resolve_known_bare_symbol(clean: str) -> Optional[str]:
         return f"BINANCE:{clean}"
     return None
 
+
+@router.post("/api/symbols/subscribe")
 async def subscribe_symbol(
     payload: Optional[Dict[str, Any]] = Body(default=None),
     symbol: Optional[str] = Query(default=None)
 ):
-    """Dynamically subscribes to a new symbol at runtime and warms its historical bar aggregator."""
+    """Dynamically subscribes to a new symbol at runtime and warms its historical bar deps.aggregator."""
     clean_query_sym = symbol if isinstance(symbol, str) else None
     clean_payload = payload if isinstance(payload, dict) else {}
     raw_val = clean_query_sym or clean_payload.get("symbol") or clean_payload.get("id") or clean_payload.get("pair") or ""
@@ -211,7 +210,7 @@ async def subscribe_symbol(
         else:
             found_exchange = None
             try:
-                shared = (getattr(get_server_module(), 'get_shared_client', get_shared_client) if get_server_module() else get_shared_client)()
+                shared = deps.get_shared_client()
                 cli = shared or httpx.AsyncClient(timeout=4.0)
                 should_close = shared is None
                 try:
@@ -274,23 +273,23 @@ async def subscribe_symbol(
             if evicted_id in SYMBOLS and evicted_id not in [w["id"] for w in WATCHLIST]:
                 SYMBOLS.remove(evicted_id)
                 try:
-                    (getattr(get_server_module(), 'get_storage', get_storage) if get_server_module() else get_storage)().remove_watchlist_item(evicted_id)
+                    deps.get_storage().remove_watchlist_item(evicted_id)
                 except Exception as wl_evict_err:
                     logger.debug("Failed to remove evicted watchlist item from SQLite: %s", wl_evict_err)
-                if tv_client:
+                if deps.tv_client:
                     try:
-                        await (getattr(get_server_module(), 'tv_client', tv_client) if get_server_module() else tv_client).unsubscribe(evicted_id)
+                        await deps.tv_client.unsubscribe(evicted_id)
                         logger.info("Unsubscribed evicted symbol from TradingView client: %s", evicted_id)
                     except Exception as unsub_err:
                         logger.debug("Error unsubscribing evicted symbol %s: %s", evicted_id, unsub_err)
-                if aggregator:
-                    if hasattr((getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator), "remove_symbol"):
-                        (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).remove_symbol(evicted_id)
+                if deps.aggregator:
+                    if hasattr(deps.aggregator, "remove_symbol"):
+                        deps.aggregator.remove_symbol(evicted_id)
                     else:
-                        (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).bar_history.pop(evicted_id, None)
-                        (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).current_bars.pop(evicted_id, None)
-                        (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).last_cumulative_volume.pop(evicted_id, None)
-                (getattr(get_server_module(), 'manager', manager) if get_server_module() else manager).broadcast_nowait({
+                        deps.aggregator.bar_history.pop(evicted_id, None)
+                        deps.aggregator.current_bars.pop(evicted_id, None)
+                        deps.aggregator.last_cumulative_volume.pop(evicted_id, None)
+                deps.manager.broadcast_nowait({
                     "type": "symbol_removed",
                     "symbol": evicted_id,
                 })
@@ -298,23 +297,23 @@ async def subscribe_symbol(
         if symbol not in SYMBOLS:
             SYMBOLS.append(symbol)
         try:
-            (getattr(get_server_module(), 'get_storage', get_storage) if get_server_module() else get_storage)().add_watchlist_item(item)
+            deps.get_storage().add_watchlist_item(item)
         except Exception as wl_save_err:
             logger.warning("Failed to persist new watchlist item to SQLite: %s", wl_save_err)
 
-    if tv_client:
-        await (getattr(get_server_module(), 'tv_client', tv_client) if get_server_module() else tv_client).subscribe(symbol)
+    if deps.tv_client:
+        await deps.tv_client.subscribe(symbol)
 
-    if (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator) and not (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).get_history(symbol):
-        bars = await (getattr(get_server_module(), 'fetch_universal_history', fetch_universal_history) if get_server_module() else fetch_universal_history)(symbol, timeframe="1m")
+    if deps.aggregator and not deps.aggregator.get_history(symbol):
+        bars = await history_mod.fetch_universal_history(symbol, timeframe="1m")
         if bars:
-            (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).seed_history(symbol, bars)
+            deps.aggregator.seed_history(symbol, bars)
             logger.info("Dynamically seeded %d bars for new subscription: %s", len(bars), symbol)
 
     if exchange_guessed:
         item["exchange_guessed"] = True
 
-    (getattr(get_server_module(), 'manager', manager) if get_server_module() else manager).broadcast_nowait({
+    deps.manager.broadcast_nowait({
         "type": "symbol_added",
         "symbol": item
     })
@@ -336,7 +335,7 @@ async def unsubscribe_symbol(payload: Optional[Dict[str, Any]] = Body(default=No
         return JSONResponse({"error": "Symbol is required"}, status_code=400)
     clean_sym = normalize_symbol_id(str(raw_sym))
 
-    storage = (getattr(get_server_module(), 'get_storage', get_storage) if get_server_module() else get_storage)()
+    storage = deps.get_storage()
     try:
         storage.remove_watchlist_item(clean_sym)
     except Exception as e:
@@ -351,16 +350,16 @@ async def unsubscribe_symbol(payload: Optional[Dict[str, Any]] = Body(default=No
     if clean_sym in SYMBOLS:
         SYMBOLS.remove(clean_sym)
 
-    if tv_client:
+    if deps.tv_client:
         try:
-            await (getattr(get_server_module(), 'tv_client', tv_client) if get_server_module() else tv_client).unsubscribe(clean_sym)
+            await deps.tv_client.unsubscribe(clean_sym)
         except Exception as e:
             logger.debug("Error unsubscribing TradingView client for %s: %s", clean_sym, e)
 
-    if (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator) and hasattr((getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator), "remove_symbol"):
-        (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).remove_symbol(clean_sym)
+    if deps.aggregator and hasattr(deps.aggregator, "remove_symbol"):
+        deps.aggregator.remove_symbol(clean_sym)
 
-    (getattr(get_server_module(), 'manager', manager) if get_server_module() else manager).broadcast_nowait({
+    deps.manager.broadcast_nowait({
         "type": "symbol_removed",
         "symbol": clean_sym
     })
@@ -376,7 +375,7 @@ async def reorder_symbols_endpoint(payload: Optional[Dict[str, Any]] = Body(defa
         return JSONResponse({"error": "Invalid order payload, list of symbol IDs required"}, status_code=400)
 
     clean_ids = [str(s).strip().upper() for s in order if str(s).strip()]
-    storage = (getattr(get_server_module(), 'get_storage', get_storage) if get_server_module() else get_storage)()
+    storage = deps.get_storage()
     reordered = False
     try:
         reordered = storage.reorder_watchlist(clean_ids)
@@ -384,8 +383,7 @@ async def reorder_symbols_endpoint(payload: Optional[Dict[str, Any]] = Body(defa
         logger.warning("Failed to persist reordered watchlist to storage: %s", e)
 
     order_map = {sid: i for i, sid in enumerate(clean_ids)}
-    global WATCHLIST, SYMBOLS
     WATCHLIST.sort(key=lambda w: order_map.get(w.get("id"), 9999))
-    SYMBOLS = [w["id"] for w in WATCHLIST]
+    SYMBOLS[:] = [w["id"] for w in WATCHLIST]
 
     return {"status": "ok", "reordered": reordered, "count": len(clean_ids)}

@@ -2,14 +2,12 @@
 
 import argparse
 import asyncio
-import json
 import os
 import secrets
 import signal
 import sys
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -17,31 +15,39 @@ import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from engine.aggregator import CandlestickBar, TickToBarAggregator
 from engine.client import TradingViewAsyncClient
-from engine.market_scanner import scan_all_us_stocks
-from engine.market_time import NY_TZ, current_session_date, is_regular_session_open, last_completed_session_date, ny_now
-from engine.providers import AlpacaDataProvider, PolygonDataProvider
-from engine.screener import (
-    ScreeningCriteria,
-    US_MOMENTUM_UNIVERSE,
-    build_theme_heatmap,
-    evaluate_canslim_stage,
-    fetch_heatmap_universe,
-    scan_universe,
-)
+from engine.market_time import current_session_date, is_regular_session_open, last_completed_session_date
 from engine.storage import close_storage, get_storage
 
-from api.deps import (
-    ALLOWED_ASSET_TYPES,
+import api.deps as deps
+import api.history as history_mod
+from api.bootstrap import (
     CA_BUNDLE_PATH,
+    STATIC_DIR,
+    NoCacheStaticFiles,
+    RedactTokenFilter,
+    _parent_watchdog_loop,
+    bind_loopback_socket,
+    init_certifi_ca_bundle,
+    is_parent_alive,
+    load_dotenv_custom,
+    logger,
+    resolve_static_dir,
+    setup_log_redaction_filters,
+    start_parent_watchdog,
+)
+from api.config import (
+    ALLOWED_ASSET_TYPES,
     CANONICAL_TIMEFRAMES,
+    GEMINI_MODELS_CASCADE,
     LOOPBACK_ORIGIN_REGEX,
     MAX_CACHE_SIZE,
+    MIN_1M_HISTORY_BARS,
+    ONE_MIN_INFLIGHT_WAIT_SEC,
+    ONE_MIN_SEED_COOLDOWN_SEC,
     POPULAR_SEARCH_INDEX,
-    STATIC_DIR,
     SYMBOLS,
     TAURI_ORIGINS,
     VALID_SYMBOL_ID_RE,
@@ -49,59 +55,33 @@ from api.deps import (
     WATCHLIST,
     WS_HEARTBEAT_INTERVAL,
     YAHOO_EXCHANGE_MAP,
-    ConnectionManager,
-    DesktopAuthMiddleware,
-    NoCacheStaticFiles,
-    RedactTokenFilter,
-    YahooSessionManager,
-    _alpaca_provider,
-    _desktop_mode,
-    _desktop_port,
-    _desktop_token,
-    _dev_no_auth,
-    _inflight_history,
-    _last_remote_fetch,
     _parse_criteria_number,
-    _poly_provider,
-    _shared_client,
+    is_allowed_origin,
+    is_crypto_symbol,
+    is_valid_symbol_id,
+    is_valid_ticker,
+    normalize_symbol_id,
+    normalize_timeframe,
+)
+from api.deps import (
+    DesktopAuthMiddleware,
+    YahooSessionManager,
+    _inflight_history,
+    _last_1m_seed_attempt,
+    _last_remote_fetch,
     _yahoo_cache,
-    aggregator,
-    bind_loopback_socket,
-    current_status,
     desktop_mode_context,
     extract_token_from_request,
     get_desktop_port,
     get_desktop_token,
     get_shared_client,
-    init_certifi_ca_bundle,
-    is_allowed_origin,
-    is_crypto_symbol,
     is_desktop_mode,
-    is_parent_alive,
-    is_valid_symbol_id,
-    is_valid_ticker,
-    load_dotenv_custom,
-    logger,
     manager,
-    normalize_symbol_id,
-    normalize_timeframe,
-    resolve_static_dir,
     set_desktop_mode,
-    setup_log_redaction_filters,
-    start_parent_watchdog,
-    tv_client,
     verify_token,
 )
+from api.ws_manager import ConnectionManager
 from api.history import (
-    MIN_1M_HISTORY_BARS,
-    ONE_MIN_INFLIGHT_WAIT_SEC,
-    ONE_MIN_SEED_COOLDOWN_SEC,
-    _get_reconcile_semaphore,
-    _last_1m_seed_attempt,
-    _reconcile_binance_bar,
-    _reconcile_semaphore,
-    _reconcile_sleep,
-    _reconcile_tasks,
     collapse_daily_bars_by_ny_date,
     fetch_binance_history,
     fetch_historical_bars,
@@ -125,10 +105,8 @@ from api.symbols import (
     unsubscribe_symbol,
 )
 from api.ai import (
-    GEMINI_MODELS_CASCADE,
     _calc_ema,
     _calc_sma,
-    _gemini_model_holder,
     _generate_with_model_tracking,
     ai_lens_endpoint,
     build_ai_agent_lens_payload,
@@ -141,8 +119,6 @@ from api.ai import (
 )
 from api.screener import (
     SCREENER_PRESETS,
-    _HEATMAP_CACHE,
-    _HEATMAP_TTL,
     get_screener_presets,
     get_theme_heatmap_endpoint,
     router as screener_router,
@@ -160,19 +136,16 @@ from api.state import (
     save_drawing_endpoint,
     save_preferences_endpoint,
 )
-from api.ws import (
-    router as ws_router,
-    websocket_live_endpoint,
-)
+from api.ws import router as ws_router, websocket_live_endpoint
 
 
 async def lifespan(app: FastAPI):
     """FastAPI unified lifespan manager executing within the primary asyncio loop."""
-    global aggregator, tv_client, current_status, WATCHLIST, SYMBOLS
+    # Shared runtime state updated on api.deps
     logger.info("Initializing TradingView real-time engine...")
-    current_status = "initializing"
+    deps.current_status = "initializing"
 
-    storage = get_storage()
+    storage = deps.get_storage()
     try:
         persisted_wl = storage.get_watchlist()
         if persisted_wl:
@@ -183,11 +156,11 @@ async def lifespan(app: FastAPI):
     except Exception as wl_err:
         logger.warning("Failed to load watchlist from SQLite: %s", wl_err)
 
-    aggregator = TickToBarAggregator(
+    deps.aggregator = TickToBarAggregator(
         timeframe_seconds=60,
         max_history=500,
-        on_bar_update=on_bar_update_handler,
-        on_bar_completed=on_bar_completed_handler
+        on_bar_update=history_mod.on_bar_update_handler,
+        on_bar_completed=history_mod.on_bar_completed_handler
     )
 
     try:
@@ -198,9 +171,9 @@ async def lifespan(app: FastAPI):
         logger.warning("Failed to prune old bars on startup: %s", e)
 
     # Seed historical bars for crypto symbols concurrently using shared HTTP client
-    global _shared_client
-    if _shared_client is None or _shared_client.is_closed:
-        _shared_client = httpx.AsyncClient(
+    # Shared httpx client updated on api.deps
+    if deps._shared_client is None or deps._shared_client.is_closed:
+        deps._shared_client = httpx.AsyncClient(
             timeout=8.0,
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
             headers={
@@ -213,17 +186,17 @@ async def lifespan(app: FastAPI):
     for sym in crypto_symbols:
         cached = storage.get_bars(sym, "1m", limit=300)
         if cached:
-            aggregator.seed_history(sym, cached)
+            deps.aggregator.seed_history(sym, cached)
             logger.info("Cold-start offline seeded %d cached bars for %s", len(cached), sym)
 
     # Schedule background network refresh without blocking SERVER_READY handshake
     async def _background_crypto_seed():
         try:
-            seed_tasks = [fetch_binance_history(sym, limit=300) for sym in crypto_symbols]
+            seed_tasks = [history_mod.fetch_binance_history(sym, limit=300) for sym in crypto_symbols]
             seed_results = await asyncio.gather(*seed_tasks, return_exceptions=True)
             for sym, res in zip(crypto_symbols, seed_results):
                 if isinstance(res, list) and res:
-                    aggregator.seed_history(sym, res)
+                    deps.aggregator.seed_history(sym, res)
                     try:
                         storage.save_bars(sym, "1m", res)
                     except Exception as e:
@@ -244,8 +217,8 @@ async def lifespan(app: FastAPI):
         while True:
             try:
                 await asyncio.sleep(1.0)
-                if aggregator:
-                    aggregator.close_due_bars()
+                if deps.aggregator:
+                    deps.aggregator.close_due_bars()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -253,19 +226,19 @@ async def lifespan(app: FastAPI):
 
     close_bars_task: Optional[asyncio.Task] = asyncio.create_task(_close_due_bars_loop())
 
-    tv_client = TradingViewAsyncClient(
+    deps.tv_client = TradingViewAsyncClient(
         symbols=SYMBOLS,
-        on_quote_update=on_quote_update_handler,
-        on_status_change=on_status_change_handler
+        on_quote_update=history_mod.on_quote_update_handler,
+        on_status_change=history_mod.on_status_change_handler
     )
 
-    await tv_client.start()
+    await deps.tv_client.start()
     logger.info("TradingView WebSocket client running in unified lifespan loop.")
 
     watchdog_task: Optional[asyncio.Task] = None
-    if is_desktop_mode():
-        port = get_desktop_port() or 8000
-        token = get_desktop_token() or ""
+    if deps.is_desktop_mode():
+        port = deps.get_desktop_port() or 8000
+        token = deps.get_desktop_token() or ""
         handshake = f"SERVER_READY:PORT={port}:TOKEN={token}"
         print(handshake, flush=True)
         logger.info("Desktop mode readiness handshake emitted: PORT=%s", port)
@@ -287,11 +260,11 @@ async def lifespan(app: FastAPI):
             await close_bars_task
         except asyncio.CancelledError:
             logger.debug("Close due bars task cancellation completed.")
-    for t in list(_reconcile_tasks):
+    for t in list(deps._reconcile_tasks):
         t.cancel()
-    if _reconcile_tasks:
-        await asyncio.gather(*list(_reconcile_tasks), return_exceptions=True)
-    _reconcile_tasks.clear()
+    if deps._reconcile_tasks:
+        await asyncio.gather(*list(deps._reconcile_tasks), return_exceptions=True)
+    deps._reconcile_tasks.clear()
     # Python 3.9 binds asyncio.Semaphore to the loop it was created on; drop it so a later
     # lifespan (new event loop) creates a fresh one.
     globals()["_reconcile_semaphore"] = None
@@ -301,12 +274,12 @@ async def lifespan(app: FastAPI):
             await watchdog_task
         except asyncio.CancelledError:
             logger.debug("Parent watchdog task shutdown completed.")
-    if tv_client:
-        await tv_client.stop()
+    if deps.tv_client:
+        await deps.tv_client.stop()
     await manager.close_all()
-    if _shared_client is not None and not _shared_client.is_closed:
-        await _shared_client.aclose()
-        _shared_client = None
+    if deps._shared_client is not None and not deps._shared_client.is_closed:
+        await deps._shared_client.aclose()
+        deps._shared_client = None
     _inflight_history.clear()
     close_storage()
     logger.info("Engine shutdown complete.")
@@ -315,7 +288,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Momentum Swing Terminal", lifespan=lifespan)
 
 
-# Register security & CORS middlewares in exact order (DesktopAuthMiddleware first, CORSMiddleware outer)
+# Mount security & CORS middlewares in exact order (DesktopAuthMiddleware first, CORSMiddleware outer)
 app.add_middleware(DesktopAuthMiddleware)
 app.add_middleware(
     CORSMiddleware,

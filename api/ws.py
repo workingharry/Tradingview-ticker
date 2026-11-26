@@ -2,23 +2,18 @@
 
 import asyncio
 import json
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from api import get_server_module
-from api.deps import (
-    WS_HEARTBEAT_INTERVAL,
-    aggregator,
-    current_status,
-    is_allowed_origin,
-    is_desktop_mode,
-    logger,
-    manager,
-    verify_token,
-)
+import api.deps as deps
+from api.bootstrap import logger
+from api.config import WS_HEARTBEAT_INTERVAL, is_allowed_origin
 
 router = APIRouter()
 
+
+@router.websocket("/ws/live")
 async def websocket_live_endpoint(websocket: WebSocket):
     """Real-time multiplexed quote, bar, and status stream with bounded queues."""
     headers = getattr(websocket, "headers", None)
@@ -28,23 +23,23 @@ async def websocket_live_endpoint(websocket: WebSocket):
         await websocket.close(code=1008, reason="Unauthorized origin")
         return
 
-    if (getattr(get_server_module(), 'is_desktop_mode', is_desktop_mode) if get_server_module() else is_desktop_mode)():
-        if not _dev_no_auth:
+    if deps.is_desktop_mode():
+        if not deps._dev_no_auth:
             token = websocket.query_params.get("token") or websocket.headers.get("x-session-token") or websocket.headers.get("x-terminal-token")
             if not token:
                 auth_header = websocket.headers.get("authorization", "")
                 if auth_header.startswith("Bearer "):
                     token = auth_header[7:].strip()
-            if not verify_token(token):
+            if not deps.verify_token(token):
                 logger.warning("Rejected unauthorized WebSocket connection: missing or invalid session token")
                 await websocket.close(code=1008, reason="Unauthorized: invalid or missing session token")
                 return
 
-    await (getattr(get_server_module(), 'manager', manager) if get_server_module() else manager).connect(websocket)
+    await deps.manager.connect(websocket)
     try:
-        await websocket.send_json({"type": "status", "status": (getattr(get_server_module(), 'current_status', current_status) if get_server_module() else current_status)})
-        if tv_client and tv_client.states:
-            for sym, q in list(tv_client.states.items()):
+        await websocket.send_json({"type": "status", "status": deps.current_status})
+        if deps.tv_client and deps.tv_client.states:
+            for sym, q in list(deps.tv_client.states.items()):
                 if q.get("price", 0) > 0 or q.get("volume", 0) > 0:
                     await websocket.send_json({
                         "type": "quote",
@@ -65,7 +60,7 @@ async def websocket_live_endpoint(websocket: WebSocket):
             try:
                 while True:
                     await asyncio.sleep(WS_HEARTBEAT_INTERVAL)
-                    q = (getattr(get_server_module(), 'manager', manager) if get_server_module() else manager).client_queues.get(websocket)
+                    q = deps.manager.client_queues.get(websocket)
                     if q is not None:
                         try:
                             q.put_nowait({"type": "heartbeat", "t": time.time()})
@@ -76,7 +71,7 @@ async def websocket_live_endpoint(websocket: WebSocket):
             except Exception as e:
                 logger.debug("Heartbeat sender error: %s", e)
 
-        writer_coro = (getattr(get_server_module(), 'manager', manager) if get_server_module() else manager).client_writer(websocket)
+        writer_coro = deps.manager.client_writer(websocket)
         writer_task = asyncio.create_task(writer_coro) # tracked
         reader_coro = client_reader()
         reader_task = asyncio.create_task(reader_coro) # tracked
@@ -105,4 +100,4 @@ async def websocket_live_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.debug("WebSocket live endpoint error: %s", e)
     finally:
-        (getattr(get_server_module(), 'manager', manager) if get_server_module() else manager).disconnect(websocket)
+        deps.manager.disconnect(websocket)

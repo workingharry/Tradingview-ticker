@@ -2,6 +2,7 @@
 
 import asyncio
 import contextvars
+import json
 import math
 import os
 import time
@@ -12,28 +13,19 @@ import httpx
 from fastapi import APIRouter, Body, Query
 from fastapi.responses import JSONResponse
 
-from api import get_server_module
-from api.deps import (
-    YahooSessionManager,
-    aggregator,
-    get_shared_client,
+import api.deps as deps
+import api.history as history_mod
+from api.bootstrap import logger
+from api.config import (
+    GEMINI_MODELS_CASCADE,
     is_crypto_symbol,
     is_valid_symbol_id,
-    logger,
     normalize_symbol_id,
     normalize_timeframe,
 )
-from api.history import fetch_universal_history
-from engine.storage import get_storage
+from api.deps import YahooSessionManager
 
 router = APIRouter()
-
-GEMINI_MODELS_CASCADE: List[str] = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
-]
-
 
 async def call_gemini_generate_with_model(
     prompt: str,
@@ -44,7 +36,7 @@ async def call_gemini_generate_with_model(
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not gemini_key:
         return None, None
-    shared = (getattr(get_server_module(), 'get_shared_client', get_shared_client) if get_server_module() else get_shared_client)()
+    shared = deps.get_shared_client()
     cli = shared or httpx.AsyncClient(timeout=12.0)
     should_close = shared is None
     headers = {"x-goog-api-key": gemini_key}
@@ -86,7 +78,7 @@ async def call_gemini_generate(prompt: str, temperature: float = 0.4, max_tokens
 
     Also records the successful model into the active _gemini_model_holder, if any.
     """
-    text, model_used = await (getattr(get_server_module(), 'call_gemini_generate_with_model', call_gemini_generate_with_model) if get_server_module() else call_gemini_generate_with_model)(prompt, temperature=temperature, max_tokens=max_tokens)
+    text, model_used = await call_gemini_generate_with_model(prompt, temperature=temperature, max_tokens=max_tokens)
     holder = _gemini_model_holder.get()
     if isinstance(holder, dict):
         holder["model"] = model_used if text else None
@@ -106,7 +98,7 @@ async def _generate_with_model_tracking(
     holder: Dict[str, Optional[str]] = {"model": None}
     token = _gemini_model_holder.set(holder)
     try:
-        text = await (getattr(get_server_module(), 'call_gemini_generate', call_gemini_generate) if get_server_module() else call_gemini_generate)(prompt, temperature=temperature, max_tokens=max_tokens)
+        text = await call_gemini_generate(prompt, temperature=temperature, max_tokens=max_tokens)
     finally:
         _gemini_model_holder.reset(token)
     if isinstance(text, str) and text.strip():
@@ -121,7 +113,7 @@ async def get_fundamentals(symbol: str = Query(...), refresh: bool = Query(defau
         return JSONResponse({"error": "Invalid symbol format"}, status_code=400)
 
     clean_sym = normalize_symbol_id(symbol)
-    storage = (getattr(get_server_module(), 'get_storage', get_storage) if get_server_module() else get_storage)()
+    storage = deps.get_storage()
 
     if not refresh:
         cached = storage.get_fundamental_report(clean_sym)
@@ -153,7 +145,7 @@ async def get_fundamentals(symbol: str = Query(...), refresh: bool = Query(defau
     }
 
     try:
-        shared = (getattr(get_server_module(), 'get_shared_client', get_shared_client) if get_server_module() else get_shared_client)()
+        shared = deps.get_shared_client()
         cli = shared or httpx.AsyncClient(timeout=8.0, headers=headers)
         should_close = shared is None
         try:
@@ -212,7 +204,7 @@ async def get_fundamentals(symbol: str = Query(...), refresh: bool = Query(defau
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 "Accept": "application/json"
             }
-            shared_chart = (getattr(get_server_module(), 'get_shared_client', get_shared_client) if get_server_module() else get_shared_client)()
+            shared_chart = deps.get_shared_client()
             chart_cli = shared_chart or httpx.AsyncClient(timeout=6.0, headers=chart_headers)
             should_close_chart = shared_chart is None
             try:
@@ -272,8 +264,8 @@ async def get_fundamentals(symbol: str = Query(...), refresh: bool = Query(defau
     if metrics["current_price"] is None or metrics["fifty_two_week_high"] is None:
         try:
             fb_bars = storage.get_bars(clean_sym, "1D", limit=260)
-            if not fb_bars and aggregator:
-                fb_bars = (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).get_history(clean_sym)
+            if not fb_bars and deps.aggregator:
+                fb_bars = deps.aggregator.get_history(clean_sym)
             if fb_bars:
                 latest = fb_bars[-1]
                 if metrics["current_price"] is None:
@@ -312,7 +304,7 @@ async def get_fundamentals(symbol: str = Query(...), refresh: bool = Query(defau
 2. 【近期營收與獲利動能 (CANSLIM 標準)】
 3. 【機構籌碼與技術位階綜合評析】
 4. 【關鍵潛在風險與下檔支撐提示】"""
-            gen_text, actual_model = await (getattr(get_server_module(), '_generate_with_model_tracking', _generate_with_model_tracking) if get_server_module() else _generate_with_model_tracking)(prompt, temperature=0.4, max_tokens=800)
+            gen_text, actual_model = await _generate_with_model_tracking(prompt, temperature=0.4, max_tokens=800)
             if gen_text:
                 ai_summary = gen_text
                 model_name = actual_model
@@ -347,7 +339,7 @@ async def get_fundamentals(symbol: str = Query(...), refresh: bool = Query(defau
         "model_used": model_name,
         "model": model_name,
         "source": source,
-        "updated_at": int((getattr(get_server_module(), 'time', time) if get_server_module() else time).time())
+        "updated_at": int(time.time())
     }
 
 
@@ -393,7 +385,7 @@ def build_ai_agent_lens_payload(
             "schema": "ai-agent-lens/v1",
             "symbol": clean_sym,
             "timeframe": clean_tf,
-            "timestamp": int((getattr(get_server_module(), 'time', time) if get_server_module() else time).time()),
+            "timestamp": int(time.time()),
             "is_confirmed_bar": False,
             "confirmed_bar": None,
             "unconfirmed_latest_bar": None,
@@ -415,7 +407,7 @@ def build_ai_agent_lens_payload(
             "fundamentals": fundamentals or {},
         }
 
-    now_ts = int((getattr(get_server_module(), 'time', time) if get_server_module() else time).time())
+    now_ts = int(time.time())
     tf_seconds = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1D": 86400, "1W": 604800}.get(clean_tf, 86400)
     last_bar = bars[-1]
 
@@ -563,7 +555,7 @@ def build_ai_agent_lens_payload(
         "schema": "ai-agent-lens/v1",
         "symbol": clean_sym,
         "timeframe": clean_tf,
-        "timestamp": int((getattr(get_server_module(), 'time', time) if get_server_module() else time).time()),
+        "timestamp": int(time.time()),
         "is_confirmed_bar": True,
         "confirmed_bar": confirmed_bar,
         "unconfirmed_latest_bar": unconfirmed_bar,
@@ -668,9 +660,9 @@ async def ai_lens_endpoint(
     if not is_valid_symbol_id(clean_sym):
         return JSONResponse({"error": "Invalid symbol format"}, status_code=400)
     clean_tf = normalize_timeframe(timeframe, default="1D")
-    storage = (getattr(get_server_module(), 'get_storage', get_storage) if get_server_module() else get_storage)()
+    storage = deps.get_storage()
 
-    now_ts = int((getattr(get_server_module(), 'time', time) if get_server_module() else time).time())
+    now_ts = int(time.time())
     if not refresh:
         cached_rep = storage.get_ai_agent_lens_report(clean_sym, clean_tf)
         if cached_rep and (now_ts - cached_rep.get("updated_at", 0)) < 1800:
@@ -682,12 +674,12 @@ async def ai_lens_endpoint(
                 "report": cached_rep,
             }
 
-    target_bars = await (getattr(get_server_module(), 'fetch_universal_history', fetch_universal_history) if get_server_module() else fetch_universal_history)(clean_sym, timeframe=clean_tf)
+    target_bars = await history_mod.fetch_universal_history(clean_sym, timeframe=clean_tf)
     if not target_bars:
         target_bars = storage.get_bars(clean_sym, clean_tf, limit=1500)
 
     bench_sym = "BINANCE:BTCUSDT" if is_crypto_symbol(clean_sym) else "AMEX:SPY"
-    bench_bars = await (getattr(get_server_module(), 'fetch_universal_history', fetch_universal_history) if get_server_module() else fetch_universal_history)(bench_sym, timeframe=clean_tf)
+    bench_bars = await history_mod.fetch_universal_history(bench_sym, timeframe=clean_tf)
     if not bench_bars:
         bench_bars = storage.get_bars(bench_sym, clean_tf, limit=1500)
 
@@ -738,7 +730,7 @@ SMA 50：{quant.get('sma50')} | SMA 200：{quant.get('sma200')}
   "fundamental_diagnosis": "基本面與動能綜合診斷（繁體中文）",
   "human_decision_note": "交易員執行指南（進出場與風控指引，繁體中文）"
 }}"""
-            gen_res, actual_model = await (getattr(get_server_module(), '_generate_with_model_tracking', _generate_with_model_tracking) if get_server_module() else _generate_with_model_tracking)(prompt, temperature=0.2, max_tokens=800)
+            gen_res, actual_model = await _generate_with_model_tracking(prompt, temperature=0.2, max_tokens=800)
             if gen_res:
                 clean_text = gen_res.strip().replace("```json", "").replace("```", "").strip()
                 parsed = json.loads(clean_text)
@@ -785,6 +777,8 @@ SMA 50：{quant.get('sma50')} | SMA 200：{quant.get('sma200')}
         }
     }
 
+
+@router.post("/api/chat")
 async def chat_endpoint(payload: Optional[Dict[str, Any]] = Body(default=None)):
     """Interactive Gemini Market Copilot Chat with rich live context injection."""
     if not isinstance(payload, dict):
@@ -802,10 +796,10 @@ async def chat_endpoint(payload: Optional[Dict[str, Any]] = Body(default=None)):
     clean_tf = normalize_timeframe(payload.get("timeframe"), default="1D")
 
     # Context gathering: latest bars & indicators
-    storage = (getattr(get_server_module(), 'get_storage', get_storage) if get_server_module() else get_storage)()
+    storage = deps.get_storage()
     bars = storage.get_bars(clean_sym, clean_tf, limit=30)
-    if not bars and aggregator:
-        bars = (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).get_history(clean_sym)
+    if not bars and deps.aggregator:
+        bars = deps.aggregator.get_history(clean_sym)
 
     latest_bar = bars[-1] if bars else None
     close_price = latest_bar.get("close") if latest_bar else "N/A"
@@ -837,7 +831,7 @@ async def chat_endpoint(payload: Optional[Dict[str, Any]] = Body(default=None)):
 
     full_prompt = f"{system_prompt}\n\n【交易員提問】：\n{user_msg}"
 
-    reply, used_model = await (getattr(get_server_module(), '_generate_with_model_tracking', _generate_with_model_tracking) if get_server_module() else _generate_with_model_tracking)(full_prompt, temperature=0.5, max_tokens=1000)
+    reply, used_model = await _generate_with_model_tracking(full_prompt, temperature=0.5, max_tokens=1000)
     source = "gemini" if reply else "rule_based"
 
     if not reply:
@@ -877,7 +871,7 @@ async def chat_endpoint(payload: Optional[Dict[str, Any]] = Body(default=None)):
         "reply": reply,
         "symbol": clean_sym,
         "timeframe": clean_tf,
-        "timestamp": int((getattr(get_server_module(), 'time', time) if get_server_module() else time).time()),
+        "timestamp": int(time.time()),
         "model": used_model,
         "source": source
     }

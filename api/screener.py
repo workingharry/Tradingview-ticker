@@ -1,16 +1,21 @@
 """CANSLIM / Stage 2 stock screener, AI screener summary, and theme heatmap endpoints."""
 
 import asyncio
+import math
 import time
+from dataclasses import asdict
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Body
+from fastapi.responses import JSONResponse
 
-from api import get_server_module
-from api.ai import build_ai_agent_lens_payload, call_gemini_generate
-from api.deps import _parse_criteria_number, logger
-from api.history import fetch_universal_history
-from engine.market_scanner import scan_all_us_stocks, evaluate_multi_frameworks
+import api.ai as ai_mod
+import api.deps as deps
+import api.history as history_mod
+from api.bootstrap import logger
+from api.config import WATCHLIST, _parse_criteria_number
+from engine.market_scanner import evaluate_multi_frameworks, scan_all_us_stocks
 from engine.market_time import current_session_date, last_completed_session_date
 from engine.screener import (
     ScreeningCriteria,
@@ -20,7 +25,6 @@ from engine.screener import (
     fetch_heatmap_universe,
     scan_universe,
 )
-from engine.storage import get_storage
 
 router = APIRouter()
 
@@ -285,10 +289,10 @@ async def scan_screener_endpoint(payload: Optional[Dict[str, Any]] = Body(defaul
         mansfield_length=c_m_len
     )
 
-    storage = (getattr(get_server_module(), 'get_storage', get_storage) if get_server_module() else get_storage)()
+    storage = deps.get_storage()
 
     # Ingest benchmark SPY bars for date alignment & market regime
-    bench_bars = await (getattr(get_server_module(), 'fetch_universal_history', fetch_universal_history) if get_server_module() else fetch_universal_history)("AMEX:SPY", timeframe="1D")
+    bench_bars = await history_mod.fetch_universal_history("AMEX:SPY", timeframe="1D")
     if not bench_bars:
         bench_bars = storage.get_bars("AMEX:SPY", "1D", limit=300)
 
@@ -315,8 +319,8 @@ async def scan_screener_endpoint(payload: Optional[Dict[str, Any]] = Body(defaul
         }
         hide_v6 = bool(raw_criteria.get("hide_v6_hard", False))
         scan_limit = c_limit
-        start_t = (getattr(get_server_module(), 'time', time) if get_server_module() else time).perf_counter()
-        scan_res = await (getattr(get_server_module(), 'scan_all_us_stocks', scan_all_us_stocks) if get_server_module() else scan_all_us_stocks)(
+        start_t = time.perf_counter()
+        scan_res = await scan_all_us_stocks(
             criteria=crit_dict,
             risk_dollar=risk_dollar,
             limit=scan_limit,
@@ -324,9 +328,9 @@ async def scan_screener_endpoint(payload: Optional[Dict[str, Any]] = Body(defaul
         )
         matched_items, total_count = scan_res
         scan_warning = getattr(scan_res, "warning", None)
-        elapsed_ms = int(((getattr(get_server_module(), 'time', time) if get_server_module() else time).perf_counter() - start_t) * 1000)
+        elapsed_ms = int((time.perf_counter() - start_t) * 1000)
 
-        today_str = (getattr(get_server_module(), 'current_session_date', current_session_date) if get_server_module() else current_session_date)().isoformat()
+        today_str = current_session_date().isoformat()
         try:
             storage.record_screener_snapshot(today_str, matched_items)
             symbols_to_check = [it["symbol"] for it in matched_items]
@@ -402,18 +406,18 @@ async def scan_screener_endpoint(payload: Optional[Dict[str, Any]] = Body(defaul
             "warning": "請在自訂代碼框中輸入至少一檔股票代碼（如 NVDA, TSLA, MRNA, CART）"
         }
 
-    start_t = (getattr(get_server_module(), 'time', time) if get_server_module() else time).perf_counter()
-    matched_items = await (getattr(get_server_module(), 'scan_universe', scan_universe) if get_server_module() else scan_universe)(
+    start_t = time.perf_counter()
+    matched_items = await scan_universe(
         universe=universe_items,
         criteria=criteria,
         storage_obj=storage,
         benchmark_bars=bench_bars,
-        fetch_func=(getattr(get_server_module(), 'fetch_universal_history', fetch_universal_history) if get_server_module() else fetch_universal_history),
+        fetch_func=history_mod.fetch_universal_history,
         max_concurrency=8
     )
-    elapsed_ms = int(((getattr(get_server_module(), 'time', time) if get_server_module() else time).perf_counter() - start_t) * 1000)
+    elapsed_ms = int((time.perf_counter() - start_t) * 1000)
 
-    today_str = (getattr(get_server_module(), 'current_session_date', current_session_date) if get_server_module() else current_session_date)().isoformat()
+    today_str = current_session_date().isoformat()
     try:
         for it in matched_items:
             if "frameworks" not in it:
@@ -501,7 +505,7 @@ async def screener_ai_summary_endpoint(payload: Optional[Dict[str, Any]] = Body(
 
     try:
         gen_text = await asyncio.wait_for(
-            (getattr(get_server_module(), 'call_gemini_generate', call_gemini_generate) if get_server_module() else call_gemini_generate)(prompt, temperature=0.3, max_tokens=700),
+            ai_mod.call_gemini_generate(prompt, temperature=0.3, max_tokens=700),
             timeout=15.0
         )
         if gen_text:
@@ -531,13 +535,13 @@ async def get_theme_heatmap_endpoint(universe: str = "themes", refresh: bool = F
     if universe_type not in ("themes", "watchlist"):
         universe_type = "themes"
 
-    now = (getattr(get_server_module(), 'time', time) if get_server_module() else time).time()
+    now = time.time()
     if not refresh and universe_type in _HEATMAP_CACHE:
         cached_time, cached_data = _HEATMAP_CACHE[universe_type]
         if now - cached_time < _HEATMAP_TTL:
             return cached_data
 
-    storage = (getattr(get_server_module(), 'get_storage', get_storage) if get_server_module() else get_storage)()
+    storage = deps.get_storage()
 
     universe_items: List[Dict[str, Any]] = []
     if universe_type == "watchlist":
@@ -546,18 +550,18 @@ async def get_theme_heatmap_endpoint(universe: str = "themes", refresh: bool = F
     else:
         universe_items = list(US_MOMENTUM_UNIVERSE)
 
-    bench_bars = await (getattr(get_server_module(), 'fetch_universal_history', fetch_universal_history) if get_server_module() else fetch_universal_history)("AMEX:SPY", timeframe="1D")
+    bench_bars = await history_mod.fetch_universal_history("AMEX:SPY", timeframe="1D")
     if not bench_bars and storage:
         bench_bars = storage.get_bars("AMEX:SPY", "1D", limit=300)
 
     bench_stage = evaluate_canslim_stage(bench_bars) if bench_bars else {}
     bench_change_pct = float(bench_stage.get("change_pct") or 0.0)
 
-    evaluated_items = await (getattr(get_server_module(), 'fetch_heatmap_universe', fetch_heatmap_universe) if get_server_module() else fetch_heatmap_universe)(
+    evaluated_items = await fetch_heatmap_universe(
         universe=universe_items,
         storage_obj=storage,
         benchmark_bars=bench_bars,
-        fetch_func=(getattr(get_server_module(), 'fetch_universal_history', fetch_universal_history) if get_server_module() else fetch_universal_history),
+        fetch_func=history_mod.fetch_universal_history,
         max_concurrency=8
     )
 

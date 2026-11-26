@@ -2,35 +2,30 @@
 
 import asyncio
 import time
+from collections import OrderedDict
 from datetime import datetime, time as dt_time, timedelta
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
-from api import get_server_module
-from api.deps import (
-    _alpaca_provider,
-    _inflight_history,
-    _last_remote_fetch,
-    _poly_provider,
-    _yahoo_cache,
-    aggregator,
-    YahooSessionManager,
-    get_shared_client,
+import api.deps as deps
+from api.bootstrap import logger
+from api.config import (
+    MAX_CACHE_SIZE,
+    MIN_1M_HISTORY_BARS,
+    ONE_MIN_INFLIGHT_WAIT_SEC,
+    ONE_MIN_SEED_COOLDOWN_SEC,
     is_crypto_symbol,
     is_valid_symbol_id,
-    logger,
-    manager,
-    MAX_CACHE_SIZE,
+    is_valid_ticker,
     normalize_symbol_id,
     normalize_timeframe,
-    tv_client,
 )
+from api.deps import YahooSessionManager
 from engine.aggregator import CandlestickBar
 from engine.market_time import NY_TZ, is_regular_session_open, last_completed_session_date
-from engine.storage import get_storage
 
 router = APIRouter()
 
@@ -68,7 +63,7 @@ async def fetch_binance_history(symbol: str, limit: int = 300, **kwargs) -> List
             logger.warning("Binance API returned status %s for %s", resp.status_code, symbol)
 
     try:
-        shared = (getattr(get_server_module(), 'get_shared_client', get_shared_client) if get_server_module() else get_shared_client)()
+        shared = deps.get_shared_client()
         if shared is not None:
             await _fetch(shared)
         else:
@@ -87,14 +82,14 @@ async def fetch_yahoo_history(symbol: str, timeframe: str = "1m") -> List[Dict[s
     if not is_valid_ticker(ticker):
         return []
     cache_key = f"{ticker}_{timeframe}"
-    now = (getattr(get_server_module(), 'time', time) if get_server_module() else time).time()
-    if cache_key in _yahoo_cache:
-        cached_time, cached_bars = _yahoo_cache[cache_key]
+    now = time.time()
+    if cache_key in deps._yahoo_cache:
+        cached_time, cached_bars = deps._yahoo_cache[cache_key]
         ttl = 10.0 if not cached_bars else 30.0
         if now - cached_time < ttl:
-            _yahoo_cache.move_to_end(cache_key)
+            deps._yahoo_cache.move_to_end(cache_key)
             return cached_bars
-        del _yahoo_cache[cache_key]
+        del deps._yahoo_cache[cache_key]
 
     tf_map = {
         "1m": ("1m", "1d"),
@@ -152,9 +147,9 @@ async def fetch_yahoo_history(symbol: str, timeframe: str = "1m") -> List[Dict[s
                                     "volume": float(v) if v is not None else 0.0,
                                 })
                         if bars:
-                            if len(_yahoo_cache) >= MAX_CACHE_SIZE:
-                                _yahoo_cache.popitem(last=False)
-                            _yahoo_cache[cache_key] = (now, bars)
+                            if len(deps._yahoo_cache) >= MAX_CACHE_SIZE:
+                                deps._yahoo_cache.popitem(last=False)
+                            deps._yahoo_cache[cache_key] = (now, bars)
                             return
                 elif resp.status_code == 429:
                     logger.warning("Yahoo Finance API returned status 429 for %s, entering negative cooldown", ticker)
@@ -166,12 +161,12 @@ async def fetch_yahoo_history(symbol: str, timeframe: str = "1m") -> List[Dict[s
                 logger.warning("Yahoo Finance host %s network error for %s: %s", host, ticker, host_err)
                 continue
         if not bars:
-            if len(_yahoo_cache) >= MAX_CACHE_SIZE:
-                _yahoo_cache.popitem(last=False)
-            _yahoo_cache[cache_key] = (now, [])
+            if len(deps._yahoo_cache) >= MAX_CACHE_SIZE:
+                deps._yahoo_cache.popitem(last=False)
+            deps._yahoo_cache[cache_key] = (now, [])
 
     try:
-        shared = (getattr(get_server_module(), 'get_shared_client', get_shared_client) if get_server_module() else get_shared_client)()
+        shared = deps.get_shared_client()
         if shared is not None:
             await _fetch(shared)
         else:
@@ -244,30 +239,30 @@ async def fetch_historical_bars(symbol: str, timeframe: str = "1m", limit: int =
     bars: List[Dict[str, Any]] = []
 
     # 0. Cache-first fast path: if SQLite already holds sufficiently fresh bars, serve immediately (0ms latency)
-    storage = (getattr(get_server_module(), 'get_storage', get_storage) if get_server_module() else get_storage)()
+    storage = deps.get_storage()
     cached = storage.get_bars(symbol, clean_tf, limit=limit)
     min_expected = min(limit, 250) if clean_tf in ("1D", "1W", "1WK") else min(limit, 30)
     if cached and len(cached) >= min_expected:
-        now_ts = int((getattr(get_server_module(), 'time', time) if get_server_module() else time).time())
+        now_ts = int(time.time())
         last_bar_ts = cached[-1].get("time", 0)
         is_fresh = False
 
         if clean_tf in ("1D", "1W", "1WK"):
             # Never fetched remotely in this process -> 0.0 (treated as stale, refetch once).
             # Do NOT fall back to the bar timestamp: Yahoo's latest daily bar can carry a 16:00 ET timestamp.
-            last_fetch_t = _last_remote_fetch.get((symbol, clean_tf), 0.0)
+            last_fetch_t = deps._last_remote_fetch.get((symbol, clean_tf), 0.0)
             if is_crypto_symbol(symbol):
                 # Crypto: unclosed bar, fresh only if remote fetched within 60s
                 if (now_ts - last_fetch_t) <= 60:
                     is_fresh = True
             else:
-                if (getattr(get_server_module(), 'is_regular_session_open', is_regular_session_open) if get_server_module() else is_regular_session_open)():
+                if is_regular_session_open():
                     # Intraday: fresh only if remote fetched within 60s
                     if (now_ts - last_fetch_t) <= 60:
                         is_fresh = True
                 else:
                     # Market closed: last bar NY date >= last_completed_session_date() AND fetched after 16:00 ET
-                    comp_date = (getattr(get_server_module(), 'last_completed_session_date', last_completed_session_date) if get_server_module() else last_completed_session_date)()
+                    comp_date = last_completed_session_date()
                     try:
                         last_bar_dt = datetime.fromtimestamp(last_bar_ts, tz=NY_TZ)
                         last_bar_date = last_bar_dt.date()
@@ -289,7 +284,7 @@ async def fetch_historical_bars(symbol: str, timeframe: str = "1m", limit: int =
                             is_fresh = True
         else:
             tf_seconds = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600}.get(clean_tf, 60)
-            last_fetch_t = _last_remote_fetch.get((symbol, clean_tf), 0.0)
+            last_fetch_t = deps._last_remote_fetch.get((symbol, clean_tf), 0.0)
             if (now_ts - last_fetch_t) <= tf_seconds:
                 is_fresh = True
 
@@ -300,15 +295,15 @@ async def fetch_historical_bars(symbol: str, timeframe: str = "1m", limit: int =
             return cached
 
     # 1. Check licensed commercial providers if credentials are configured in environment
-    if _poly_provider.is_configured:
+    if deps._poly_provider.is_configured:
         try:
-            bars = await _poly_provider.fetch_historical_bars(symbol, timeframe=clean_tf, limit=limit)
+            bars = await deps._poly_provider.fetch_historical_bars(symbol, timeframe=clean_tf, limit=limit)
         except Exception as poly_err:
             logger.warning("Licensed Polygon provider error for %s: %s", symbol, poly_err)
 
-    if not bars and _alpaca_provider.is_configured:
+    if not bars and deps._alpaca_provider.is_configured:
         try:
-            bars = await _alpaca_provider.fetch_historical_bars(symbol, timeframe=clean_tf, limit=limit)
+            bars = await deps._alpaca_provider.fetch_historical_bars(symbol, timeframe=clean_tf, limit=limit)
         except Exception as alpaca_err:
             logger.warning("Licensed Alpaca provider error for %s: %s", symbol, alpaca_err)
 
@@ -317,19 +312,19 @@ async def fetch_historical_bars(symbol: str, timeframe: str = "1m", limit: int =
         try:
             if is_crypto_symbol(symbol):
                 if clean_tf == "1m":
-                    bars = await (getattr(get_server_module(), 'fetch_binance_history', fetch_binance_history) if get_server_module() else fetch_binance_history)(symbol, limit=limit)
+                    bars = await fetch_binance_history(symbol, limit=limit)
                 else:
-                    bars = await (getattr(get_server_module(), 'fetch_binance_history', fetch_binance_history) if get_server_module() else fetch_binance_history)(symbol, limit=limit, interval=clean_tf)
+                    bars = await fetch_binance_history(symbol, limit=limit, interval=clean_tf)
             else:
-                bars = await (getattr(get_server_module(), 'fetch_yahoo_history', fetch_yahoo_history) if get_server_module() else fetch_yahoo_history)(symbol, timeframe=clean_tf)
+                bars = await fetch_yahoo_history(symbol, timeframe=clean_tf)
         except Exception as e:
             logger.warning("Remote fetch historical bars error for %s (%s): %s", symbol, clean_tf, e)
 
-    storage = (getattr(get_server_module(), 'get_storage', get_storage) if get_server_module() else get_storage)()
+    storage = deps.get_storage()
     if bars:
         if clean_tf == "1D" and not is_crypto_symbol(symbol):
             bars = collapse_daily_bars_by_ny_date(bars)
-        _last_remote_fetch[(symbol, clean_tf)] = (getattr(get_server_module(), 'time', time) if get_server_module() else time).time()
+        deps._last_remote_fetch[(symbol, clean_tf)] = time.time()
         try:
             storage.save_bars(symbol, clean_tf, bars)
         except Exception as save_err:
@@ -349,32 +344,32 @@ async def fetch_historical_bars(symbol: str, timeframe: str = "1m", limit: int =
 async def fetch_universal_history(symbol: str, timeframe: str = "1D") -> List[Dict[str, Any]]:
     """Universal router dispatching with singleflight deduplication to prevent cache stampedes."""
     flight_key = f"{symbol}_{timeframe}"
-    existing_task = _inflight_history.get(flight_key)
+    existing_task = deps._inflight_history.get(flight_key)
     if existing_task is not None and not existing_task.done():
         return await asyncio.shield(existing_task)
 
     async def _runner() -> List[Dict[str, Any]]:
         try:
             req_limit = 1500 if str(timeframe).upper() in ("1D", "1W", "1WK") else 300
-            return await (getattr(get_server_module(), 'fetch_historical_bars', fetch_historical_bars) if get_server_module() else fetch_historical_bars)(symbol, timeframe=timeframe, limit=req_limit)
+            return await fetch_historical_bars(symbol, timeframe=timeframe, limit=req_limit)
         except Exception as e:
             logger.warning("Fetch universal history error for %s (%s): %s", symbol, timeframe, e)
             return []
         finally:
-            _inflight_history.pop(flight_key, None)
+            deps._inflight_history.pop(flight_key, None)
 
     runner_coro = _runner()
     task = asyncio.create_task(runner_coro) # tracked
-    _inflight_history[flight_key] = task
+    deps._inflight_history[flight_key] = task
     return await asyncio.shield(task)
 
 
 def on_bar_update_handler(symbol: str, bar: CandlestickBar) -> None:
     """Dispatches real-time bar updates to connected WebSocket clients with monotonic per-symbol seq."""
-    (getattr(get_server_module(), 'manager', manager) if get_server_module() else manager).broadcast_nowait({
+    deps.manager.broadcast_nowait({
         "type": "bar",
         "symbol": symbol,
-        "seq": (getattr(get_server_module(), 'manager', manager) if get_server_module() else manager).next_bar_seq(symbol),
+        "seq": deps.manager.next_bar_seq(symbol),
         "bar": bar.to_dict()
     })
 
@@ -385,10 +380,10 @@ def on_quote_update_handler(symbol: str, quote_data: Dict[str, Any]) -> None:
     vol = quote_data.get("volume")
     t = quote_data.get("time")
 
-    if aggregator:
-        (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).process_tick(symbol, price=price, cumulative_volume=vol, tick_time=t)
+    if deps.aggregator:
+        deps.aggregator.process_tick(symbol, price=price, cumulative_volume=vol, tick_time=t)
 
-    (getattr(get_server_module(), 'manager', manager) if get_server_module() else manager).broadcast_nowait({
+    deps.manager.broadcast_nowait({
         "type": "quote",
         "symbol": symbol,
         "data": quote_data
@@ -397,9 +392,9 @@ def on_quote_update_handler(symbol: str, quote_data: Dict[str, Any]) -> None:
 
 def on_status_change_handler(status: str) -> None:
     """Updates global connection status and notifies clients."""
-    global current_status
-    current_status = status
-    (getattr(get_server_module(), 'manager', manager) if get_server_module() else manager).broadcast_nowait({
+    # status synced via deps.current_status
+    deps.current_status = status
+    deps.manager.broadcast_nowait({
         "type": "status",
         "status": status
     })
@@ -407,7 +402,6 @@ def on_status_change_handler(status: str) -> None:
 
 _reconcile_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 _reconcile_semaphore: Optional[asyncio.Semaphore] = None
-_reconcile_tasks: Set[asyncio.Task] = set()
 
 
 def _get_reconcile_semaphore() -> asyncio.Semaphore:
@@ -422,19 +416,19 @@ async def _reconcile_binance_bar(symbol: str, bar_time: int) -> None:
     # Wait OUTSIDE the semaphore: the limit of 4 applies to concurrent Binance requests,
     # not to tasks that are merely waiting for their bar to settle.
     target_time = bar_time + 62  # bar_time + 60 + 2
-    wait_sec = target_time - (getattr(get_server_module(), 'time', time) if get_server_module() else time).time()
+    wait_sec = target_time - time.time()
     if wait_sec > 0:
-        await (getattr(get_server_module(), '_reconcile_sleep', _reconcile_sleep) if get_server_module() else _reconcile_sleep)(wait_sec)
+        await _reconcile_sleep(wait_sec)
 
     sem = _get_reconcile_semaphore()
     async with sem:
         try:
-            bars = await (getattr(get_server_module(), 'fetch_binance_history', fetch_binance_history) if get_server_module() else fetch_binance_history)(symbol, limit=3)
+            bars = await fetch_binance_history(symbol, limit=3)
             matching = next((b for b in bars if int(b.get("time", 0)) == bar_time), None)
-            if matching and aggregator:
-                replaced = (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).replace_history_bar(symbol, matching)
+            if matching and deps.aggregator:
+                replaced = deps.aggregator.replace_history_bar(symbol, matching)
                 if replaced:
-                    (getattr(get_server_module(), 'get_storage', get_storage) if get_server_module() else get_storage)().save_bars(symbol, "1m", [matching])
+                    deps.get_storage().save_bars(symbol, "1m", [matching])
                     logger.debug("Reconciled Binance bar for %s at %d", symbol, bar_time)
                 else:
                     logger.debug("Bar %d for %s not found in aggregator history to reconcile", bar_time, symbol)
@@ -449,7 +443,7 @@ async def _reconcile_binance_bar(symbol: str, bar_time: int) -> None:
 def on_bar_completed_handler(symbol: str, bar: CandlestickBar) -> None:
     """Persists completed 1m candlestick bar to SQLite storage and schedules crypto reconciliation."""
     try:
-        (getattr(get_server_module(), 'get_storage', get_storage) if get_server_module() else get_storage)().save_bars(symbol, "1m", [bar])
+        deps.get_storage().save_bars(symbol, "1m", [bar])
     except Exception as e:
         logger.warning("Failed to persist completed bar for %s: %s", symbol, e)
 
@@ -466,21 +460,16 @@ def on_bar_completed_handler(symbol: str, bar: CandlestickBar) -> None:
 
     coro = _reconcile_binance_bar(symbol, bar.time)
     task = asyncio.create_task(coro)
-    _reconcile_tasks.add(task)
+    deps._reconcile_tasks.add(task)
 
     def _cleanup(t: asyncio.Task) -> None:
-        _reconcile_tasks.discard(t)
+        deps._reconcile_tasks.discard(t)
         if not t.cancelled():
             exc = t.exception()
             if exc:
                 logger.debug("Reconcile task error for %s: %s", symbol, exc)
 
     task.add_done_callback(_cleanup)
-
-MIN_1M_HISTORY_BARS: int = 30
-ONE_MIN_SEED_COOLDOWN_SEC: float = 60.0
-ONE_MIN_INFLIGHT_WAIT_SEC: float = 3.0
-_last_1m_seed_attempt: Dict[str, float] = {}
 
 
 @router.get("/api/history")
@@ -495,16 +484,16 @@ async def get_history(
     """Returns historical OHLCV bars supporting Scheme A (dual-source) and Scheme B (TradingView WebSocket series)."""
     clean_sym = normalize_symbol_id(symbol) if is_valid_symbol_id(symbol) else symbol
     clean_tf = normalize_timeframe(timeframe, default="1m")
-    if not aggregator:
+    if not deps.aggregator:
         return {"symbol": clean_sym, "timeframe": clean_tf, "engine": engine, "bars": []}
 
     def _apply_limit(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return items[-limit:] if (limit is not None and len(items) > limit) else items
 
     # Scheme B: TradingView WebSocket Native Protocol Series
-    if engine.upper() in ("B", "TV_WS") and (getattr(get_server_module(), 'tv_client', tv_client) if get_server_module() else tv_client) and (getattr(get_server_module(), 'tv_client', tv_client) if get_server_module() else tv_client).connected:
+    if engine.upper() in ("B", "TV_WS") and deps.tv_client and deps.tv_client.connected:
         try:
-            tv_bars = await (getattr(get_server_module(), 'tv_client', tv_client) if get_server_module() else tv_client).request_chart_series(clean_sym, timeframe=clean_tf, n_bars=limit or 300, timeout=2.0)
+            tv_bars = await deps.tv_client.request_chart_series(clean_sym, timeframe=clean_tf, n_bars=limit or 300, timeout=2.0)
             if tv_bars and len(tv_bars) > 0:
                 return {"symbol": clean_sym, "timeframe": clean_tf, "engine": "B", "bars": _apply_limit(tv_bars)}
         except Exception as e:
@@ -512,29 +501,29 @@ async def get_history(
 
     # Scheme A: Dual-Source High Availability (Binance for Crypto, Yahoo Finance for Equities)
     if clean_tf == "1m":
-        bars = (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).get_history(clean_sym)
+        bars = deps.aggregator.get_history(clean_sym)
         if seed and len(bars) < MIN_1M_HISTORY_BARS:
-            pending = _inflight_history.get(f"{clean_sym}_1m")
+            pending = deps._inflight_history.get(f"{clean_sym}_1m")
             if pending is not None and not pending.done():
                 try:
                     seeded = await asyncio.wait_for(asyncio.shield(pending), timeout=ONE_MIN_INFLIGHT_WAIT_SEC)
                 except (asyncio.TimeoutError, Exception):
                     seeded = []
-                    _last_1m_seed_attempt[clean_sym] = (getattr(get_server_module(), 'time', time) if get_server_module() else time).monotonic()
+                    deps._last_1m_seed_attempt[clean_sym] = time.monotonic()
                 if seeded:
-                    (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).seed_history(clean_sym, seeded)
-                bars = (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).get_history(clean_sym)
+                    deps.aggregator.seed_history(clean_sym, seeded)
+                bars = deps.aggregator.get_history(clean_sym)
         # 伺服器啟動後才開始累積的 1m（只有幾根即時 K 棒）也要補歷史，否則畫面只會有最近幾分鐘。
         # 每個標的最多 60 秒補一次，避免資料源本來就沒有歷史時一直重抓。
         should_seed_short_history = (
             bool(bars)
             and len(bars) < MIN_1M_HISTORY_BARS
-            and (clean_sym not in _last_1m_seed_attempt or ((getattr(get_server_module(), 'time', time) if get_server_module() else time).monotonic() - _last_1m_seed_attempt[clean_sym]) >= ONE_MIN_SEED_COOLDOWN_SEC)
+            and (clean_sym not in deps._last_1m_seed_attempt or (time.monotonic() - deps._last_1m_seed_attempt[clean_sym]) >= ONE_MIN_SEED_COOLDOWN_SEC)
         )
-        pending_now = _inflight_history.get(f"{clean_sym}_1m")
+        pending_now = deps._inflight_history.get(f"{clean_sym}_1m")
         inflight_active = pending_now is not None and not pending_now.done()
         if should_seed_short_history and seed and not inflight_active:
-            _last_1m_seed_attempt[clean_sym] = (getattr(get_server_module(), 'time', time) if get_server_module() else time).monotonic()
+            deps._last_1m_seed_attempt[clean_sym] = time.monotonic()
         if (not bars or backfill or (should_seed_short_history and seed)) and not inflight_active and (
             seed
             or backfill
@@ -544,16 +533,16 @@ async def get_history(
             or clean_sym.endswith(":QQQ")
             or clean_sym.endswith(":IWM")
         ):
-            seed_bars = await (getattr(get_server_module(), 'fetch_universal_history', fetch_universal_history) if get_server_module() else fetch_universal_history)(clean_sym, timeframe="1m")
+            seed_bars = await fetch_universal_history(clean_sym, timeframe="1m")
             if seed_bars:
-                (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).seed_history(clean_sym, seed_bars)
-                bars = (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).get_history(clean_sym)
+                deps.aggregator.seed_history(clean_sym, seed_bars)
+                bars = deps.aggregator.get_history(clean_sym)
         if len(bars) < MIN_1M_HISTORY_BARS:
-            cached_bars = (getattr(get_server_module(), 'get_storage', get_storage) if get_server_module() else get_storage)().get_bars(clean_sym, timeframe="1m", limit=limit or 300)
+            cached_bars = deps.get_storage().get_bars(clean_sym, timeframe="1m", limit=limit or 300)
             if cached_bars:
-                (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).seed_history(clean_sym, cached_bars)
-                bars = (getattr(get_server_module(), 'aggregator', aggregator) if get_server_module() else aggregator).get_history(clean_sym)
+                deps.aggregator.seed_history(clean_sym, cached_bars)
+                bars = deps.aggregator.get_history(clean_sym)
         return {"symbol": clean_sym, "timeframe": clean_tf, "engine": "A", "bars": _apply_limit(bars)}
 
-    bars = await (getattr(get_server_module(), 'fetch_universal_history', fetch_universal_history) if get_server_module() else fetch_universal_history)(clean_sym, timeframe=clean_tf)
+    bars = await fetch_universal_history(clean_sym, timeframe=clean_tf)
     return {"symbol": clean_sym, "timeframe": clean_tf, "engine": "A", "bars": _apply_limit(bars)}
