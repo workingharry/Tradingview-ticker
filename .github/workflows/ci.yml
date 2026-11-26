@@ -10,6 +10,7 @@ jobs:
   backend:
     name: Backend Tests (macOS)
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -27,11 +28,12 @@ jobs:
 
       - name: Run Backend Pytest Suite
         run: |
-          pytest -q --ignore=tests/test_e2e_live.py --ignore=tests/stress_websocket.py -m "not network" -rs
+          pytest -q --ignore=tests/test_e2e_live.py --ignore=tests/stress_websocket.py -m "not network" -rs --timeout=120 -o faulthandler_timeout=100 --durations=20
 
   frontend:
     name: Frontend Typecheck & Vitest (Ubuntu)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
