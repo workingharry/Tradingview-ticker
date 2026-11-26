@@ -2,7 +2,7 @@
 
 ## Architecture
 - Frontend: Single-page application / client-side charting (vanilla JS / Lightweight Charts, HTML, CSS).
-- Testing: Python unit test suite (`python3 -m unittest discover tests/ -v`).
+- Testing: Python (`pytest`) + Frontend (`tsc` & `vitest`) suites — see [docs/BASELINE.md](docs/BASELINE.md) for verified counts and commands.
 
 ## Feature Inventory
 | # | Feature | Description | Milestone | Source | Status |
@@ -21,6 +21,6 @@
 | 1 | Six Review Findings Fix & Verify | Implement R1-R6 via /poteto-mode; verify unit tests & UI integrity | none | DONE |
 
 ## Acceptance Criteria
-- [x] Unit tests pass: `python3 -m unittest discover tests/ -v` (145/145 passing)
+- [x] Automated verification tracked against verified baseline in [docs/BASELINE.md](docs/BASELINE.md) (`573 passed / 1 failed` pytest collectable baseline, `0` typecheck errors, `65/65` vitest)
 - [x] No regressions or console errors across viewport widths
 - [x] Clean, minimal changes adhering to /poteto-mode (ponytail philosophy)

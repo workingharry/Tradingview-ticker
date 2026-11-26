@@ -1,134 +1,80 @@
-![Visitors](https://visitor-badge.laobi.icu/badge?page_id=Hattorius.Tradingview-ticker)
-# Tradingview-ticker
-This Python tool reverse-engineers the connection to the TradingView ticker, allowing for real-time updates on price and volume via a WebSocket connection.
+# Momentum Swing Terminal (v1.1.0)
 
-> **Important:** Ensure the main thread is continuously running, otherwise, the program will terminate. Use `while True: pass` if needed.
+個人與動能波段交易者專用桌面金融終端（macOS Tauri v2 + FastAPI Sidecar + Lightweight Charts），聚焦 CANSLIM、Minervini SEPA、Weinstein Stage 2 與 Qullamaggie 交易工作流。
 
-## Table of contents
-* [Introduction](#introduction)
-* [Features](#features)
-* [Prerequisites](#prerequisites)
-* [Installing](#installing)
-* [Quick example](#quick-example)
-* [Documentation](#documentation)
-* [License](#license)
+## Architecture
 
-## Introduction
-The "Tradingview-ticker" is a specialized tool designed for enthusiasts and professionals in the financial markets who require real-time access to market data. This Python-based utility serves as a bridge, connecting users directly to TradingView's extensive ticker system. It enables users to track and analyze market tickers from TradingView in real-time, integrating this valuable data seamlessly into their own programs and trading strategies.
+```mermaid
+flowchart TD
+    subgraph UI_Layer ["前端介面層 (Tauri v2 Desktop / Browser)"]
+        STATIC["主力使用中前端: static/ (Vanilla JS + Lightweight Charts v4.2.0)"]
+        VITE_FE["新前端模組 (進行中): frontend/src (Vite + TypeScript)"]
+        TV_REF["外部對照視窗: TradingView Widget (tv.js 隔離對照)"]
+    end
 
-At its core, the "Tradingview-ticker" reverse-engineers the connection to the TradingView ticker, establishing a stable and efficient WebSocket connection. This allows for the live streaming of price and volume updates, a critical feature for those who rely on up-to-the-second market data. Whether you are building a sophisticated trading algorithm, a data analysis tool, or simply need live market data for informed decision-making, this tool provides a reliable and easy-to-use solution.
+    subgraph Core_Engine ["本機後端核心 (FastAPI + Python Sidecar)"]
+        API["server.py (REST + /ws/live WebSocket)"]
+        AGG["engine/aggregator.py (MTF 時間桶聚合)"]
+        SCAN["engine/screener.py & market_scanner.py (CANSLIM / SEPA / RS)"]
+        PROV["engine/providers.py & engine/client.py (Yahoo / Binance / TV WS)"]
+        PINE["engine/pine_engine.py (AVWAP / Pine v5 Input Parser)"]
+    end
 
-Developed with a focus on ease of use, stability, and flexibility, "Tradingview-ticker" is not just about providing data; it's about opening up a world of possibilities for financial analysis and algorithmic trading. By leveraging the power of Python and the comprehensive data from TradingView, users can create more informed, data-driven strategies and applications.
+    subgraph Storage_Layer ["本機持久化層 (SQLite WAL)"]
+        DB["~/Library/Application Support/com.harryng.momentum-terminal/terminal.sqlite\n(首次啟動自 com.tradingview.terminal 自動複製遷移並保留原檔)"]
+    end
 
-Whether you're a hobbyist experimenting with market data, a researcher analyzing trends, or a developer building the next big trading algorithm, "Tradingview-ticker" is your gateway to harnessing the power of real-time financial data from one of the most popular trading platforms available.
-
-- ChatGPT
-
-## Features
-* **Persistent WebSocket Connection**: Maintains a live connection to TradingView for continuous data streaming.
-* **Multi-Ticker Monitoring**: Ability to track multiple tickers simultaneously.
-* **No Rate Limiting**: Efficiently designed to avoid cooldowns or rate limits.
-* **SQLite3 Integration**: Enables saving ticker data locally for analysis.
-* **User-Friendly**: Designed for ease of use without sacrificing functionality.
-* **Reliability**: Proven stability, running seamlessly during extensive testing.
-
-## Prerequisites
-* [Python 3.8+](https://www.python.org/downloads/)
-
-For Windows users, ensure Python is added to your PATH. Guidance available [here](https://superuser.com/a/143121).
-
-## Installing
-Run the following command in your project directory:
-```
-# Linux/macOS
-python3 -m pip install -r requirements.txt
-
-# Windows
-py -3 -m pip install -r requirements.txt
+    STATIC <--> API
+    VITE_FE -. "實驗中，尚未切換預設 frontendDist" .-> API
+    API <--> AGG
+    API <--> SCAN
+    API <--> PROV
+    API <--> PINE
+    API <--> DB
 ```
 
-## Quick Example
-Use the library to track Bitcoin prices on Binance:
+## Development Setup
 
-```py
-import time
-from ticker import ticker
+前置工具：Python 3.9+（建議專案根目錄 `.venv`）、Node.js 22+、Rust / Cargo（Tauri v2）。
 
-tick = ticker("BINANCE:BTCUSDT")
-tick.start()
+```bash
+# 安裝 Python 與 Node 依賴
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+npm ci
 
-while True:
-    # Prints price and volume every 2 seconds
-    print(tick.states) # Example: {'BINANCE:BTCUSDT': {'volume': 7234.88273, 'price': 42759.18, 'change': 248.08, 'changePercentage': 0.58, 'time': 1705390590}}
-    time.sleep(2)
+# 啟動 Web 開發模式（後端 8000 + Vite）
+npm run dev:web
+
+# 或啟動 Tauri 桌面開發視窗
+npm run tauri:dev
 ```
 
-### Multiple Symbols
-Track multiple symbols like Bitcoin and Apple:
+## Testing
 
-```py
-import time
-from ticker import ticker
+```bash
+# Python 後端與整合測試（排除需連網之 e2e/stress 及外部缺少 skill 的測試檔）
+.venv/bin/python -m pytest -q --ignore=tests/test_e2e_live.py --ignore=tests/stress_websocket.py --ignore=tests/test_gemini_api_copilot.py -rs
 
-tick = ticker(["BINANCE:BTCUSDT", "NASDAQ:AAPL"])
-tick.start()
-
-while True:
-    # Continuously outputs data for all tracked symbols, every 2 seconds
-    print(tick.states) # Example: {'BINANCE:BTCUSDT': {'volume': 7247.69177, 'price': 42749.32, 'change': 238.22, 'changePercentage': 0.56, 'time': 1705390650}, 'NASDAQ:AAPL': {'volume': 40477782, 'price': 185.92, 'change': 0.33, 'changePercentage': 0.18, 'time': 1705107599}}
-    time.sleep(2)
+# TypeScript 型別檢查與 Vitest 單元測試（frontend/src）
+npm run typecheck
+npm run test:fe
 ```
 
-### Ticker callback
-In addition to simply retrieving and storing data, "Tradingview-ticker" also allows for real-time data processing through a callback mechanism. This feature is particularly useful for users who wish to perform immediate analysis, display, or further processing of ticker data as soon as it's received. Below is an example of how to implement a callback function:
-```py
-import time
-from ticker import ticker
+基準測試紀錄詳見 [docs/BASELINE.md](docs/BASELINE.md)。
 
-# Define a callback function to handle incoming ticker data
-def handleTicker(ticker_name, data):
-    # data contains information such as volume, price, change, etc.
-    print(f"Ticker update! {ticker_name}: {data}")
-    pass
+## Packaging & Build
 
-# Initialize the ticker object for a specific ticker
-tick = ticker("BINANCE:BTCUSDT")
+```bash
+# 僅建置 PyInstaller Python sidecar 至 dist/server-sidecar 與 src-tauri/bin
+npm run build:sidecar
 
-# Assign the callback function
-tick.cb = handleTicker
-
-# Start the ticker to receive data
-tick.start()
-
-# Run an infinite loop to keep the main thread alive
-while True:
-    time.sleep(1)
+# 建置簽章版 macOS .app 與動態衍生版本號的 .dmg（依 package.json version 與 productName）
+npm run build:desktop
 ```
 
-## Documentation
-Further details and API reference can be found [here](https://github.com/Hattorius/Tradingview-ticker/wiki/API-Reference).
+## Data Source Risk & Attribution
 
-### SQLite3 Database Integration
-The "Tradingview-ticker" includes an integration with SQLite3, providing a convenient way to store and manage the ticker data. This feature allows users to save the real-time data into a local database, enabling further data analysis and historical data tracking. Below are the details on how this feature works and how it can be configured:
-
-To enable data saving, follow the instructions in the documentation. Once set up, all the ticker information you track will be automatically saved into the SQLite3 database.
-
-#### Database Structure with `split_symbols`
-**When `split_symbols` is Enabled**: If this option is activated, the ticker data will be stored in separate tables, each named after its respective ticker. For example, if you're tracking `BINANCE:BTCUSDT`, the table will be named `BINANCE:BTCUSDT`.
-
-Fields in table: Each table will contain the following fields:
-- `volume`: The trading volume (data type: `real`).
-- `price`: The current price (data type: `real`).
-- `timestamp`: The timestamp of the data (data type: `integer`, formatted as an EPOCH timestamp).
-
-#### Database Structure without `split_symbols`
-**When split_symbols is Disabled** (default setting): In this mode, the data for all tickers will be consolidated into a single table named `ticker_data``.
-
-Fields in `ticker_data` table: The unified table will include:
-- `volume`: The trading volume (data type: `real`).
-- `price`: The current price (data type: `real`).
-- `timestamp`: The timestamp of the data (data type: `integer`, formatted as an EPOCH timestamp).
-- `ticker`: The name of the ticker (data type: `text`, e.g., `BINANCE:BTCUSDT`).
-
-## License
-This project is licensed under the GNU GPLv3 License - see the [LICENSE](LICENSE) file for details.
+- **資料來源風險聲明**：本專案行情資料透過本機後端向 Yahoo Finance、Binance 公開介面與 TradingView WebSocket 擷取，僅供個人研究與本地分析使用，無任何即時性、完整性或投資績效保證；請勿用於商業行情再分發或高頻實盤下單決策。
+- **上游開源致謝**：即時 WebSocket 協議層衍生自 [Hattorius/Tradingview-ticker](https://github.com/Hattorius/Tradingview-ticker)，原上游 README 完整保留於 [docs/UPSTREAM_TICKER_README.md](docs/UPSTREAM_TICKER_README.md)。
+- **授權條款**：依 GNU GPLv3 授權條款釋出，詳見 [LICENSE](LICENSE)。
