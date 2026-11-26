@@ -73,6 +73,12 @@ npm run build:sidecar
 npm run build:desktop
 ```
 
+## 安裝 Beta 版 (v1.1.0-beta.1)
+
+本機測試與 Beta 發行安裝步驟、舊版資料搬移機制、Known Issues 與退回舊版說明，請參閱：
+- [v1.1.0-beta.1 Release Notes](docs/RELEASE_NOTES_v1.1.0-beta.1.md)
+- [CHANGELOG.md](CHANGELOG.md)
+
 ## Data Source Risk & Attribution
 
 - **資料來源風險聲明**：本專案行情資料透過本機後端向 Yahoo Finance、Binance 公開介面與 TradingView WebSocket 擷取，僅供個人研究與本地分析使用，無任何即時性、完整性或投資績效保證；請勿用於商業行情再分發或高頻實盤下單決策。

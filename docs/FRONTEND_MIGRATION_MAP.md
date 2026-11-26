@@ -85,3 +85,6 @@
 
 ### Recommended Decision Path
 For a **v1.1 Beta release**, ship using **`static/` (Option 2 short-term stability)** since all 588 backend/integration tests and sidecar desktop flows validate `static/`. For **v1.2+**, execute **Option 1 in vertical feature slices** behind explicit parity tests (`LRUPrefetchCache` -> `NY_TZ` session utils -> Watchlist/AI Lens -> Screener/Heatmap -> Drawing/AVWAP), flipping `frontendDist` only when feature parity reaches 100%.
+
+### v1.2+ Backlog
+- **前端繪圖/價位線/選股 preset 改由後端 `/api/drawings` 與 `/api/preferences` 持久化，含 `localStorage` 一次性匯入**：解決目前僅存在 WebKit `localStorage`（`tv_drawings_*`、`tv_price_lines_*`、`tv_risk_dollar`、`tv_custom_screener_presets`）的限制，確保重清快取或跨 origin 時使用者繪圖與風控/選股設定不遺失。
