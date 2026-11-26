@@ -238,9 +238,9 @@ class TestRemainingP0P1Fixes(unittest.TestCase):
 
         with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
-             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
-             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
-             patch("server.scan_universe", side_effect=fake_scan_universe), \
+             patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("api.history.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
+             patch("api.screener.scan_universe", side_effect=fake_scan_universe), \
              TestClient(server.app) as client:
             resp = client.post("/api/screener/scan", json={
                 "universe": "us_momentum",

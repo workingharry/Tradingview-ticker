@@ -46,7 +46,7 @@ class TestFullStackE2ELiveIntegration(unittest.TestCase):
         close_storage()
 
         self.fetch_patcher = patch(
-            "server.fetch_binance_history",
+            "api.history.fetch_binance_history",
             new_callable=AsyncMock,
             return_value=list(MOCK_HISTORICAL_KLINES),
         )
@@ -341,9 +341,10 @@ class TestFullStackE2ELiveIntegration(unittest.TestCase):
         """Verifies full lifespan context manager startup, background tasks, and clean teardown."""
         # Entering TestClient runs lifespan startup
         with TestClient(app) as client:
+            import api.deps as api_deps
             self.assertTrue(self.mock_start.called, "TradingViewAsyncClient.start must be awaited on startup")
-            self.assertIsNotNone(server.aggregator, "TickToBarAggregator must be initialized on startup")
-            self.assertIsNotNone(server.tv_client, "TradingViewAsyncClient must be created on startup")
+            self.assertIsNotNone(api_deps.aggregator, "TickToBarAggregator must be initialized on startup")
+            self.assertIsNotNone(api_deps.tv_client, "TradingViewAsyncClient must be created on startup")
 
         # Exiting TestClient runs lifespan shutdown
         self.assertTrue(self.mock_stop.called, "TradingViewAsyncClient.stop must be awaited on shutdown")

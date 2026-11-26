@@ -45,8 +45,8 @@ class TestAuditTenFindingsFixes(unittest.TestCase):
         single_bar = [{"time": now_ts, "open": 100.0, "high": 105.0, "low": 99.0, "close": 104.0, "volume": 1000.0}]
         storage.save_bars("NASDAQ:TEST11", "1m", single_bar)
 
-        with patch("server.get_storage", return_value=storage), \
-             patch("server.fetch_yahoo_history", new_callable=AsyncMock) as mock_yahoo:
+        with patch("api.deps.get_storage", return_value=storage), \
+             patch("api.history.fetch_yahoo_history", new_callable=AsyncMock) as mock_yahoo:
             mock_yahoo.return_value = [
                 {"time": now_ts - (i * 60), "open": 100.0, "high": 105.0, "low": 99.0, "close": 100.0, "volume": 500.0}
                 for i in range(50)
@@ -109,7 +109,7 @@ class TestAuditTenFindingsFixes(unittest.TestCase):
 
         import asyncio
         with patch.dict(os.environ, {"GEMINI_API_KEY": "AIzaSyFakeKey123"}), \
-             patch("server.get_shared_client", return_value=None), \
+             patch("api.deps.get_shared_client", return_value=None), \
              patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
             mock_resp = MagicMock()
             mock_resp.status_code = 200
@@ -237,7 +237,7 @@ class TestAuditTenFindingsFixes(unittest.TestCase):
             expected_evicted = server.WATCHLIST[5]["id"]
             broadcasts = []
             with patch.object(server.manager, "broadcast_nowait", side_effect=lambda m: broadcasts.append(m)), \
-                 patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]):
+                 patch("api.history.fetch_universal_history", new_callable=AsyncMock, return_value=[]):
                 asyncio.run(server.subscribe_symbol({"symbol": "NASDAQ:EVICTED99"}))
             self.assertTrue(
                 any(m.get("type") == "symbol_removed" and m.get("symbol") == expected_evicted for m in broadcasts),

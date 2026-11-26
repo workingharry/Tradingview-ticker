@@ -36,7 +36,7 @@ class TestAdversarialHistoryEndpoint(unittest.TestCase):
             new_callable=AsyncMock,
         )
         self.mock_fetch_patcher = patch(
-            "server.fetch_binance_history",
+            "api.history.fetch_binance_history",
             new_callable=AsyncMock,
             return_value=[],
         )
@@ -242,7 +242,7 @@ class TestBinanceSeedingResilience(unittest.TestCase):
             else:
                 raise httpx.ReadTimeout("Timeout")
 
-        with patch("server.fetch_binance_history", side_effect=mock_fetch), \
+        with patch("api.history.fetch_binance_history", side_effect=mock_fetch), \
              patch("engine.storage.Storage.get_bars", return_value=[]):
             with TestClient(app) as client:
                 r_sym = client.get("/api/symbols")
@@ -270,7 +270,7 @@ class TestStaticFileServingAndSecurity(unittest.TestCase):
             new_callable=AsyncMock,
         )
         self.mock_fetch_patcher = patch(
-            "server.fetch_binance_history",
+            "api.history.fetch_binance_history",
             new_callable=AsyncMock,
             return_value=[],
         )
@@ -330,10 +330,11 @@ class TestPreStartupEndpointResilience(unittest.TestCase):
 
     def test_uninitialized_aggregator_and_client(self):
         """Verifies that endpoints return clean empty structures if aggregator/client are None."""
-        orig_aggregator = server.aggregator
-        orig_client = server.tv_client
-        server.aggregator = None
-        server.tv_client = None
+        import api.deps as api_deps
+        orig_aggregator = api_deps.aggregator
+        orig_client = api_deps.tv_client
+        api_deps.aggregator = None
+        api_deps.tv_client = None
 
         try:
             client = TestClient(app)
@@ -348,8 +349,8 @@ class TestPreStartupEndpointResilience(unittest.TestCase):
             self.assertEqual(r_hist.status_code, 200)
             self.assertEqual(r_hist.json()["bars"], [])
         finally:
-            server.aggregator = orig_aggregator
-            server.tv_client = orig_client
+            api_deps.aggregator = orig_aggregator
+            api_deps.tv_client = orig_client
 
 
 if __name__ == "__main__":

@@ -126,8 +126,8 @@ class TestDesktopModeCore(unittest.TestCase):
         """Validates that get_desktop_token auto-generates a secure 32-char hex token if None."""
         set_desktop_mode(enabled=True, token=None, port=12345)
         # Force _desktop_token to None to simulate DESKTOP_MODE=1 env without DESKTOP_TOKEN
-        import server
-        server._desktop_token = None
+        import api.deps
+        api.deps._desktop_token = None
         tok = get_desktop_token()
         self.assertIsNotNone(tok)
         self.assertEqual(len(tok), 32)
@@ -165,7 +165,7 @@ class TestDesktopModeCore(unittest.TestCase):
     def test_stdout_handshake_emission_on_lifespan(self):
         """Validates that entering lifespan in desktop mode emits the handshake banner."""
         buf = io.StringIO()
-        with patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=MOCK_BARS), \
+        with patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=MOCK_BARS), \
              patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock):
 
@@ -187,7 +187,7 @@ class TestDesktopModeAuthAndCORS(unittest.TestCase):
 
     def setUp(self):
         self.fetch_patcher = patch(
-            "server.fetch_binance_history",
+            "api.history.fetch_binance_history",
             new_callable=AsyncMock,
             return_value=list(MOCK_BARS),
         )

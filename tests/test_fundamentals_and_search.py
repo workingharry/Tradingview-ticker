@@ -24,8 +24,8 @@ class TestFundamentalsAndSearch(unittest.TestCase):
 
     def tearDown(self):
         self.mock_start_patcher.stop()
-        server.WATCHLIST = list(self.original_watchlist)
-        server.SYMBOLS = list(self.original_symbols)
+        server.WATCHLIST[:] = self.original_watchlist
+        server.SYMBOLS[:] = self.original_symbols
 
     def test_dom_ids_and_split_chart_structure_aligned(self):
         """Verifies 100% DOM ID alignment between static/app.js and static/index.html including new elements."""
@@ -91,7 +91,7 @@ class TestFundamentalsAndSearch(unittest.TestCase):
         mock_client = AsyncMock()
         mock_client.get.return_value = mock_resp
 
-        with patch("server.get_shared_client", return_value=mock_client):
+        with patch("api.deps.get_shared_client", return_value=mock_client):
             with TestClient(app) as client:
                 res = client.get("/api/symbols/search?q=NVDA")
                 self.assertEqual(res.status_code, 200)
@@ -110,7 +110,7 @@ class TestFundamentalsAndSearch(unittest.TestCase):
         mock_client = AsyncMock()
         mock_client.get.side_effect = Exception("Upstream search unavailable")
 
-        with patch("server.get_shared_client", return_value=mock_client):
+        with patch("api.deps.get_shared_client", return_value=mock_client):
             with TestClient(app) as client:
                 res = client.get("/api/symbols/search?q=PLTR")
                 self.assertEqual(res.status_code, 200)
@@ -154,7 +154,7 @@ class TestFundamentalsAndSearch(unittest.TestCase):
         mock_client = AsyncMock()
         mock_client.get.return_value = mock_resp
 
-        with patch("server.get_shared_client", return_value=mock_client):
+        with patch("api.deps.get_shared_client", return_value=mock_client):
             with TestClient(app) as client:
                 # 1. Invalid symbol format returns 400
                 res_bad = client.get("/api/fundamentals?symbol=INVALID!!!")

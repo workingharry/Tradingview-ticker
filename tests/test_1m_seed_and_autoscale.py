@@ -44,9 +44,9 @@ class TestOneMinuteSeedWhenHistoryShort(unittest.TestCase):
     def _call(self, agg, fetch_mock, symbol="NASDAQ:MANH", seed=True):
         fake_storage = unittest.mock.MagicMock()
         fake_storage.get_bars.return_value = []
-        with patch.object(server, "aggregator", agg), \
-             patch.object(server, "fetch_universal_history", fetch_mock), \
-             patch.object(server, "get_storage", return_value=fake_storage):
+        with patch("api.deps.aggregator", agg), \
+             patch("api.history.fetch_universal_history", fetch_mock), \
+             patch("api.deps.get_storage", return_value=fake_storage):
             return asyncio.run(server.get_history(symbol=symbol, timeframe="1m", seed=seed, backfill=False, engine="A", limit=None))
 
     def test_one_live_bar_triggers_seed_and_merges(self):

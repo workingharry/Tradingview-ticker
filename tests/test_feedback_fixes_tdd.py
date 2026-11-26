@@ -56,8 +56,8 @@ class TestFeedbackFixesTDD(unittest.TestCase):
 
         with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
-             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
-             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
+             patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("api.history.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
              TestClient(app) as client:
             # 1. Save preferences via POST
             post_resp = client.post("/api/preferences", json=test_payload)
@@ -91,8 +91,8 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         """Seam 2: Unsubscribe endpoint evicts symbol and frontend calls POST with auth."""
         with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
-             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
-             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
+             patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("api.history.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
              TestClient(app) as client:
             resp = client.post("/api/symbols/unsubscribe?symbol=NASDAQ:AMZN")
             self.assertEqual(resp.status_code, 200)

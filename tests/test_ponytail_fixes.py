@@ -58,7 +58,8 @@ class TestPonytailReviewFixes(unittest.IsolatedAsyncioTestCase):
         initial_watchlist = [dict(w) for w in server.WATCHLIST]
         initial_symbols = list(server.SYMBOLS)
         try:
-            server.tv_client = mock_tv
+            import api.deps as api_deps
+            api_deps.tv_client = mock_tv
             server.WATCHLIST.clear()
             server.SYMBOLS.clear()
 
@@ -83,16 +84,16 @@ class TestPonytailReviewFixes(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(server.WATCHLIST), 50)
             self.assertNotIn(oldest_dynamic_id, [w["id"] for w in server.WATCHLIST])
             mock_tv.unsubscribe.assert_awaited_once_with(oldest_dynamic_id)
-            if server.aggregator:
-                self.assertNotIn(oldest_dynamic_id, server.aggregator.bar_history)
-                self.assertNotIn(oldest_dynamic_id, server.aggregator.current_bars)
-                self.assertNotIn(oldest_dynamic_id, server.aggregator.last_cumulative_volume)
+            if api_deps.aggregator:
+                self.assertNotIn(oldest_dynamic_id, api_deps.aggregator.bar_history)
+                self.assertNotIn(oldest_dynamic_id, api_deps.aggregator.current_bars)
+                self.assertNotIn(oldest_dynamic_id, api_deps.aggregator.last_cumulative_volume)
         finally:
             server.WATCHLIST.clear()
             server.WATCHLIST.extend(initial_watchlist)
             server.SYMBOLS.clear()
             server.SYMBOLS.extend(initial_symbols)
-            server.tv_client = None
+            api_deps.tv_client = None
 
     def test_default_server_binding_is_localhost(self):
         """Verifies that server.run_server defaults to host='127.0.0.1' and passes it to uvicorn.run."""

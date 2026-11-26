@@ -77,7 +77,7 @@ class TestArchitecturalHardening(unittest.TestCase):
     def test_singleflight_deduplication(self):
         """Validates that concurrent requests for the same symbol/timeframe share single flight."""
         async def run_concurrent():
-            with patch("server.fetch_yahoo_history", new_callable=AsyncMock) as mock_fetch:
+            with patch("api.history.fetch_yahoo_history", new_callable=AsyncMock) as mock_fetch:
                 mock_fetch.return_value = [{"time": 100, "close": 50.0}]
                 async def delayed_fetch(*args, **kwargs):
                     await asyncio.sleep(0.05)
@@ -101,8 +101,8 @@ class TestArchitecturalHardening(unittest.TestCase):
         with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.subscribe", new_callable=AsyncMock), \
-             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
-             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
+             patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("api.history.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
              TestClient(app) as client:
             resp1 = client.post("/api/symbols/subscribe", json={
                 "id": "NASDAQ:MSFT",
@@ -131,7 +131,7 @@ class TestArchitecturalHardening(unittest.TestCase):
                 await gate.wait()
                 return [{"time": 1, "close": 10.0}]
 
-            with patch("server.fetch_historical_bars", side_effect=blocked_fetch):
+            with patch("api.history.fetch_historical_bars", side_effect=blocked_fetch):
                 t1 = asyncio.create_task(fetch_universal_history("NASDAQ:DEADLOCK_TEST", timeframe="1m"))
                 await asyncio.sleep(0.01)
 
@@ -157,7 +157,7 @@ class TestArchitecturalHardening(unittest.TestCase):
     def test_singleflight_leader_cancellation_does_not_abort_follower(self):
         """Validates that cancelling the first caller does not cancel the shared fetch for concurrent followers."""
         async def run_cancellation_race():
-            with patch("server.fetch_yahoo_history", new_callable=AsyncMock) as mock_fetch:
+            with patch("api.history.fetch_yahoo_history", new_callable=AsyncMock) as mock_fetch:
                 async def slow_fetch(*args, **kwargs):
                     await asyncio.sleep(0.06)
                     return [{"time": 1700000000, "open": 180.0, "high": 182.0, "low": 179.0, "close": 181.0, "volume": 500.0}]

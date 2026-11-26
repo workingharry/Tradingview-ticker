@@ -119,7 +119,7 @@ class TestOHLCBoundsInvariant(unittest.TestCase):
             {"time": 1731234000 + i * 60, "open": 68000.0 + i, "high": 68050.0 + i, "low": 67950.0 + i, "close": 68020.0 + i, "volume": 10.0 + i}
             for i in range(15)
         ]
-        with patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=mock_seed):
+        with patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=mock_seed):
             with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock):
                 with patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock):
                     with TestClient(app) as client:
@@ -463,7 +463,7 @@ class TestFullPipelineEndToEndInvariants(unittest.TestCase):
     """End-to-End invariant challenge: WebSocket tick injection through REST and live frames."""
 
     def setUp(self):
-        self.mock_fetch = patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]).start()
+        self.mock_fetch = patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=[]).start()
         self.mock_start = patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock).start()
         self.mock_stop = patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock).start()
         self.mock_storage = patch("engine.storage.Storage.get_bars", return_value=[]).start()

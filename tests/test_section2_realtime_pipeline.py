@@ -218,8 +218,8 @@ class TestSection2RealTimePipeline(unittest.TestCase):
         """Verifies /api/health returns upstream health dict and preserves all original fields."""
         with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
-             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
-             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
+             patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("api.history.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
              TestClient(server.app) as client:
             resp = client.get("/api/health")
             self.assertEqual(resp.status_code, 200)
@@ -371,7 +371,7 @@ class TestSection2RealTimePipeline(unittest.TestCase):
                 storage = SQLiteStorage(str(db_path))
 
                 # Inject temporary storage into server
-                with patch("server.get_storage", return_value=storage):
+                with patch("api.deps.get_storage", return_value=storage):
                     agg = TickToBarAggregator(timeframe_seconds=60)
                     sym = "BINANCE:BTCUSDT"
                     bar_time = 1700000000
@@ -381,7 +381,8 @@ class TestSection2RealTimePipeline(unittest.TestCase):
                         time=bar_time, open=50000.0, high=50050.0, low=49950.0, close=50020.0, volume=10.0
                     )
                     agg.bar_history[sym] = [tentative_bar]
-                    server.aggregator = agg
+                    import api.deps as api_deps
+                    api_deps.aggregator = agg
 
                     # Mock binance history with definitive OHLCV
                     reconciled_kline = {
@@ -399,14 +400,14 @@ class TestSection2RealTimePipeline(unittest.TestCase):
                     async def fast_sleep(sec):
                         pass
 
-                    with patch("server.fetch_binance_history", side_effect=fake_fetch), \
-                         patch("server._reconcile_sleep", side_effect=fast_sleep):
+                    with patch("api.history.fetch_binance_history", side_effect=fake_fetch), \
+                         patch("api.history._reconcile_sleep", side_effect=fast_sleep):
                         # Trigger handler
                         server.on_bar_completed_handler(sym, tentative_bar)
 
                         # Wait for background task to complete
                         for _ in range(50):
-                            if not server._reconcile_tasks:
+                            if not api_deps._reconcile_tasks:
                                 break
                             await asyncio.sleep(0.01)
 
@@ -434,7 +435,7 @@ class TestSection2RealTimePipeline(unittest.TestCase):
                 db_path = pathlib.Path(tmp_dir) / "test_reconcile_miss.sqlite"
                 storage = SQLiteStorage(str(db_path))
 
-                with patch("server.get_storage", return_value=storage):
+                with patch("api.deps.get_storage", return_value=storage):
                     agg = TickToBarAggregator(timeframe_seconds=60)
                     sym = "BINANCE:ETHUSDT"
                     bar_time = 1700000000
@@ -443,7 +444,8 @@ class TestSection2RealTimePipeline(unittest.TestCase):
                         time=bar_time, open=3000.0, high=3010.0, low=2990.0, close=3005.0, volume=5.0
                     )
                     agg.bar_history[sym] = [tentative_bar]
-                    server.aggregator = agg
+                    import api.deps as api_deps
+                    api_deps.aggregator = agg
 
                     # Return completely different bar timestamp
                     async def fake_fetch(symbol, limit=3, **kwargs):
@@ -452,11 +454,11 @@ class TestSection2RealTimePipeline(unittest.TestCase):
                     async def fast_sleep(sec):
                         pass
 
-                    with patch("server.fetch_binance_history", side_effect=fake_fetch), \
-                         patch("server._reconcile_sleep", side_effect=fast_sleep):
+                    with patch("api.history.fetch_binance_history", side_effect=fake_fetch), \
+                         patch("api.history._reconcile_sleep", side_effect=fast_sleep):
                         server.on_bar_completed_handler(sym, tentative_bar)
                         for _ in range(50):
-                            if not server._reconcile_tasks:
+                            if not api_deps._reconcile_tasks:
                                 break
                             await asyncio.sleep(0.01)
 
@@ -473,12 +475,13 @@ class TestSection2RealTimePipeline(unittest.TestCase):
             sym = "NASDAQ:AAPL"
             bar = CandlestickBar(time=1700000000, open=150.0, high=151.0, low=149.0, close=150.5, volume=100.0)
 
-            with patch("server.get_storage") as mock_storage, \
-                 patch("server.fetch_binance_history") as mock_fetch:
+            with patch("api.deps.get_storage") as mock_storage, \
+                 patch("api.history.fetch_binance_history") as mock_fetch:
+                import api.deps as api_deps
                 server.on_bar_completed_handler(sym, bar)
                 mock_storage.return_value.save_bars.assert_called_once()
                 mock_fetch.assert_not_called()
-                self.assertEqual(len(server._reconcile_tasks), 0)
+                self.assertEqual(len(api_deps._reconcile_tasks), 0)
 
         asyncio.run(_run())
 
@@ -487,7 +490,7 @@ class TestSection2RealTimePipeline(unittest.TestCase):
         sym = "BINANCE:BTCUSDT"
         bar = CandlestickBar(time=1700000000, open=50000.0, high=50050.0, low=49950.0, close=50020.0, volume=10.0)
 
-        with patch("server.get_storage") as mock_storage:
+        with patch("api.deps.get_storage") as mock_storage:
             try:
                 server.on_bar_completed_handler(sym, bar)
             except Exception as e:
@@ -504,18 +507,19 @@ class TestSection2RealTimePipeline(unittest.TestCase):
             async def hanging_sleep(sec):
                 await asyncio.sleep(100.0)
 
-            with patch("server.get_storage"), \
-                 patch("server._reconcile_sleep", side_effect=hanging_sleep):
+            with patch("api.deps.get_storage"), \
+                 patch("api.history._reconcile_sleep", side_effect=hanging_sleep):
+                import api.deps as api_deps
                 server.on_bar_completed_handler(sym, bar)
-                self.assertGreater(len(server._reconcile_tasks), 0)
+                self.assertGreater(len(api_deps._reconcile_tasks), 0)
 
                 # Simulate lifespan shutdown cancellation
-                for t in list(server._reconcile_tasks):
+                for t in list(api_deps._reconcile_tasks):
                     t.cancel()
-                await asyncio.gather(*list(server._reconcile_tasks), return_exceptions=True)
-                server._reconcile_tasks.clear()
+                await asyncio.gather(*list(api_deps._reconcile_tasks), return_exceptions=True)
+                api_deps._reconcile_tasks.clear()
 
-            self.assertEqual(len(server._reconcile_tasks), 0)
+            self.assertEqual(len(api_deps._reconcile_tasks), 0)
 
         asyncio.run(_run())
 

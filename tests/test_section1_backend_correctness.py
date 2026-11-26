@@ -176,10 +176,10 @@ class TestS102CacheFreshness(unittest.TestCase):
 
         server._last_remote_fetch[(test_sym, "1D")] = now_ts - 30.0
 
-        with patch("server.get_storage", return_value=mock_storage), \
-             patch("server.is_regular_session_open", return_value=True), \
-             patch("server.time.time", return_value=now_ts), \
-             patch("server.fetch_yahoo_history", new_callable=AsyncMock) as mock_yahoo:
+        with patch("api.deps.get_storage", return_value=mock_storage), \
+             patch("api.history.is_regular_session_open", return_value=True), \
+             patch("api.history.time.time", return_value=now_ts), \
+             patch("api.history.fetch_yahoo_history", new_callable=AsyncMock) as mock_yahoo:
             result = asyncio.run(server.fetch_historical_bars(test_sym, timeframe="1D", limit=300))
             self.assertEqual(len(result), 260)
             mock_yahoo.assert_not_called()
@@ -196,10 +196,10 @@ class TestS102CacheFreshness(unittest.TestCase):
 
         server._last_remote_fetch[(test_sym, "1D")] = now_ts - 90.0
 
-        with patch("server.get_storage", return_value=mock_storage), \
-             patch("server.is_regular_session_open", return_value=True), \
-             patch("server.time.time", return_value=now_ts), \
-             patch("server.fetch_yahoo_history", new_callable=AsyncMock, return_value=fresh_bars) as mock_yahoo:
+        with patch("api.deps.get_storage", return_value=mock_storage), \
+             patch("api.history.is_regular_session_open", return_value=True), \
+             patch("api.history.time.time", return_value=now_ts), \
+             patch("api.history.fetch_yahoo_history", new_callable=AsyncMock, return_value=fresh_bars) as mock_yahoo:
             result = asyncio.run(server.fetch_historical_bars(test_sym, timeframe="1D", limit=300))
             mock_yahoo.assert_awaited_once()
             self.assertEqual(server._last_remote_fetch[(test_sym, "1D")], now_ts)
@@ -222,11 +222,11 @@ class TestS102CacheFreshness(unittest.TestCase):
 
         server._last_remote_fetch[(test_sym, "1D")] = float(fetch_time)
 
-        with patch("server.get_storage", return_value=mock_storage), \
-             patch("server.is_regular_session_open", return_value=False), \
-             patch("server.last_completed_session_date", return_value=comp_date), \
-             patch("server.time.time", return_value=eval_time), \
-             patch("server.fetch_yahoo_history", new_callable=AsyncMock) as mock_yahoo:
+        with patch("api.deps.get_storage", return_value=mock_storage), \
+             patch("api.history.is_regular_session_open", return_value=False), \
+             patch("api.history.last_completed_session_date", return_value=comp_date), \
+             patch("api.history.time.time", return_value=eval_time), \
+             patch("api.history.fetch_yahoo_history", new_callable=AsyncMock) as mock_yahoo:
             result = asyncio.run(server.fetch_historical_bars(test_sym, timeframe="1D", limit=300))
             self.assertEqual(len(result), 260)
             mock_yahoo.assert_not_called()
@@ -250,11 +250,11 @@ class TestS102CacheFreshness(unittest.TestCase):
 
         server._last_remote_fetch[(test_sym, "1D")] = float(intraday_fetch_time)
 
-        with patch("server.get_storage", return_value=mock_storage), \
-             patch("server.is_regular_session_open", return_value=False), \
-             patch("server.last_completed_session_date", return_value=comp_date), \
-             patch("server.time.time", return_value=eval_time), \
-             patch("server.fetch_yahoo_history", new_callable=AsyncMock, return_value=fresh_bars) as mock_yahoo:
+        with patch("api.deps.get_storage", return_value=mock_storage), \
+             patch("api.history.is_regular_session_open", return_value=False), \
+             patch("api.history.last_completed_session_date", return_value=comp_date), \
+             patch("api.history.time.time", return_value=eval_time), \
+             patch("api.history.fetch_yahoo_history", new_callable=AsyncMock, return_value=fresh_bars) as mock_yahoo:
             result = asyncio.run(server.fetch_historical_bars(test_sym, timeframe="1D", limit=300))
             mock_yahoo.assert_awaited_once()
 
@@ -267,10 +267,10 @@ class TestS102CacheFreshness(unittest.TestCase):
         mock_storage = MagicMock()
         mock_storage.get_bars.return_value = cached_bars
 
-        with patch("server.get_storage", return_value=mock_storage), \
-             patch("server.is_regular_session_open", return_value=True), \
-             patch("server.time.time", return_value=now_ts), \
-             patch("server.fetch_yahoo_history", new_callable=AsyncMock, side_effect=RuntimeError("Network timeout")):
+        with patch("api.deps.get_storage", return_value=mock_storage), \
+             patch("api.history.is_regular_session_open", return_value=True), \
+             patch("api.history.time.time", return_value=now_ts), \
+             patch("api.history.fetch_yahoo_history", new_callable=AsyncMock, side_effect=RuntimeError("Network timeout")):
             result = asyncio.run(server.fetch_historical_bars(test_sym, timeframe="1D", limit=300))
             self.assertEqual(len(result), 260)
 
@@ -338,7 +338,7 @@ class TestS104ModelTracking(unittest.TestCase):
             mock_client.post = AsyncMock(side_effect=[resp_429, resp_200])
 
             with patch.dict(os.environ, {"GEMINI_API_KEY": "fake_key"}), \
-                 patch("server.get_shared_client", return_value=mock_client):
+                 patch("api.deps.get_shared_client", return_value=mock_client):
                 text, model = await server.call_gemini_generate_with_model("test prompt")
                 self.assertEqual(text, "OK Output")
                 self.assertEqual(model, "gemini-2.5-flash-lite")
@@ -347,11 +347,11 @@ class TestS104ModelTracking(unittest.TestCase):
 
     def test_chat_endpoint_model_null_when_gemini_fails(self):
         """When Gemini fails, /api/chat returns model=None and source='rule_based'."""
-        with patch("server.call_gemini_generate_with_model", new_callable=AsyncMock, return_value=(None, None)), \
+        with patch("api.ai.call_gemini_generate_with_model", new_callable=AsyncMock, return_value=(None, None)), \
              patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
-             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
-             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]):
+             patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("api.history.fetch_universal_history", new_callable=AsyncMock, return_value=[]):
             with TestClient(app) as client:
                 resp = client.post("/api/chat", json={"message": "how is NVDA", "symbol": "NASDAQ:NVDA"})
                 self.assertEqual(resp.status_code, 200)
@@ -443,7 +443,7 @@ class TestS107ExchangeMapping(unittest.TestCase):
             mock_http = MagicMock()
             mock_http.get = AsyncMock(return_value=mock_resp)
 
-            with patch("server.get_shared_client", return_value=mock_http):
+            with patch("api.deps.get_shared_client", return_value=mock_http):
                 res = await server.search_symbols("test")
                 items = res["results"]
                 mapped_ids = [it["id"] for it in items]
@@ -467,8 +467,8 @@ class TestS107ExchangeMapping(unittest.TestCase):
             mock_http = MagicMock()
             mock_http.get = AsyncMock(return_value=mock_resp)
 
-            with patch("server.get_shared_client", return_value=mock_http), \
-                 patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]):
+            with patch("api.deps.get_shared_client", return_value=mock_http), \
+                 patch("api.history.fetch_universal_history", new_callable=AsyncMock, return_value=[]):
                 res = await server.subscribe_symbol(symbol=test_ticker)
                 if hasattr(res, "body"):
                     data = json.loads(res.body)
@@ -492,7 +492,7 @@ class TestS108ScreenerCriteriaValidation(unittest.TestCase):
         """min_rs_rating='abc' -> 422 with 'min_rs_rating' in error fields."""
         with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
-             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
              TestClient(app) as client:
             resp = client.post("/api/screener/scan", json={
                 "universe": "us_momentum",
@@ -507,9 +507,9 @@ class TestS108ScreenerCriteriaValidation(unittest.TestCase):
         """null values for criteria use default values and return 200."""
         with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
              patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
-             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
-             patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
-             patch("server.scan_universe", new_callable=AsyncMock, return_value=[]):
+             patch("api.history.fetch_binance_history", new_callable=AsyncMock, return_value=[]), \
+             patch("api.history.fetch_universal_history", new_callable=AsyncMock, return_value=[]), \
+             patch("api.screener.scan_universe", new_callable=AsyncMock, return_value=[]):
             with TestClient(app) as client:
                 resp = client.post("/api/screener/scan", json={
                     "universe": "us_momentum",
@@ -564,17 +564,17 @@ class TestS1ReviewFixes(unittest.TestCase):
         mock_storage = MagicMock()
         mock_storage.get_bars.return_value = cached_bars
 
-        with patch("server.get_storage", return_value=mock_storage), \
-             patch("server.is_regular_session_open", return_value=False), \
-             patch("server.last_completed_session_date", return_value=comp_date), \
-             patch("server.time.time", return_value=close_ts + 3600), \
-             patch("server.fetch_yahoo_history", new_callable=AsyncMock, return_value=cached_bars) as mock_yahoo:
+        with patch("api.deps.get_storage", return_value=mock_storage), \
+             patch("api.history.is_regular_session_open", return_value=False), \
+             patch("api.history.last_completed_session_date", return_value=comp_date), \
+             patch("api.history.time.time", return_value=close_ts + 3600), \
+             patch("api.history.fetch_yahoo_history", new_callable=AsyncMock, return_value=cached_bars) as mock_yahoo:
             asyncio.run(server.fetch_historical_bars(test_sym, timeframe="1D", limit=300))
             mock_yahoo.assert_awaited_once()
 
     def test_chat_patched_reply_does_not_claim_a_model(self):
         """S1-04: reply from a patched/unknown source -> source 'gemini', model None (never a guessed name)."""
-        with patch("server.call_gemini_generate", new_callable=AsyncMock, return_value="測試回覆內容"):
+        with patch("api.ai.call_gemini_generate", new_callable=AsyncMock, return_value="測試回覆內容"):
             data = asyncio.run(server.chat_endpoint(payload={"message": "NVDA?", "symbol": "NASDAQ:NVDA"}))
         self.assertIn("測試回覆內容", data["reply"])
         self.assertEqual(data["source"], "gemini")
@@ -582,7 +582,7 @@ class TestS1ReviewFixes(unittest.TestCase):
 
     def test_chat_reports_actual_cascade_model(self):
         """S1-04: the model that actually answered is reported by /api/chat."""
-        with patch("server.call_gemini_generate_with_model", new_callable=AsyncMock,
+        with patch("api.ai.call_gemini_generate_with_model", new_callable=AsyncMock,
                    return_value=("測試回覆內容", "gemini-2.5-flash-lite")):
             data = asyncio.run(server.chat_endpoint(payload={"message": "NVDA?", "symbol": "NASDAQ:NVDA"}))
         self.assertEqual(data["model"], "gemini-2.5-flash-lite")
@@ -593,7 +593,7 @@ class TestS1ReviewFixes(unittest.TestCase):
         async def _run():
             return await asyncio.wait_for(server._generate_with_model_tracking("p"), timeout=5.0)
 
-        with patch("server.call_gemini_generate_with_model", new_callable=AsyncMock,
+        with patch("api.ai.call_gemini_generate_with_model", new_callable=AsyncMock,
                    return_value=("ok", "gemini-2.0-flash")):
             text, model = asyncio.run(_run())
         self.assertEqual(text, "ok")
@@ -609,8 +609,8 @@ class TestS1ReviewFixes(unittest.TestCase):
         mock_http.get = AsyncMock(return_value=mock_resp)
 
         async def _test():
-            with patch("server.get_shared_client", return_value=mock_http), \
-                 patch("server.fetch_universal_history", new_callable=AsyncMock, return_value=[]):
+            with patch("api.deps.get_shared_client", return_value=mock_http), \
+                 patch("api.history.fetch_universal_history", new_callable=AsyncMock, return_value=[]):
                 res = await server.subscribe_symbol(symbol=ticker)
                 return json.loads(res.body) if hasattr(res, "body") else res
 
