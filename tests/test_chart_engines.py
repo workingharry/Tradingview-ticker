@@ -3,6 +3,7 @@
 import asyncio
 import unittest
 from unittest.mock import patch, AsyncMock
+import pytest
 from fastapi.testclient import TestClient
 
 from server import app
@@ -12,6 +13,7 @@ from engine.client import TradingViewAsyncClient
 class TestChartEngines(unittest.TestCase):
     """Verifies Scheme A, Scheme B, and Scheme C multi-engine routing and resilience."""
 
+    @pytest.mark.network
     def test_scheme_a_history_query(self):
         """Verifies GET /api/history?engine=A routes through dual-source engine and returns 200 OK."""
         with TestClient(app) as client:
@@ -21,6 +23,20 @@ class TestChartEngines(unittest.TestCase):
             self.assertEqual(data["engine"], "A")
             self.assertIn("bars", data)
 
+    def test_scheme_a_history_query_offline(self):
+        """Verifies GET /api/history?engine=A routes cleanly offline."""
+        mock_bars = [{"time": 1731234000, "open": 68000.0, "high": 68050.0, "low": 67950.0, "close": 68020.0, "volume": 10.0}]
+        with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
+             patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
+             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=mock_bars):
+            with TestClient(app) as client:
+                resp = client.get("/api/history?symbol=BINANCE:BTCUSDT&timeframe=1m&engine=A")
+                self.assertEqual(resp.status_code, 200)
+                data = resp.json()
+                self.assertEqual(data["engine"], "A")
+                self.assertIn("bars", data)
+
+    @pytest.mark.network
     def test_scheme_b_fallback_to_scheme_a_when_ws_not_connected(self):
         """Verifies that if Scheme B is requested but TV client is disconnected, it falls back to Scheme A."""
         with TestClient(app) as client:
@@ -30,6 +46,19 @@ class TestChartEngines(unittest.TestCase):
             # If fallback engaged, it delivers data without crashing
             self.assertIn(data["engine"], ["A", "B"])
             self.assertIn("bars", data)
+
+    def test_scheme_b_fallback_to_scheme_a_offline(self):
+        """Verifies Scheme B fallback to Scheme A when TV client is disconnected, offline."""
+        mock_bars = [{"time": 1731234000, "open": 68000.0, "high": 68050.0, "low": 67950.0, "close": 68020.0, "volume": 10.0}]
+        with patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
+             patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock), \
+             patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=mock_bars):
+            with TestClient(app) as client:
+                resp = client.get("/api/history?symbol=BINANCE:BTCUSDT&timeframe=1m&engine=B")
+                self.assertEqual(resp.status_code, 200)
+                data = resp.json()
+                self.assertIn(data["engine"], ["A", "B"])
+                self.assertIn("bars", data)
 
     def test_scheme_b_tv_client_timescale_update_parsing(self):
         """Verifies TradingViewAsyncClient correctly parses timescale_update packets into candlestick bars."""

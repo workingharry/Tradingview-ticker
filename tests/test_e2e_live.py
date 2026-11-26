@@ -10,7 +10,10 @@ import os
 import tempfile
 import unittest
 from unittest.mock import patch, AsyncMock
+import pytest
 from fastapi.testclient import TestClient
+
+pytestmark = pytest.mark.network
 
 import server
 from server import app, manager

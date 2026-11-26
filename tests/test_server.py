@@ -9,6 +9,7 @@ import asyncio
 import json
 from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
+import pytest
 import httpx
 from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
@@ -96,6 +97,7 @@ class TestServerEndpoints(unittest.TestCase):
                 self.assertIn(field, first_bar)
                 self.assertIsInstance(first_bar[field], (int, float))
 
+    @pytest.mark.network
     def test_get_history_equity_live_or_empty(self):
         """Validates that GET /api/history returns 200 and a list for equity symbols."""
         with TestClient(app) as client:
@@ -104,6 +106,19 @@ class TestServerEndpoints(unittest.TestCase):
             data = resp.json()
             self.assertEqual(data["symbol"], "NASDAQ:AAPL")
             self.assertIsInstance(data["bars"], list)
+
+    def test_get_history_equity_offline_mocked(self):
+        """Validates GET /api/history for equity symbols offline with mocked Yahoo fetch."""
+        mock_equity_bars = [
+            {"time": 1731234000, "open": 220.0, "high": 225.0, "low": 219.0, "close": 223.0, "volume": 500000.0}
+        ]
+        with patch("server.fetch_yahoo_history", new_callable=AsyncMock, return_value=mock_equity_bars):
+            with TestClient(app) as client:
+                resp = client.get("/api/history?symbol=NASDAQ:AAPL")
+                self.assertEqual(resp.status_code, 200)
+                data = resp.json()
+                self.assertEqual(data["symbol"], "NASDAQ:AAPL")
+                self.assertIsInstance(data["bars"], list)
 
     def test_get_history_unknown_symbol_returns_empty(self):
         """Validates that unknown symbols return 200 OK with empty bars array."""
