@@ -351,6 +351,12 @@ body {
   padding: 2px 12px;
   gap: 8px;
   flex-shrink: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.chart-controls::-webkit-scrollbar {
+  display: none;
 }
 
 
@@ -637,15 +643,19 @@ body {
 }
 
 @media (max-width: 992px) {
+  .top-nav {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .top-nav::-webkit-scrollbar {
+    display: none;
+  }
   .chart-controls {
-    flex-direction: column;
-    align-items: stretch;
-    height: auto;
-    padding: 8px 12px;
+    height: 36px;
+    padding: 2px 10px;
   }
   .symbol-metrics {
-    justify-content: space-between;
-    overflow-x: auto;
+    flex-shrink: 0;
   }
   .asset-title-block {
     display: none;
@@ -690,6 +700,10 @@ body {
   cursor: pointer;
   transition: all 0.15s ease;
   font-family: var(--font-sans);
+  min-width: 0;
+  max-width: 240px;
+  overflow: hidden;
+  white-space: nowrap;
 }
 .omnibox-btn:hover {
   background-color: var(--bg-hover);
@@ -698,10 +712,15 @@ body {
 }
 .search-icon {
   font-size: 13px;
+  flex-shrink: 0;
 }
 .search-text {
   font-weight: 600;
   font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 .search-shortcut {
   background-color: rgba(255, 255, 255, 0.1);
@@ -710,6 +729,7 @@ body {
   font-size: 10px;
   font-family: var(--font-mono);
   color: var(--text-dim);
+  flex-shrink: 0;
 }
 
 /* Timeframe Selector */
@@ -720,6 +740,8 @@ body {
   background-color: var(--bg-tertiary);
   border-radius: 6px;
   padding: 2px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .tf-btn {
   background: transparent;
@@ -731,6 +753,8 @@ body {
   border-radius: 4px;
   cursor: pointer;
   transition: all 0.15s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .tf-btn:hover {
   color: var(--text-bright);
@@ -755,6 +779,8 @@ body {
   font-weight: 600;
   cursor: pointer;
   transition: all 0.15s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .tool-btn:hover {
   background-color: var(--bg-hover);
@@ -777,6 +803,8 @@ body {
   background-color: rgba(41, 98, 255, 0.08);
   border: 1px solid rgba(41, 98, 255, 0.25);
   border-radius: 4px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .rs-toggle-pill {
   display: inline-flex;
@@ -828,6 +856,9 @@ body {
   background-color: rgba(41, 98, 255, 0.15);
   padding: 2px 6px;
   border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
   font-weight: 600;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -1264,6 +1295,8 @@ body {
   font-weight: 600;
   font-family: var(--font-sans);
   transition: all 0.15s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .lang-toggle-btn:hover {
   background-color: var(--bg-hover);
@@ -2653,6 +2686,8 @@ body {
   gap: 4px;
   transition: all 0.15s ease;
   user-select: none;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .candle-style-btn:hover {
@@ -3469,6 +3504,7 @@ body {
   font-weight: 600;
   font-family: var(--font-sans);
   transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+  white-space: nowrap;
   flex-shrink: 0;
 }
 
