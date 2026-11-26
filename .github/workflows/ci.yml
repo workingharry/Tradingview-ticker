@@ -28,7 +28,7 @@ jobs:
 
       - name: Build Sidecar Launcher for Tauri Tests
         run: |
-          python scripts/build_sidecar.py
+          python scripts/build_sidecar.py --tauri-bin-dir src-tauri/bin
 
       - name: Cache Cargo and Tauri Target
         uses: actions/cache@v4
