@@ -448,6 +448,7 @@ class TestTenDefectsRegression(unittest.TestCase):
                     self.assertIn("Stage 2", prompt_arg)
 
     def test_r4_pyinstaller_hiddenimports_include_screener_and_pine(self):
+        # guard-test: 設定守門，允許讀原始碼
         """Verifies server.spec and build_sidecar.py hiddenimports contain screener and pine_engine."""
         import scripts.build_sidecar as bs
         self.assertIn("engine.screener", bs.REQUIRED_HIDDEN_IMPORTS)
@@ -518,6 +519,7 @@ class TestTenDefectsRegression(unittest.TestCase):
             asyncio.set_event_loop(None)
 
     def test_r8_tauri_conf_csp_contains_query2(self):
+        # guard-test: 設定守門，允許讀原始碼
         """Verifies that src-tauri/tauri.conf.json includes query2.finance.yahoo.com in CSP."""
         conf_path = Path("src-tauri/tauri.conf.json")
         conf = json.loads(conf_path.read_text(encoding="utf-8"))

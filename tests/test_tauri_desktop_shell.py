@@ -23,7 +23,7 @@ SRC_TAURI_DIR = PROJECT_ROOT / "src-tauri"
 
 
 class TestTauriDesktopShellConfiguration(unittest.TestCase):
-    """Tests for Tauri v2 configuration, packaging specs, and capabilities."""
+    """guard-test: 設定守門，允許讀原始碼 — Tests for Tauri v2 configuration, packaging specs, and capabilities."""
 
     def test_package_json_exists_and_declares_tauri_scripts(self):
         """Validates that package.json defines build:sidecar and build:desktop scripts."""

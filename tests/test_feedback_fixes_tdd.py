@@ -104,6 +104,7 @@ class TestFeedbackFixesTDD(unittest.TestCase):
         self.assertIn("savePreferencesDebounced", self.js)
 
     def test_seam3_tauri_always_on_top_contract(self):
+        # guard-test: 設定守門，允許讀原始碼
         """Seam 3: toggle_always_on_top Tauri command exists in Rust and bound in UI."""
         # Rust lib.rs must declare the command and register it
         self.assertIn("fn toggle_always_on_top", self.rust)

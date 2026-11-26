@@ -50,7 +50,7 @@ SIDECAR_BIN = SIDECAR_DIST_DIR / "server"
 
 
 class TestSpecAndPackagingDeclarations(unittest.TestCase):
-    """Verifies that server.spec declares all required packaging invariants."""
+    """guard-test: 設定守門，允許讀原始碼 — Verifies that server.spec declares all required packaging invariants."""
 
     def test_spec_file_exists(self):
         """Validates that server.spec exists in the project root."""

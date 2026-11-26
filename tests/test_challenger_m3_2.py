@@ -159,6 +159,7 @@ class TestDOMIntegrityAndSelectorAlignment(unittest.TestCase):
         cls.style_css = cls.style_css_path.read_text(encoding="utf-8")
 
     def test_all_js_get_element_by_id_calls_exist_in_index_html(self):
+        # guard-test: 設定守門，允許讀原始碼
         """Asserts that 100% of IDs queried via document.getElementById in app.js exist in index.html."""
         id_call_pattern = re.compile(
             r"document\.getElementById\([\"\x27]([^\"\x27]+)[\"\x27]\)"

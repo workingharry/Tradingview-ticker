@@ -663,6 +663,7 @@ class TestDomXssSanitization(unittest.TestCase):
         self.assertIn('AAPL<img src=x onerror=alert(1)>', res["buttonTexts"])
 
     def test_zero_dynamic_innerhtml_in_static_app_js(self):
+        # guard-test: 設定守門，允許讀原始碼
         """Scans static/app.js to ensure innerHTML is never dynamically assigned with variable data."""
         with open(STATIC_APP_JS, "r", encoding="utf-8") as f:
             content = f.read()
