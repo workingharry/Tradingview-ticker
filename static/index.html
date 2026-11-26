@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TradingView Real-Time Terminal</title>
+  <title>Momentum Swing Terminal</title>
   <!-- Google Fonts: Inter & JetBrains Mono -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -17,11 +17,11 @@
 <body>
   <div class="terminal-container">
     <!-- Top Header -->
-    <header class="top-nav" role="banner">
+    <header class="top-nav" role="banner" data-tauri-drag-region>
       <div class="brand">
         <div class="logo-mark">⚡</div>
         <div class="brand-text">
-          <span class="brand-name">TV TERMINAL</span>
+          <span class="brand-name">MOMENTUM TERMINAL</span>
           <span class="brand-sub">Deepvue Pro Engine</span>
         </div>
       </div>
@@ -34,9 +34,15 @@
       </button>
 
       <!-- Language Switcher Pill -->
-      <button class="lang-toggle-btn" id="langToggleBtn" title="繁簡英語言切換">
+      <button class="lang-toggle-btn" id="langToggleBtn" title="繁中 / English 切換">
         <span class="lang-globe">🌐</span>
-        <span class="lang-text" id="langLabel">繁中</span>
+        <span class="lang-text" id="langLabel">EN</span>
+      </button>
+
+      <!-- Theme Switcher Pill (Day / Night) -->
+      <button class="theme-toggle-btn" id="themeToggleBtn" title="切換白天 / 黑夜模式">
+        <span class="theme-icon" id="themeIcon">☀️</span>
+        <span class="theme-text" id="themeLabel">白天</span>
       </button>
 
       <!-- Engine Mode Selector -->
@@ -97,7 +103,19 @@
         <!-- Indicator Menu Trigger -->
         <button class="tool-btn" id="indicatorsBtn" title="Indicators and Overlays">
           <span class="tool-icon">ƒx</span>
-          <span>Indicators</span>
+          <span id="indicatorsBtnLabel">Indicators</span>
+        </button>
+
+        <!-- Stock Theme Heatmap Trigger (Alt+M) -->
+        <button class="tool-btn" id="heatmapBtn" title="Theme Heatmap (Alt+M)">
+          <span class="tool-icon">🔥</span>
+          <span id="heatmapBtnLabel">Theme</span>
+        </button>
+
+        <!-- Institutional Stock Screener (RS + ATR + CANSLIM Engine) -->
+        <button class="tool-btn" id="screenerBtn" title="Stock Screener (Alt+S)">
+          <span class="tool-icon">🎯</span>
+          <span id="screenerBtnLabel">智能選股</span>
         </button>
 
         <!-- Fundamentals & AI Analysis Trigger (Removed/Hidden by default per user request) -->
@@ -112,39 +130,37 @@
           <span id="aiLensBtnLabel">AI Lens</span>
         </button>
 
-        <!-- Institutional Stock Screener (RS + ATR + CANSLIM Engine) (Removed/Hidden by default per user request) -->
-        <button class="tool-btn" id="screenerBtn" style="display: none;" title="Stock Screener (Alt+S)">
-          <span class="tool-icon">🎯</span>
-          <span id="screenerBtnLabel">智能選股</span>
-        </button>
-
         <!-- Relative Strength (RS) Benchmark Status Badge -->
         <div class="rs-benchmark-bar" id="rsBenchmarkBar">
-          <span class="rs-label">RS:</span>
+          <span class="rs-toggle-pill" id="rsToggleBtn" title="切換底部 RS 副圖 (Toggle RS Pane)"><span class="rs-indicator-dot"></span><span class="rs-label">RS</span></span>
           <span class="rs-active-badge" id="rsActiveBadge" title="RS Benchmark Reference (Click to configure in Indicators)">Ref: SPY</span>
         </div>
 
         <!-- Active Symbol Metrics HUD -->
         <div class="symbol-metrics" id="symbolMetrics">
           <div class="asset-title-block">
-            <span class="asset-exchange" id="activeExchange">BINANCE</span>
+            <div class="asset-exchange-row">
+              <span class="asset-exchange" id="activeExchange">BINANCE</span>
+              <span class="delayed-badge" id="delayedQuoteBadge" style="display: none;" title="延遲行情 (Delayed Quote)">DELAYED</span>
+              <span class="status-badge disconnected" id="unsubscribedBadge" style="display: none;">未訂閱即時報價</span>
+            </div>
             <span class="asset-name" id="activeName">Bitcoin</span>
           </div>
           <div class="current-price" id="activePrice">--</div>
           <div class="metric-box">
-            <span class="metric-tag">24h Change</span>
+            <span class="metric-tag" id="metricTagChange">24h Change</span>
             <span class="metric-num" id="activeChange">--</span>
           </div>
           <div class="metric-box">
-            <span class="metric-tag">24h High</span>
+            <span class="metric-tag" id="metricTagHigh">24h High</span>
             <span class="metric-num up" id="activeHigh">--</span>
           </div>
           <div class="metric-box">
-            <span class="metric-tag">24h Low</span>
+            <span class="metric-tag" id="metricTagLow">24h Low</span>
             <span class="metric-num down" id="activeLow">--</span>
           </div>
           <div class="metric-box">
-            <span class="metric-tag">24h Vol</span>
+            <span class="metric-tag" id="metricTagVol">24h Vol</span>
             <span class="metric-num" id="activeVolume">--</span>
           </div>
         </div>
@@ -153,7 +169,7 @@
       <!-- Equity Live Notice Banner -->
       <div class="equity-banner" id="equityBanner" style="display: none;">
         <span class="banner-icon">ℹ️</span>
-        <span class="banner-text">Equity Symbol: Bars accumulate in real time from server launch (market hours only).</span>
+        <span class="banner-text" id="equityBannerText">Equity Symbol: Bars accumulate in real time from server launch (market hours only).</span>
       </div>
 
       <!-- Chart & Watchlist Split Workspace -->
@@ -216,15 +232,14 @@
             <span class="legend-indicator ind-rs" id="legRs" style="display:none;">RS <span class="val">--</span></span>
           </div>
 
-          <!-- Deepvue Technical HUD -->
-          <div class="deepvue-hud" id="deepvueHud">
-            <div class="hud-item"><span class="hud-label" id="hud52wLabel">52W High</span> <span class="hud-val" id="hud52wVal">--</span></div>
-            <div class="hud-item"><span class="hud-label" id="hudVol50Label">Vol/50D</span> <span class="hud-val" id="hudVol50Val">--</span></div>
-            <div class="hud-item"><span class="hud-label" id="hudAdrLabel">ADR%</span> <span class="hud-val" id="hudAdrVal">--</span></div>
-          </div>
-
           <div id="chartContainer" class="chart-canvas split-chart-container">
             <div class="price-pane">
+              <!-- Deepvue Technical HUD (Docked to Pane 1) -->
+              <div class="deepvue-hud" id="deepvueHud">
+                <div class="hud-item"><span class="hud-label" id="hud52wLabel">52W High</span> <span class="hud-val" id="hud52wVal">--</span></div>
+                <div class="hud-item"><span class="hud-label" id="hudVol50Label">Vol/50D</span> <span class="hud-val" id="hudVol50Val">--</span></div>
+                <div class="hud-item"><span class="hud-label" id="hudAdrLabel">ADR%</span> <span class="hud-val" id="hudAdrVal">--</span></div>
+              </div>
               <div id="chart"></div>
               <canvas id="drawingCanvas" class="drawing-overlay-canvas"></canvas>
               <!-- AVWAP Right-Bottom Info Table (4 rows x 2 cols) -->
@@ -265,6 +280,7 @@
                   <button class="rs-mode-btn" id="btnModeDeepvue" data-mode="deepvue" title="Deepvue 原始強度比率線 + 21 EMA">Deepvue RS</button>
                 </div>
                 <div class="rs-hud-group" id="rsHudGroup">
+                  <span class="rs-metric-badge rs-nh-badge" id="rsNewHighBadge" style="display: none;" title="RS 領先股價創新高 (強勢潛力訊號)">🔵 RS NH</span>
                   <span class="rs-metric-badge" id="rsAtrPctBadge">ATR%: --</span>
                   <span class="rs-metric-badge" id="rsSuggestedBadge">建議: -- 股</span>
                   <span class="rs-rating-badge" id="rsRatingBadge">RS Rating: --</span>
@@ -277,15 +293,51 @@
           <div id="splitChartGrid" class="split-grid-container" style="display: none;">
             <div class="split-pane-item" id="splitPane2">
               <div class="split-pane-header"><span class="split-pane-title" id="splitTitle2">AMEX:SPY • S&P 500 ETF</span></div>
-              <div id="splitChart2" class="split-chart-sub"></div>
+              <div class="split-pane-body">
+                <div id="splitChart2" class="split-chart-sub"></div>
+                <div id="splitRsPane2" class="split-rs-pane" style="display: none;">
+                  <div class="split-rs-header">
+                    <div class="split-rs-header-left">
+                      <span class="split-rs-title" id="splitRsTitle2">RS vs SPY</span>
+                      <span class="rs-new-high-badge split-rs-nh" id="splitRsNhBadge2" style="display: none;" title="RS 領先股價創新高">🔵 RS NH</span>
+                    </div>
+                    <span class="rs-rating-badge split-rs-rating" id="splitRsRating2">RS --</span>
+                  </div>
+                  <div id="splitRsChart2" class="split-rs-chart"></div>
+                </div>
+              </div>
             </div>
             <div class="split-pane-item" id="splitPane3">
               <div class="split-pane-header"><span class="split-pane-title" id="splitTitle3">NASDAQ:QQQ • Invesco QQQ</span></div>
-              <div id="splitChart3" class="split-chart-sub"></div>
+              <div class="split-pane-body">
+                <div id="splitChart3" class="split-chart-sub"></div>
+                <div id="splitRsPane3" class="split-rs-pane" style="display: none;">
+                  <div class="split-rs-header">
+                    <div class="split-rs-header-left">
+                      <span class="split-rs-title" id="splitRsTitle3">RS vs SPY</span>
+                      <span class="rs-new-high-badge split-rs-nh" id="splitRsNhBadge3" style="display: none;" title="RS 領先股價創新高">🔵 RS NH</span>
+                    </div>
+                    <span class="rs-rating-badge split-rs-rating" id="splitRsRating3">RS --</span>
+                  </div>
+                  <div id="splitRsChart3" class="split-rs-chart"></div>
+                </div>
+              </div>
             </div>
             <div class="split-pane-item" id="splitPane4">
               <div class="split-pane-header"><span class="split-pane-title" id="splitTitle4">NASDAQ:FAST • Fastenal Co.</span></div>
-              <div id="splitChart4" class="split-chart-sub"></div>
+              <div class="split-pane-body">
+                <div id="splitChart4" class="split-chart-sub"></div>
+                <div id="splitRsPane4" class="split-rs-pane" style="display: none;">
+                  <div class="split-rs-header">
+                    <div class="split-rs-header-left">
+                      <span class="split-rs-title" id="splitRsTitle4">RS vs SPY</span>
+                      <span class="rs-new-high-badge split-rs-nh" id="splitRsNhBadge4" style="display: none;" title="RS 領先股價創新高">🔵 RS NH</span>
+                    </div>
+                    <span class="rs-rating-badge split-rs-rating" id="splitRsRating4">RS --</span>
+                  </div>
+                  <div id="splitRsChart4" class="split-rs-chart"></div>
+                </div>
+              </div>
             </div>
           </div>
           <div class="chart-watermark" id="chartWatermark">BTCUSDT • 1D</div>
@@ -315,6 +367,13 @@
           <div class="sidebar-header">
             <span class="sidebar-title">WATCHLIST</span>
             <button class="add-symbol-btn" id="addSymbolBtn" title="Add Symbol">+</button>
+          </div>
+          <div class="wl-group-bar" id="wlGroupBar">
+            <button class="wl-group-btn active" data-group="all" id="wlGrpAll">All</button>
+            <button class="wl-group-btn" data-group="leaders" id="wlGrpLeaders">Leaders</button>
+            <button class="wl-group-btn" data-group="vcp" id="wlGrpVcp">VCP</button>
+            <button class="wl-group-btn" data-group="pullback" id="wlGrpPullback">Pullback</button>
+            <button class="wl-group-btn" data-group="earnings" id="wlGrpEarnings">Earnings</button>
           </div>
           <div class="watchlist-items" id="watchlistItems">
             <!-- Populated dynamically with live quotes -->
@@ -683,6 +742,48 @@
     </div>
   </div>
 
+  <!-- R:R Edit Modal -->
+  <div class="modal-overlay" id="rrEditModal" style="display: none;">
+    <div class="modal-dialog rr-edit-dialog" style="max-width: 380px;">
+      <div class="modal-header">
+        <span class="modal-title">編輯 R:R</span>
+        <button class="modal-close" id="closeRrEditModal">✕</button>
+      </div>
+      <div class="avwap-form-grid" style="padding: 12px 16px;">
+        <div class="avwap-field-row">
+          <label class="avwap-field-label" for="rrEditEntry">進場價</label>
+          <div class="avwap-field-ctrl">
+            <input type="text" inputmode="decimal" id="rrEditEntry" class="avwap-input-num" autocomplete="off" />
+          </div>
+        </div>
+        <div class="avwap-field-row">
+          <label class="avwap-field-label" for="rrEditStop">停損價</label>
+          <div class="avwap-field-ctrl">
+            <input type="text" inputmode="decimal" id="rrEditStop" class="avwap-input-num" autocomplete="off" />
+          </div>
+        </div>
+        <div class="avwap-field-row">
+          <label class="avwap-field-label" for="rrEditTarget">目標價</label>
+          <div class="avwap-field-ctrl">
+            <input type="text" inputmode="decimal" id="rrEditTarget" class="avwap-input-num" autocomplete="off" />
+          </div>
+        </div>
+        <div class="avwap-field-row">
+          <label class="avwap-field-label" for="rrEditQty">手動數量</label>
+          <div class="avwap-field-ctrl">
+            <input type="text" inputmode="decimal" id="rrEditQty" class="avwap-input-num" autocomplete="off" placeholder="留空＝自動" />
+          </div>
+        </div>
+      </div>
+      <div id="rrEditPreview" style="padding: 0 16px 6px; font-size: 12px; line-height: 1.6;"></div>
+      <div id="rrEditError" style="padding: 0 16px 8px; font-size: 12px; color: #f87171;"></div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="btnRrEditCancel">取消</button>
+        <button class="btn-primary" id="btnRrEditApply">套用</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Fundamental Analysis & AI Diagnosis Modal -->
   <div class="modal-overlay" id="fundamentalsModal" style="display: none;">
     <div class="modal-dialog fundamentals-dialog">
@@ -834,18 +935,23 @@
       </div>
 
       <div class="screener-presets-bar" id="screenerPresetsBar">
-        <button class="screener-preset-pill active" data-preset="stage2_vcp">Minervini Stage 2 VCP 突破</button>
-        <button class="screener-preset-pill" data-preset="rs_leaders">Mansfield RS 零軸翻揚領頭羊</button>
-        <button class="screener-preset-pill" data-preset="canslim_growth">CANSLIM 高成長突破潛力</button>
-        <button class="screener-preset-pill" data-preset="low_vol_base">低波動底層籌碼收斂 (Base)</button>
-        <button class="screener-preset-pill" data-preset="custom">自訂條件 (Custom)</button>
+        <button class="screener-preset-pill active" data-preset="multi_filter">🏆 多框架 Tier 1–3</button>
+        <button class="screener-preset-pill" data-preset="canslim_standard">💎 CAN SLIM 經典高成長</button>
+        <button class="screener-preset-pill" data-preset="minervini_sepa">⚡ Minervini SEPA</button>
+        <button class="screener-preset-pill" data-preset="weinstein_s2">🌊 Weinstein S2</button>
+        <button class="screener-preset-pill" data-preset="custom">⚙️ 自訂組合</button>
+        <div class="screener-custom-presets-actions">
+          <button class="screener-preset-action-btn" id="screenerSavePresetBtn" title="儲存當前條件為自訂策略">💾 儲存策略</button>
+          <button class="screener-preset-action-btn" id="screenerDeletePresetBtn" title="刪除選中的自訂策略" style="display: none;">🗑️ 刪除策略</button>
+        </div>
       </div>
 
       <div class="screener-controls-bar">
         <div class="screener-control-group">
           <label class="sc-label" for="screenerUniverseSelect">股票池:</label>
           <select id="screenerUniverseSelect" class="screener-select">
-            <option value="us_momentum" selected>美股核心動能庫 (40+)</option>
+            <option value="all_us" selected>🌍 全美股市場 (All US Stocks)</option>
+            <option value="us_momentum">美股核心動能庫 (40+)</option>
             <option value="watchlist">我的自選清單 (Watchlist)</option>
             <option value="custom">自訂代碼清單 (Custom)</option>
           </select>
@@ -857,29 +963,56 @@
         </div>
 
         <div class="screener-filters-row">
+          <!-- 基本面條件 (CAN SLIM & Deepvue) -->
           <div class="sc-filter-item">
-            <label class="sc-label" for="scMinRsRating">RS Rating &ge;:</label>
-            <input type="number" id="scMinRsRating" min="1" max="99" value="80" class="screener-num-input" />
+            <label class="sc-label" for="scMinEpsYoY">EPS YoY % &ge;:</label>
+            <input type="number" id="scMinEpsYoY" min="0" max="500" value="20" class="screener-num-input" />%
+          </div>
+
+          <div class="sc-filter-item">
+            <label class="sc-label" for="scMinRevYoY">營收 YoY % &ge;:</label>
+            <input type="number" id="scMinRevYoY" min="0" max="500" value="20" class="screener-num-input" />%
+          </div>
+
+          <div class="sc-filter-item">
+            <label class="sc-label" for="scMinRoe">ROE % &ge;:</label>
+            <input type="number" id="scMinRoe" min="0" max="100" value="15" class="screener-num-input" />%
           </div>
 
           <div class="sc-filter-item">
             <label class="sc-chk-label">
-              <input type="checkbox" id="scMansfieldZero" checked />
-              <span>Mansfield RS &gt; 0</span>
+              <input type="checkbox" id="scAllowMissingFundamentals" />
+              <span>允許暫無財報 (生技/初創)</span>
             </label>
+          </div>
+
+          <!-- 結構與動能條件 (Weinstein & Minervini) -->
+          <div class="sc-filter-item">
+            <label class="sc-label" for="scMinPrice">最低股價 &ge;:</label>
+            <input type="number" id="scMinPrice" min="1" max="10000" value="15" class="screener-num-input" />$
+          </div>
+
+          <div class="sc-filter-item">
+            <label class="sc-label" for="scMaxPctFromHigh">距 52W 高點 &le;:</label>
+            <input type="number" id="scMaxPctFromHigh" min="1" max="100" value="15" class="screener-num-input" />%
+          </div>
+
+          <div class="sc-filter-item">
+            <label class="sc-label" for="scMinPerf26W">26週漲幅 &ge;:</label>
+            <input type="number" id="scMinPerf26W" min="-50" max="500" value="10" class="screener-num-input" />%
           </div>
 
           <div class="sc-filter-item">
             <label class="sc-chk-label screener-filter-item">
               <input type="checkbox" id="scStage2Only" checked />
-              <span>Stage 2 (50&gt;200MA &amp; 上升)</span>
+              <span>Stage 2 (50&gt;150&gt;200)</span>
             </label>
           </div>
 
           <div class="sc-filter-item">
             <label class="sc-chk-label screener-filter-item">
               <input type="checkbox" id="scWeeklyStage2Only" />
-              <span>1W 週線 Stage 2 共振</span>
+              <span>1W 週線共振</span>
             </label>
           </div>
 
@@ -890,26 +1023,27 @@
             </label>
           </div>
 
+          <!-- 量能與風險控制 (Deepvue & V6) -->
+          <div class="sc-filter-item">
+            <label class="sc-label" for="scMinAvgVol">30D 均量 &ge;:</label>
+            <input type="number" id="scMinAvgVol" min="50000" max="50000000" step="50000" value="500000" class="screener-num-input" />
+          </div>
+
+          <div class="sc-filter-item">
+            <label class="sc-label" for="scMinVolRatio">量比 &ge;:</label>
+            <input type="number" id="scMinVolRatio" step="0.1" min="0.1" max="10.0" value="1.2" class="screener-num-input" />x
+          </div>
+
+          <div class="sc-filter-item">
+            <label class="sc-label" for="scMinRsRating">RS Rating &ge;:</label>
+            <input type="number" id="scMinRsRating" min="1" max="99" value="80" class="screener-num-input" />
+          </div>
+
           <div class="sc-filter-item">
             <label class="sc-chk-label">
-              <input type="checkbox" id="scAtrSqueezeOnly" checked />
-              <span>波動收縮 (Squeeze)</span>
+              <input type="checkbox" id="scHideV6Hard" />
+              <span>排除 7 日內財報 (V6-Hard)</span>
             </label>
-          </div>
-
-          <div class="sc-filter-item">
-            <label class="sc-label" for="scMaxAtrPercentile">ATR% 百分位 &le;:</label>
-            <input type="number" id="scMaxAtrPercentile" min="5" max="100" value="20" class="screener-num-input" />%
-          </div>
-
-          <div class="sc-filter-item">
-            <label class="sc-label" for="scMaxPctFromHigh">距 52W 高點 &le;:</label>
-            <input type="number" id="scMaxPctFromHigh" min="1" max="100" value="15" class="screener-num-input" />%
-          </div>
-
-          <div class="sc-filter-item">
-            <label class="sc-label" for="scMinVolRatio">50D 量比 &ge;:</label>
-            <input type="number" id="scMinVolRatio" step="0.1" min="0.1" max="10.0" value="1.1" class="screener-num-input" />x
           </div>
 
           <div class="sc-filter-item risk-filter-item">
@@ -920,6 +1054,7 @@
 
         <div class="screener-action-row">
           <button class="btn-primary" id="runScreenerScanBtn">🚀 開始篩選</button>
+          <button class="btn-batch-add" id="screenerBatchAddBtn" title="一鍵將本次篩選出的 Tier 1 與 Tier 2 強勢標的加入自選股清單">⭐ 批次加入 Tier 1–2 至自選</button>
           <button class="btn-secondary" id="screenerAiBtn">🤖 AI 總結榜單焦點</button>
           <button class="screener-action-btn" id="screenerExportTvBtn">📥 匯出 TV (.txt)</button>
           <button class="screener-action-btn" id="screenerCopyListBtn">📋 複製清單</button>
@@ -948,14 +1083,15 @@
         <table class="screener-table" id="screenerTable">
           <thead>
             <tr>
+              <th data-sort="tier" class="sortable">Tier / 框架 <span class="sort-icon">↕</span></th>
               <th data-sort="symbol" class="sortable">代碼 <span class="sort-icon">↕</span></th>
               <th data-sort="name" class="sortable">名稱 <span class="sort-icon">↕</span></th>
               <th data-sort="close" class="sortable">現價 <span class="sort-icon">↕</span></th>
               <th data-sort="change_pct" class="sortable">24H% <span class="sort-icon">↕</span></th>
-              <th data-sort="trend_regime" class="sortable">趨勢架構 <span class="sort-icon">↕</span></th>
-              <th data-sort="mansfield_rs" class="sortable">Mansfield RS <span class="sort-icon">↕</span></th>
+              <th data-sort="streak_days" class="sortable">連勝 (Streak) <span class="sort-icon">↕</span></th>
               <th data-sort="rs_rating" class="sortable">RS Rating <span class="sort-icon">↕</span></th>
-              <th data-sort="atr_pct" class="sortable">ATR% (Squeeze) <span class="sort-icon">↕</span></th>
+              <th data-sort="eps_yoy" class="sortable">EPS / 營收 YoY <span class="sort-icon">↕</span></th>
+              <th data-sort="v6_risk" class="sortable">V6 財報 <span class="sort-icon">↕</span></th>
               <th data-sort="pct_from_52w_high" class="sortable">距52W高% <span class="sort-icon">↕</span></th>
               <th data-sort="volume_ratio_50" class="sortable">50D量比 <span class="sort-icon">↕</span></th>
               <th data-sort="suggested_shares" class="sortable" id="thSuggestedShares">建議股數 ($500) <span class="sort-icon">↕</span></th>
@@ -980,19 +1116,90 @@
     </div>
   </div>
 
+  <!-- Stock Theme Heatmap Modal -->
+  <div class="modal-overlay heatmap-modal-overlay" id="heatmapModal" style="display: none;">
+    <div class="modal-dialog heatmap-dialog">
+      <div class="modal-header heatmap-header">
+        <div class="heatmap-header-left">
+          <span class="modal-title" id="heatmapModalTitle">🔥 Theme Heatmap</span>
+          <span class="heatmap-bench-badge" id="heatmapBenchBadge">SPY: --</span>
+        </div>
+        <div class="heatmap-controls-bar">
+          <div class="heatmap-pill-group" id="heatmapUniverseGroup">
+            <button class="heatmap-pill-btn active" data-universe="themes" id="hmUnivThemes">美股主題</button>
+            <button class="heatmap-pill-btn" data-universe="watchlist" id="hmUnivWatchlist">自選清單</button>
+          </div>
+          <div class="heatmap-pill-group" id="heatmapMetricGroup">
+            <button class="heatmap-pill-btn active" data-metric="change" id="hmMetricChange">1D 漲跌%</button>
+            <button class="heatmap-pill-btn" data-metric="rs" id="hmMetricRs">RS Rating</button>
+          </div>
+          <div class="heatmap-pill-group" id="heatmapSortGroup">
+            <button class="heatmap-pill-btn active" data-sort="change" id="hmSortChange">漲幅</button>
+            <button class="heatmap-pill-btn" data-sort="rs" id="hmSortRs">RS</button>
+          </div>
+          <button class="heatmap-action-btn" id="heatmapRefreshBtn" title="強制刷新熱力圖">🔄</button>
+          <button class="modal-close" id="closeHeatmapModal">✕</button>
+        </div>
+      </div>
+      <div class="heatmap-body" id="heatmapBody">
+        <div class="heatmap-loading" id="heatmapLoading" style="display: none;">
+          <span class="loading-spinner">⏳</span>
+          <span id="heatmapLoadingText">正在載入主題板塊數據...</span>
+        </div>
+        <div class="heatmap-grid" id="heatmapGrid">
+          <!-- Rendered dynamically -->
+        </div>
+        <div class="heatmap-empty-state" id="heatmapEmptyState" style="display: none;">
+          <div class="empty-icon">🔍</div>
+          <div class="empty-title" id="heatmapEmptyTitle">未發現板塊資料</div>
+        </div>
+      </div>
+      <div class="modal-footer heatmap-footer">
+        <span class="heatmap-footer-tip" id="heatmapFooterTip">💡 點選任一個股方塊可直接切換主圖；方塊寬度依 50D 成交量放大，滑鼠懸停可查看完整量化指標</span>
+        <button class="btn-secondary" id="closeHeatmapFooterBtn">關閉</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Watchlist Desktop Right-Click Context Menu -->
   <div id="wlContextMenu" class="desktop-context-menu" style="display: none;">
+    <div class="ctx-item" id="ctxPinWl">
+      <span class="ctx-icon">📌</span>
+      <span class="ctx-text" id="ctxPinWlText">釘選置頂</span>
+    </div>
     <div class="ctx-item" id="ctxRemoveWl">
       <span class="ctx-icon">✕</span>
-      <span class="ctx-text">從自選清單移除 (Remove)</span>
+      <span class="ctx-text" id="ctxRemoveWlText">從自選清單移除</span>
     </div>
     <div class="ctx-item" id="ctxSetBenchmark">
       <span class="ctx-icon">📊</span>
-      <span class="ctx-text">設為 RS 基準 (Benchmark)</span>
+      <span class="ctx-text" id="ctxSetBenchmarkText">設為 RS 基準</span>
     </div>
     <div class="ctx-item" id="ctxCopySymbol">
       <span class="ctx-icon">📋</span>
-      <span class="ctx-text">複製代碼 (Copy Symbol)</span>
+      <span class="ctx-text" id="ctxCopySymbolText">複製代碼</span>
+    </div>
+    <div class="ctx-divider"></div>
+    <div class="ctx-header" id="ctxGroupHeader">指派分組</div>
+    <div class="ctx-item ctx-group-item" data-assign-group="">
+      <span class="ctx-icon">🚫</span>
+      <span class="ctx-text" id="ctxGrpNone">無分組 (清除)</span>
+    </div>
+    <div class="ctx-item ctx-group-item" data-assign-group="leaders">
+      <span class="ctx-icon">🏆</span>
+      <span class="ctx-text" id="ctxGrpLeaders">領頭羊 (Leaders)</span>
+    </div>
+    <div class="ctx-item ctx-group-item" data-assign-group="vcp">
+      <span class="ctx-icon">🎯</span>
+      <span class="ctx-text" id="ctxGrpVcp">收縮型態 (VCP)</span>
+    </div>
+    <div class="ctx-item ctx-group-item" data-assign-group="pullback">
+      <span class="ctx-icon">📉</span>
+      <span class="ctx-text" id="ctxGrpPullback">拉回支撐 (Pullback)</span>
+    </div>
+    <div class="ctx-item ctx-group-item" data-assign-group="earnings">
+      <span class="ctx-icon">📅</span>
+      <span class="ctx-text" id="ctxGrpEarnings">財報催化 (Earnings)</span>
     </div>
   </div>
 

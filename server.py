@@ -1,4 +1,4 @@
-"""TradingView Real-Time Terminal Backend Server.
+"""Momentum Swing Terminal Backend Server.
 
 FastAPI application providing unified asyncio lifespan management, REST endpoints
 for symbols, search, dynamic subscription, and historical candles (dual-source: Binance
@@ -8,6 +8,7 @@ with bounded drop-oldest queues, and static asset delivery.
 
 import argparse
 import asyncio
+import contextvars
 import json
 import logging
 import math
@@ -20,11 +21,19 @@ import sys
 import time
 import threading
 import urllib.parse
+from datetime import datetime, timezone, date, timedelta, time as dt_time
+from engine.market_time import (
+    ny_now,
+    is_regular_session_open,
+    current_session_date,
+    last_completed_session_date,
+    NY_TZ,
+)
 from contextlib import asynccontextmanager, contextmanager
 from collections import OrderedDict
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Sequence, Union, Tuple
+from typing import Dict, List, Any, Optional, Sequence, Union, Tuple, Callable, Set, Awaitable
 
 def init_certifi_ca_bundle() -> Optional[str]:
     """Initializes and verifies TLS root CA certificates from certifi.
@@ -81,6 +90,40 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("tradingview.server")
 CA_BUNDLE_PATH: Optional[str] = init_certifi_ca_bundle()
 
+
+class RedactTokenFilter(logging.Filter):
+    """Redacts session token parameter values from log records to prevent secret leakage in access logs."""
+
+    _TOKEN_RE = re.compile(r"(token=)[^&\s]+", re.IGNORECASE)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = self._TOKEN_RE.sub(r"\1[REDACTED]", record.msg)
+        if record.args:
+            if isinstance(record.args, tuple):
+                record.args = tuple(
+                    self._TOKEN_RE.sub(r"\1[REDACTED]", a) if isinstance(a, str) else a
+                    for a in record.args
+                )
+            elif isinstance(record.args, dict):
+                record.args = {
+                    k: (self._TOKEN_RE.sub(r"\1[REDACTED]", v) if isinstance(v, str) else v)
+                    for k, v in record.args.items()
+                }
+        return True
+
+
+def setup_log_redaction_filters() -> None:
+    """Attaches RedactTokenFilter to uvicorn.access and uvicorn.error loggers."""
+    flt = RedactTokenFilter()
+    for name in ("uvicorn.access", "uvicorn.error", "uvicorn"):
+        log_obj = logging.getLogger(name)
+        if not any(isinstance(f, RedactTokenFilter) for f in log_obj.filters):
+            log_obj.addFilter(flt)
+
+
+setup_log_redaction_filters()
+
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Body, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -97,17 +140,26 @@ from engine.screener import (
     US_MOMENTUM_UNIVERSE,
     scan_universe,
     evaluate_canslim_stage,
+    build_theme_heatmap,
+    fetch_heatmap_universe,
 )
+from engine.market_scanner import scan_all_us_stocks, evaluate_multi_frameworks
 
 
 def load_dotenv_custom(paths: Optional[List[Path]] = None) -> List[str]:
     """Loads environment variables from .env files without external dependencies."""
-    candidate_paths = paths if paths is not None else [
-        Path.cwd() / ".env",
-        Path(__file__).resolve().parent / ".env",
-        Path.home() / ".env",
-        Path.home() / ".gemini" / ".env",
-    ]
+    if paths is not None:
+        candidate_paths = paths
+    else:
+        candidate_paths = [
+            Path.cwd() / ".env",
+            Path(__file__).resolve().parent / ".env",
+        ]
+        if os.getenv("TERMINAL_LOAD_HOME_DOTENV") == "1":
+            candidate_paths.extend([
+                Path.home() / ".env",
+                Path.home() / ".gemini" / ".env",
+            ])
     loaded = []
     seen = set()
     for p in candidate_paths:
@@ -374,6 +426,11 @@ class DesktopAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         csp = "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com https://s3.tradingview.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* https://*.tradingview.com wss://*.tradingview.com; frame-src 'self' https://s.tradingview.com https://*.tradingview.com;"
         if not is_desktop_mode():
+            if request.method in ("POST", "PUT", "DELETE"):
+                origin = request.headers.get("origin")
+                if origin and not is_allowed_origin(origin):
+                    logger.warning("Rejected %s request from unauthorized origin: %s", request.method, origin)
+                    return JSONResponse(status_code=403, content={"error": "Forbidden: unauthorized origin"})
             response = await call_next(request)
             response.headers.setdefault("X-Content-Type-Options", "nosniff")
             response.headers.setdefault("Content-Security-Policy", csp)
@@ -471,6 +528,8 @@ POPULAR_SEARCH_INDEX: List[Dict[str, str]] = [
 
 SYMBOLS: List[str] = [item["id"] for item in WATCHLIST]
 
+WS_HEARTBEAT_INTERVAL: float = 15.0
+
 
 class ConnectionManager:
     """Manages active WebSocket client connections with per-client bounded queues and drop-oldest strategy."""
@@ -479,6 +538,16 @@ class ConnectionManager:
         self.max_queue_size = max_queue_size
         self.client_queues: Dict[WebSocket, asyncio.Queue] = {}
         self.client_loops: Dict[WebSocket, asyncio.AbstractEventLoop] = {}
+        self._seq_lock = threading.Lock()
+        self._bar_seq: Dict[str, int] = {}
+
+    def next_bar_seq(self, symbol: str) -> int:
+        """Returns a thread-safe monotonically increasing bar sequence number per symbol."""
+        key = str(symbol).strip().upper()
+        with self._seq_lock:
+            seq = self._bar_seq.get(key, 0) + 1
+            self._bar_seq[key] = seq
+            return seq
 
     async def connect(self, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -565,7 +634,61 @@ current_status = "initializing"
 MAX_CACHE_SIZE = 200
 _yahoo_cache: OrderedDict[str, tuple[float, List[Dict[str, Any]]]] = OrderedDict()
 _inflight_history: Dict[str, asyncio.Task] = {}
+_last_remote_fetch: Dict[Tuple[str, str], float] = {}
 _shared_client: Optional[httpx.AsyncClient] = None
+
+YAHOO_EXCHANGE_MAP: Dict[str, str] = {
+    "NMS": "NASDAQ",
+    "NGM": "NASDAQ",
+    "NCM": "NASDAQ",
+    "NYQ": "NYSE",
+    "ASE": "AMEX",
+    "PCX": "AMEX",
+}
+
+
+def _parse_criteria_number(
+    raw: Dict[str, Any],
+    key: str,
+    default: Any,
+    kind: type,
+    min_value: Optional[float] = None,
+    max_value: Optional[float] = None,
+    errors: Optional[List[str]] = None,
+    exclusive_min: bool = False,
+) -> Any:
+    """Safely extracts and validates numeric screening criteria.
+
+    - Returns `default` if key is missing, None, or empty string.
+    - Appends `key` to `errors` if value is non-numeric, NaN, Infinity, or out-of-bounds.
+    """
+    val = raw.get(key)
+    if val is None or val == "":
+        return default
+    try:
+        num = kind(val)
+        if isinstance(num, float) and (math.isnan(num) or math.isinf(num)):
+            if errors is not None:
+                errors.append(key)
+            return default
+        if min_value is not None:
+            if exclusive_min and num <= min_value:
+                if errors is not None:
+                    errors.append(key)
+                return default
+            elif not exclusive_min and num < min_value:
+                if errors is not None:
+                    errors.append(key)
+                return default
+        if max_value is not None and num > max_value:
+            if errors is not None:
+                errors.append(key)
+            return default
+        return num
+    except (ValueError, TypeError):
+        if errors is not None:
+            errors.append(key)
+        return default
 
 VALID_TICKER_RE = re.compile(r"^[A-Z0-9._\-\^=]{1,24}$")
 VALID_SYMBOL_ID_RE = re.compile(r"^[A-Z0-9_]{1,15}:[A-Z0-9._\-\^=]{1,24}$")
@@ -612,6 +735,25 @@ def is_valid_symbol_id(symbol: str) -> bool:
     if ":" in clean:
         return bool(VALID_SYMBOL_ID_RE.match(clean))
     return bool(VALID_TICKER_RE.match(clean))
+
+
+def normalize_symbol_id(raw_symbol: Optional[str]) -> str:
+    """Normalizes bare or prefixed symbols into canonical EXCHANGE:TICKER format."""
+    if not raw_symbol or not isinstance(raw_symbol, str):
+        return ""
+    clean = raw_symbol.strip().upper()
+    if not clean:
+        return ""
+    if ":" in clean:
+        return clean
+    for pool in (WATCHLIST, POPULAR_SEARCH_INDEX, US_MOMENTUM_UNIVERSE):
+        for entry in pool:
+            eid = str(entry.get("id") or "").strip().upper()
+            if ":" in eid and eid.split(":", 1)[1] == clean:
+                return eid
+    if "USDT" in clean or "BUSD" in clean:
+        return f"BINANCE:{clean}"
+    return f"NASDAQ:{clean}"
 
 
 def get_shared_client() -> Optional[httpx.AsyncClient]:
@@ -751,13 +893,13 @@ async def fetch_yahoo_history(symbol: str, timeframe: str = "1m") -> List[Dict[s
                             _yahoo_cache[cache_key] = (now, bars)
                             return
                 elif resp.status_code == 429:
-                    logger.debug("Yahoo Finance API returned status 429 for %s, entering negative cooldown", ticker)
+                    logger.warning("Yahoo Finance API returned status 429 for %s, entering negative cooldown", ticker)
                     break
                 elif resp.status_code in (500, 502, 503):
-                    logger.debug("Yahoo Finance API on %s returned status %s for %s, trying next host...", host, resp.status_code, ticker)
+                    logger.warning("Yahoo Finance API on %s returned status %s for %s, trying next host...", host, resp.status_code, ticker)
                     continue
             except Exception as host_err:
-                logger.debug("Yahoo Finance host %s network error for %s: %s", host, ticker, host_err)
+                logger.warning("Yahoo Finance host %s network error for %s: %s", host, ticker, host_err)
                 continue
         if not bars:
             if len(_yahoo_cache) >= MAX_CACHE_SIZE:
@@ -776,6 +918,56 @@ async def fetch_yahoo_history(symbol: str, timeframe: str = "1m") -> List[Dict[s
     return bars
 
 
+def collapse_daily_bars_by_ny_date(bars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """When multiple daily bars exist for the same NY trading date, retain a single bar
+    with the earliest time and latest OHLCV values, sorted by time."""
+    if not bars:
+        return []
+
+    by_date: Dict[Any, List[Dict[str, Any]]] = OrderedDict()
+    passthrough: List[Dict[str, Any]] = []
+
+    for b in bars:
+        if not isinstance(b, dict):
+            continue
+        t = b.get("time")
+        try:
+            if t is None or isinstance(t, bool):
+                raise ValueError("invalid time")
+            dt = datetime.fromtimestamp(int(t), tz=NY_TZ)
+            ny_d = dt.date()
+            if ny_d not in by_date:
+                by_date[ny_d] = []
+            by_date[ny_d].append(b)
+        except Exception:
+            passthrough.append(dict(b))
+
+    collapsed: List[Dict[str, Any]] = []
+    for ny_d, group in by_date.items():
+        if len(group) == 1:
+            collapsed.append(dict(group[0]))
+        else:
+            earliest_time = min(int(x["time"]) for x in group)
+            latest_bar = max(group, key=lambda x: int(x["time"]))
+            merged = dict(latest_bar)
+            merged["time"] = earliest_time
+            collapsed.append(merged)
+
+    collapsed.extend(passthrough)
+
+    def _safe_sort_key(item: Dict[str, Any]) -> Tuple[int, int]:
+        try:
+            val = item.get("time")
+            if val is None or isinstance(val, bool):
+                return (1, 0)
+            return (0, int(val))
+        except Exception:
+            return (1, 0)
+
+    collapsed.sort(key=_safe_sort_key)
+    return collapsed
+
+
 async def fetch_historical_bars(symbol: str, timeframe: str = "1m", limit: int = 300) -> List[Dict[str, Any]]:
     """Fetches historical OHLCV bars with licensed provider precedence, dual-source fallback, SQLite caching, and offline support."""
     if not is_valid_symbol_id(symbol):
@@ -792,8 +984,51 @@ async def fetch_historical_bars(symbol: str, timeframe: str = "1m", limit: int =
     if cached and len(cached) >= min_expected:
         now_ts = int(time.time())
         last_bar_ts = cached[-1].get("time", 0)
-        tf_seconds = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1D": 86400, "1W": 604800}.get(clean_tf, 86400)
-        if (now_ts - last_bar_ts) <= tf_seconds:
+        is_fresh = False
+
+        if clean_tf in ("1D", "1W", "1WK"):
+            # Never fetched remotely in this process -> 0.0 (treated as stale, refetch once).
+            # Do NOT fall back to the bar timestamp: Yahoo's latest daily bar can carry a 16:00 ET timestamp.
+            last_fetch_t = _last_remote_fetch.get((symbol, clean_tf), 0.0)
+            if is_crypto_symbol(symbol):
+                # Crypto: unclosed bar, fresh only if remote fetched within 60s
+                if (now_ts - last_fetch_t) <= 60:
+                    is_fresh = True
+            else:
+                if is_regular_session_open():
+                    # Intraday: fresh only if remote fetched within 60s
+                    if (now_ts - last_fetch_t) <= 60:
+                        is_fresh = True
+                else:
+                    # Market closed: last bar NY date >= last_completed_session_date() AND fetched after 16:00 ET
+                    comp_date = last_completed_session_date()
+                    try:
+                        last_bar_dt = datetime.fromtimestamp(last_bar_ts, tz=NY_TZ)
+                        last_bar_date = last_bar_dt.date()
+                    except Exception:
+                        last_bar_date = None
+
+                    date_ok = False
+                    if last_bar_date:
+                        if clean_tf in ("1W", "1WK"):
+                            week_start = comp_date - timedelta(days=comp_date.weekday())
+                            date_ok = (last_bar_date >= comp_date or last_bar_date >= week_start)
+                        else:
+                            date_ok = (last_bar_date >= comp_date)
+
+                    if date_ok:
+                        session_close_dt = datetime.combine(comp_date, dt_time(16, 0), tzinfo=NY_TZ)
+                        if last_fetch_t >= session_close_dt.timestamp():
+                            is_fresh = True
+        else:
+            tf_seconds = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600}.get(clean_tf, 60)
+            last_fetch_t = _last_remote_fetch.get((symbol, clean_tf), 0.0)
+            if (now_ts - last_fetch_t) <= tf_seconds:
+                is_fresh = True
+
+        if is_fresh:
+            if clean_tf == "1D" and not is_crypto_symbol(symbol):
+                cached = collapse_daily_bars_by_ny_date(cached)
             logger.info("Serving %d fresh cached bars from SQLite for %s (%s) [cache-first]", len(cached), symbol, clean_tf)
             return cached
 
@@ -825,6 +1060,9 @@ async def fetch_historical_bars(symbol: str, timeframe: str = "1m", limit: int =
 
     storage = get_storage()
     if bars:
+        if clean_tf == "1D" and not is_crypto_symbol(symbol):
+            bars = collapse_daily_bars_by_ny_date(bars)
+        _last_remote_fetch[(symbol, clean_tf)] = time.time()
         try:
             storage.save_bars(symbol, clean_tf, bars)
         except Exception as save_err:
@@ -833,6 +1071,8 @@ async def fetch_historical_bars(symbol: str, timeframe: str = "1m", limit: int =
 
     cached = storage.get_bars(symbol, clean_tf, limit=limit)
     if cached:
+        if clean_tf == "1D" and not is_crypto_symbol(symbol):
+            cached = collapse_daily_bars_by_ny_date(cached)
         logger.info("Serving %d cached bars from SQLite for %s (%s) [offline fallback]", len(cached), symbol, clean_tf)
         return cached
 
@@ -863,10 +1103,11 @@ async def fetch_universal_history(symbol: str, timeframe: str = "1D") -> List[Di
 
 
 def on_bar_update_handler(symbol: str, bar: CandlestickBar) -> None:
-    """Dispatches real-time bar updates to connected WebSocket clients."""
+    """Dispatches real-time bar updates to connected WebSocket clients with monotonic per-symbol seq."""
     manager.broadcast_nowait({
         "type": "bar",
         "symbol": symbol,
+        "seq": manager.next_bar_seq(symbol),
         "bar": bar.to_dict()
     })
 
@@ -897,12 +1138,77 @@ def on_status_change_handler(status: str) -> None:
     })
 
 
+_reconcile_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+_reconcile_semaphore: Optional[asyncio.Semaphore] = None
+_reconcile_tasks: Set[asyncio.Task] = set()
+
+
+def _get_reconcile_semaphore() -> asyncio.Semaphore:
+    global _reconcile_semaphore
+    if _reconcile_semaphore is None:
+        _reconcile_semaphore = asyncio.Semaphore(4)
+    return _reconcile_semaphore
+
+
+async def _reconcile_binance_bar(symbol: str, bar_time: int) -> None:
+    """Reconciles 1m Binance crypto bar against definitive public REST API candles."""
+    # Wait OUTSIDE the semaphore: the limit of 4 applies to concurrent Binance requests,
+    # not to tasks that are merely waiting for their bar to settle.
+    target_time = bar_time + 62  # bar_time + 60 + 2
+    wait_sec = target_time - time.time()
+    if wait_sec > 0:
+        await _reconcile_sleep(wait_sec)
+
+    sem = _get_reconcile_semaphore()
+    async with sem:
+        try:
+            bars = await fetch_binance_history(symbol, limit=3)
+            matching = next((b for b in bars if int(b.get("time", 0)) == bar_time), None)
+            if matching and aggregator:
+                replaced = aggregator.replace_history_bar(symbol, matching)
+                if replaced:
+                    get_storage().save_bars(symbol, "1m", [matching])
+                    logger.debug("Reconciled Binance bar for %s at %d", symbol, bar_time)
+                else:
+                    logger.debug("Bar %d for %s not found in aggregator history to reconcile", bar_time, symbol)
+            else:
+                logger.debug("Binance history missing matching bar for %s at %d", symbol, bar_time)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug("Failed reconciling Binance bar for %s at %d: %s", symbol, bar_time, e)
+
+
 def on_bar_completed_handler(symbol: str, bar: CandlestickBar) -> None:
-    """Persists completed 1m candlestick bar to SQLite storage."""
+    """Persists completed 1m candlestick bar to SQLite storage and schedules crypto reconciliation."""
     try:
         get_storage().save_bars(symbol, "1m", [bar])
     except Exception as e:
         logger.warning("Failed to persist completed bar for %s: %s", symbol, e)
+
+    if not symbol.startswith("BINANCE:"):
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is None or not loop.is_running():
+        return
+
+    coro = _reconcile_binance_bar(symbol, bar.time)
+    task = asyncio.create_task(coro)
+    _reconcile_tasks.add(task)
+
+    def _cleanup(t: asyncio.Task) -> None:
+        _reconcile_tasks.discard(t)
+        if not t.cancelled():
+            exc = t.exception()
+            if exc:
+                logger.debug("Reconcile task error for %s: %s", symbol, exc)
+
+    task.add_done_callback(_cleanup)
 
 
 @asynccontextmanager
@@ -979,6 +1285,20 @@ async def lifespan(app: FastAPI):
     except Exception as seed_wait_err:
         logger.debug("Non-blocking crypto seed micro-wait exited: %s", seed_wait_err)
 
+    # Background periodic closing of due bars
+    async def _close_due_bars_loop():
+        while True:
+            try:
+                await asyncio.sleep(1.0)
+                if aggregator:
+                    aggregator.close_due_bars()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Error in close_due_bars_loop: %s", e)
+
+    close_bars_task: Optional[asyncio.Task] = asyncio.create_task(_close_due_bars_loop())
+
     tv_client = TradingViewAsyncClient(
         symbols=SYMBOLS,
         on_quote_update=on_quote_update_handler,
@@ -1007,6 +1327,20 @@ async def lifespan(app: FastAPI):
             await crypto_seed_task
         except asyncio.CancelledError:
             logger.debug("Crypto seed task cancellation completed.")
+    if close_bars_task and not close_bars_task.done():
+        close_bars_task.cancel()
+        try:
+            await close_bars_task
+        except asyncio.CancelledError:
+            logger.debug("Close due bars task cancellation completed.")
+    for t in list(_reconcile_tasks):
+        t.cancel()
+    if _reconcile_tasks:
+        await asyncio.gather(*list(_reconcile_tasks), return_exceptions=True)
+    _reconcile_tasks.clear()
+    # Python 3.9 binds asyncio.Semaphore to the loop it was created on; drop it so a later
+    # lifespan (new event loop) creates a fresh one.
+    globals()["_reconcile_semaphore"] = None
     if watchdog_task and not watchdog_task.done():
         watchdog_task.cancel()
         try:
@@ -1024,7 +1358,7 @@ async def lifespan(app: FastAPI):
     logger.info("Engine shutdown complete.")
 
 
-app = FastAPI(title="TradingView Real-Time Terminal", lifespan=lifespan)
+app = FastAPI(title="Momentum Swing Terminal", lifespan=lifespan)
 
 TAURI_ORIGINS = [
     "tauri://localhost",
@@ -1070,7 +1404,8 @@ async def health_check():
         "status": "ok",
         "desktop_mode": is_desktop_mode(),
         "port": get_desktop_port(),
-        "timestamp": time.time()
+        "timestamp": time.time(),
+        "upstream": tv_client.get_health() if tv_client else None,
     }
 
 
@@ -1145,17 +1480,23 @@ async def search_symbols(q: str = Query(default="")):
                     if not raw_ticker or not is_valid_ticker(raw_ticker.replace(".", "-").replace("^", "")):
                         continue
                     q_type = str(q_item.get("quoteType", "")).lower()
-                    sym_type = "crypto" if q_type in ("cryptocurrency", "crypto") else ("etf" if q_type == "etf" else ("index" if q_type == "index" else "stock"))
-                    exch = str(q_item.get("exchDisp") or q_item.get("exchange") or "US").upper()
+                    if q_type in ("cryptocurrency", "crypto"):
+                        continue
+                    raw_exch = str(q_item.get("exchange") or "").upper()
+                    mapped_exch = YAHOO_EXCHANGE_MAP.get(raw_exch)
+                    if not mapped_exch:
+                        continue
+
+                    sym_type = "etf" if q_type == "etf" else ("index" if q_type == "index" else "stock")
                     short_name = q_item.get("shortname") or q_item.get("longname") or raw_ticker
-                    sid = f"{exch}:{raw_ticker}" if ":" not in raw_ticker else raw_ticker
-                    sec = str(q_item.get("sector") or ("Cryptocurrency" if sym_type == "crypto" else ("Index ETF" if sym_type == "etf" else "")))[:64]
-                    ind = str(q_item.get("industry") or ("Layer 1" if sym_type == "crypto" else ("Large Cap Blend" if sym_type == "etf" else "")))[:64]
+                    sid = f"{mapped_exch}:{raw_ticker}"
+                    sec = str(q_item.get("sector") or ("Index ETF" if sym_type == "etf" else ""))[:64]
+                    ind = str(q_item.get("industry") or ("Large Cap Blend" if sym_type == "etf" else ""))[:64]
                     if not any(r["id"] == sid or r["pair"].upper() == raw_ticker for r in results):
                         results.append({
                             "id": sid,
                             "name": str(short_name)[:64],
-                            "exchange": exch[:20],
+                            "exchange": mapped_exch[:20],
                             "pair": raw_ticker[:24],
                             "type": sym_type,
                             "sector": sec,
@@ -1188,10 +1529,27 @@ async def search_symbols(q: str = Query(default="")):
                 "name": f"{pair} (Custom Ticker)",
                 "exchange": exch,
                 "pair": pair,
-                "type": "stock"
+                "type": "stock",
+                "exchange_guessed": True
             })
 
     return {"results": results[:15]}
+
+
+def _resolve_known_bare_symbol(clean: str) -> Optional[str]:
+    """Resolves a bare ticker via local pools (watchlist, popular index, momentum universe) or crypto pair rules.
+
+    Returns EXCHANGE:TICKER, or None when the ticker is unknown locally (caller then asks Yahoo).
+    Mirrors normalize_symbol_id() but without its NASDAQ: default, so callers can tell a guess from a match.
+    """
+    for pool in (WATCHLIST, POPULAR_SEARCH_INDEX, US_MOMENTUM_UNIVERSE):
+        for entry in pool:
+            eid = str(entry.get("id") or "").strip().upper()
+            if ":" in eid and eid.split(":", 1)[1] == clean:
+                return eid
+    if "USDT" in clean or "BUSD" in clean:
+        return f"BINANCE:{clean}"
+    return None
 
 
 @app.post("/api/symbols/subscribe")
@@ -1207,13 +1565,46 @@ async def subscribe_symbol(
     if not raw_symbol:
         return JSONResponse({"error": "Symbol is required"}, status_code=400)
 
+    exchange_guessed = False
     if ":" not in raw_symbol:
-        if "USDT" in raw_symbol:
-            symbol = f"BINANCE:{raw_symbol}"
+        existing = next((w["id"] for w in WATCHLIST if w.get("pair", "").upper() == raw_symbol or w["id"].split(":")[-1].upper() == raw_symbol), None)
+        if not existing:
+            existing = next((s for s in SYMBOLS if s.split(":")[-1].upper() == raw_symbol), None)
+        if not existing:
+            existing = _resolve_known_bare_symbol(raw_symbol)
+
+        if existing:
+            symbol = existing
         else:
-            symbol = f"NASDAQ:{raw_symbol}"
+            found_exchange = None
+            try:
+                shared = get_shared_client()
+                cli = shared or httpx.AsyncClient(timeout=4.0)
+                should_close = shared is None
+                try:
+                    y_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={urllib.parse.quote(raw_symbol)}&quotesCount=10&newsCount=0"
+                    resp = await cli.get(y_url, headers={"User-Agent": "Mozilla/5.0"})
+                    if resp.status_code == 200:
+                        y_quotes = resp.json().get("quotes", [])
+                        for q in y_quotes:
+                            if str(q.get("symbol", "")).upper() == raw_symbol:
+                                q_exch = str(q.get("exchange", "")).upper()
+                                if q_exch in YAHOO_EXCHANGE_MAP:
+                                    found_exchange = YAHOO_EXCHANGE_MAP[q_exch]
+                                    break
+                finally:
+                    if should_close:
+                        await cli.aclose()
+            except Exception as e:
+                logger.debug("Yahoo lookup in subscribe failed: %s", e)
+
+            if found_exchange:
+                symbol = f"{found_exchange}:{raw_symbol}"
+            else:
+                symbol = f"NASDAQ:{raw_symbol}"
+                exchange_guessed = True
     else:
-        symbol = raw_symbol
+        symbol = normalize_symbol_id(raw_symbol)
 
     if not is_valid_symbol_id(symbol):
         return JSONResponse({"error": "Invalid symbol format"}, status_code=400)
@@ -1287,12 +1678,18 @@ async def subscribe_symbol(
             aggregator.seed_history(symbol, bars)
             logger.info("Dynamically seeded %d bars for new subscription: %s", len(bars), symbol)
 
+    if exchange_guessed:
+        item["exchange_guessed"] = True
+
     manager.broadcast_nowait({
         "type": "symbol_added",
         "symbol": item
     })
 
-    return {"status": "subscribed", "symbol": item}
+    resp_out = {"status": "subscribed", "symbol": item}
+    if exchange_guessed:
+        resp_out["exchange_guessed"] = True
+    return resp_out
 
 
 @app.delete("/api/symbols/unsubscribe")
@@ -1304,9 +1701,7 @@ async def unsubscribe_symbol(payload: Optional[Dict[str, Any]] = Body(default=No
     raw_sym = clean_query_sym or clean_payload.get("symbol") or clean_payload.get("id") or ""
     if not raw_sym:
         return JSONResponse({"error": "Symbol is required"}, status_code=400)
-    clean_sym = str(raw_sym).strip().upper()
-    if ":" not in clean_sym:
-        clean_sym = f"BINANCE:{clean_sym}" if "USDT" in clean_sym else f"NASDAQ:{clean_sym}"
+    clean_sym = normalize_symbol_id(str(raw_sym))
 
     storage = get_storage()
     try:
@@ -1363,53 +1758,86 @@ async def reorder_symbols_endpoint(payload: Optional[Dict[str, Any]] = Body(defa
     return {"status": "ok", "reordered": reordered, "count": len(clean_ids)}
 
 
+MIN_1M_HISTORY_BARS: int = 30
+ONE_MIN_SEED_COOLDOWN_SEC: float = 60.0
+ONE_MIN_INFLIGHT_WAIT_SEC: float = 3.0
+_last_1m_seed_attempt: Dict[str, float] = {}
+
+
 @app.get("/api/history")
 async def get_history(
     symbol: str = Query(default="BINANCE:BTCUSDT"),
     timeframe: str = Query(default="1m"),
     seed: bool = Query(default=False),
     backfill: bool = Query(default=False),
-    engine: str = Query(default="A")
+    engine: str = Query(default="A"),
+    limit: Optional[int] = Query(default=None, ge=1, le=5000)
 ):
     """Returns historical OHLCV bars supporting Scheme A (dual-source) and Scheme B (TradingView WebSocket series)."""
+    clean_sym = normalize_symbol_id(symbol) if is_valid_symbol_id(symbol) else symbol
     clean_tf = normalize_timeframe(timeframe, default="1m")
     if not aggregator:
-        return {"symbol": symbol, "timeframe": clean_tf, "engine": engine, "bars": []}
+        return {"symbol": clean_sym, "timeframe": clean_tf, "engine": engine, "bars": []}
+
+    def _apply_limit(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return items[-limit:] if (limit is not None and len(items) > limit) else items
 
     # Scheme B: TradingView WebSocket Native Protocol Series
     if engine.upper() in ("B", "TV_WS") and tv_client and tv_client.connected:
         try:
-            tv_bars = await tv_client.request_chart_series(symbol, timeframe=clean_tf, n_bars=300, timeout=2.0)
+            tv_bars = await tv_client.request_chart_series(clean_sym, timeframe=clean_tf, n_bars=limit or 300, timeout=2.0)
             if tv_bars and len(tv_bars) > 0:
-                return {"symbol": symbol, "timeframe": clean_tf, "engine": "B", "bars": tv_bars}
+                return {"symbol": clean_sym, "timeframe": clean_tf, "engine": "B", "bars": _apply_limit(tv_bars)}
         except Exception as e:
             logger.debug("Scheme B TV WS request error: %s", e)
 
     # Scheme A: Dual-Source High Availability (Binance for Crypto, Yahoo Finance for Equities)
     if clean_tf == "1m":
-        bars = aggregator.get_history(symbol)
-        if (not bars or backfill) and (
+        bars = aggregator.get_history(clean_sym)
+        if seed and len(bars) < MIN_1M_HISTORY_BARS:
+            pending = _inflight_history.get(f"{clean_sym}_1m")
+            if pending is not None and not pending.done():
+                try:
+                    seeded = await asyncio.wait_for(asyncio.shield(pending), timeout=ONE_MIN_INFLIGHT_WAIT_SEC)
+                except (asyncio.TimeoutError, Exception):
+                    seeded = []
+                    _last_1m_seed_attempt[clean_sym] = time.monotonic()
+                if seeded:
+                    aggregator.seed_history(clean_sym, seeded)
+                bars = aggregator.get_history(clean_sym)
+        # 伺服器啟動後才開始累積的 1m（只有幾根即時 K 棒）也要補歷史，否則畫面只會有最近幾分鐘。
+        # 每個標的最多 60 秒補一次，避免資料源本來就沒有歷史時一直重抓。
+        should_seed_short_history = (
+            bool(bars)
+            and len(bars) < MIN_1M_HISTORY_BARS
+            and (clean_sym not in _last_1m_seed_attempt or (time.monotonic() - _last_1m_seed_attempt[clean_sym]) >= ONE_MIN_SEED_COOLDOWN_SEC)
+        )
+        pending_now = _inflight_history.get(f"{clean_sym}_1m")
+        inflight_active = pending_now is not None and not pending_now.done()
+        if should_seed_short_history and seed and not inflight_active:
+            _last_1m_seed_attempt[clean_sym] = time.monotonic()
+        if (not bars or backfill or (should_seed_short_history and seed)) and not inflight_active and (
             seed
             or backfill
-            or symbol.startswith("BINANCE:")
-            or symbol in ("AMEX:SPY", "NASDAQ:QQQ", "AMEX:IWM")
-            or symbol.endswith(":SPY")
-            or symbol.endswith(":QQQ")
-            or symbol.endswith(":IWM")
+            or clean_sym.startswith("BINANCE:")
+            or clean_sym in ("AMEX:SPY", "NASDAQ:QQQ", "AMEX:IWM")
+            or clean_sym.endswith(":SPY")
+            or clean_sym.endswith(":QQQ")
+            or clean_sym.endswith(":IWM")
         ):
-            seed_bars = await fetch_universal_history(symbol, timeframe="1m")
+            seed_bars = await fetch_universal_history(clean_sym, timeframe="1m")
             if seed_bars:
-                aggregator.seed_history(symbol, seed_bars)
-                bars = aggregator.get_history(symbol)
-        if not bars:
-            cached_bars = get_storage().get_bars(symbol, timeframe="1m", limit=300)
+                aggregator.seed_history(clean_sym, seed_bars)
+                bars = aggregator.get_history(clean_sym)
+        if len(bars) < MIN_1M_HISTORY_BARS:
+            cached_bars = get_storage().get_bars(clean_sym, timeframe="1m", limit=limit or 300)
             if cached_bars:
-                aggregator.seed_history(symbol, cached_bars)
-                bars = aggregator.get_history(symbol)
-        return {"symbol": symbol, "timeframe": clean_tf, "engine": "A", "bars": bars}
+                aggregator.seed_history(clean_sym, cached_bars)
+                bars = aggregator.get_history(clean_sym)
+        return {"symbol": clean_sym, "timeframe": clean_tf, "engine": "A", "bars": _apply_limit(bars)}
 
-    bars = await fetch_universal_history(symbol, timeframe=clean_tf)
-    return {"symbol": symbol, "timeframe": clean_tf, "engine": "A", "bars": bars}
+    bars = await fetch_universal_history(clean_sym, timeframe=clean_tf)
+    return {"symbol": clean_sym, "timeframe": clean_tf, "engine": "A", "bars": _apply_limit(bars)}
 
 
 GEMINI_MODELS_CASCADE: List[str] = [
@@ -1419,11 +1847,15 @@ GEMINI_MODELS_CASCADE: List[str] = [
 ]
 
 
-async def call_gemini_generate(prompt: str, temperature: float = 0.4, max_tokens: int = 800) -> Optional[str]:
-    """Calls Gemini API with automatic model waterfall (2.5-flash -> 2.5-flash-lite -> 2.0-flash)."""
+async def call_gemini_generate_with_model(
+    prompt: str,
+    temperature: float = 0.4,
+    max_tokens: int = 800
+) -> Tuple[Optional[str], Optional[str]]:
+    """Calls Gemini API with automatic model waterfall, returning (text, model_name)."""
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if not gemini_key:
-        return None
+        return None, None
     shared = get_shared_client()
     cli = shared or httpx.AsyncClient(timeout=12.0)
     should_close = shared is None
@@ -1443,7 +1875,7 @@ async def call_gemini_generate(prompt: str, temperature: float = 0.4, max_tokens
                         parts = candidates[0].get("content", {}).get("parts", [])
                         text = "".join(p.get("text", "") for p in parts if "text" in p)
                         if text.strip():
-                            return text.strip()
+                            return text.strip(), model
                 elif res.status_code in (404, 429, 503):
                     logger.debug("Gemini model %s returned HTTP %d, cascading...", model, res.status_code)
                     continue
@@ -1453,7 +1885,45 @@ async def call_gemini_generate(prompt: str, temperature: float = 0.4, max_tokens
     finally:
         if should_close:
             await cli.aclose()
-    return None
+    return None, None
+
+
+# Per-request holder for the model that actually produced the last Gemini reply.
+# A mutable dict is stored (not the model string) so updates survive asyncio.wait_for / gather context copies.
+_gemini_model_holder = contextvars.ContextVar("gemini_model_holder", default=None)
+
+
+async def call_gemini_generate(prompt: str, temperature: float = 0.4, max_tokens: int = 800) -> Optional[str]:
+    """Calls Gemini API with automatic model waterfall (backward-compatible, text only).
+
+    Also records the successful model into the active _gemini_model_holder, if any.
+    """
+    text, model_used = await call_gemini_generate_with_model(prompt, temperature=temperature, max_tokens=max_tokens)
+    holder = _gemini_model_holder.get()
+    if isinstance(holder, dict):
+        holder["model"] = model_used if text else None
+    return text
+
+
+async def _generate_with_model_tracking(
+    prompt: str,
+    temperature: float = 0.4,
+    max_tokens: int = 800
+) -> Tuple[Optional[str], Optional[str]]:
+    """Endpoint helper: returns (text, actual_model).
+
+    Goes through call_gemini_generate so existing patches of that function keep working.
+    When the reply comes from a patched/unknown source, the model is None (unknown) — never a guessed name.
+    """
+    holder: Dict[str, Optional[str]] = {"model": None}
+    token = _gemini_model_holder.set(holder)
+    try:
+        text = await call_gemini_generate(prompt, temperature=temperature, max_tokens=max_tokens)
+    finally:
+        _gemini_model_holder.reset(token)
+    if isinstance(text, str) and text.strip():
+        return text.strip(), holder.get("model")
+    return None, None
 
 
 @app.get("/api/fundamentals")
@@ -1462,7 +1932,7 @@ async def get_fundamentals(symbol: str = Query(...), refresh: bool = Query(defau
     if not is_valid_symbol_id(symbol):
         return JSONResponse({"error": "Invalid symbol format"}, status_code=400)
 
-    clean_sym = symbol.strip().upper()
+    clean_sym = normalize_symbol_id(symbol)
     storage = get_storage()
 
     if not refresh:
@@ -1632,7 +2102,8 @@ async def get_fundamentals(symbol: str = Query(...), refresh: bool = Query(defau
             logger.debug("Metrics fallback from cached bars notice for %s: %s", ticker, fb_err)
 
     ai_summary = ""
-    model_name = "gemini-2.5-flash"
+    model_name: Optional[str] = None
+    source = "gemini"
     gemini_key = os.environ.get("GEMINI_API_KEY")
 
     if gemini_key:
@@ -1653,13 +2124,16 @@ async def get_fundamentals(symbol: str = Query(...), refresh: bool = Query(defau
 2. 【近期營收與獲利動能 (CANSLIM 標準)】
 3. 【機構籌碼與技術位階綜合評析】
 4. 【關鍵潛在風險與下檔支撐提示】"""
-            gen_text = await call_gemini_generate(prompt, temperature=0.4, max_tokens=800)
+            gen_text, actual_model = await _generate_with_model_tracking(prompt, temperature=0.4, max_tokens=800)
             if gen_text:
                 ai_summary = gen_text
+                model_name = actual_model
         except Exception as gemini_err:
             logger.debug("Gemini API call failed, generating fallback summary: %s", gemini_err)
 
     if not ai_summary:
+        model_name = None
+        source = "rule_based"
         h_diff = f"{metrics.get('pct_from_high', 'N/A')}%"
         pe_val = metrics.get('pe_ratio', 'N/A')
         rev_val = metrics.get('revenue_yoy', 'N/A')
@@ -1683,6 +2157,8 @@ async def get_fundamentals(symbol: str = Query(...), refresh: bool = Query(defau
         "metrics": metrics,
         "ai_summary": ai_summary,
         "model_used": model_name,
+        "model": model_name,
+        "source": source,
         "updated_at": int(time.time())
     }
 
@@ -1909,17 +2385,17 @@ def build_ai_agent_lens_payload(
 
 def generate_deterministic_ai_lens_decision(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Generates an offline, deterministic, expert CANSLIM / Stage 2 quantitative decision."""
-    quant = payload.get("quant_metrics", {})
+    quant = payload.get("quant_metrics", {}) if isinstance(payload, dict) else {}
+    close_p = quant.get("close")
+    ema10 = quant.get("ema10")
+    ema21 = quant.get("ema21")
+    sma50 = quant.get("sma50")
     regime = quant.get("trend_regime", "NEUTRAL")
-    close_p = quant.get("close") or 100.0
-    ema10 = quant.get("ema10") or close_p
-    ema21 = quant.get("ema21") or (close_p * 0.98)
-    sma50 = quant.get("sma50") or (close_p * 0.95)
     pct_from_high = quant.get("pct_from_52w_high", 0.0)
     vol_ratio = quant.get("volume_ratio_50") or 1.0
     rs_rating = quant.get("rs_rating")
 
-    funds = payload.get("fundamentals") or {}
+    funds = (payload.get("fundamentals") or {}) if isinstance(payload, dict) else {}
     fund_notes = []
     if funds.get("pe_ratio") is not None:
         fund_notes.append(f"PE: {funds['pe_ratio']}")
@@ -1927,7 +2403,20 @@ def generate_deterministic_ai_lens_decision(payload: Dict[str, Any]) -> Dict[str
         fund_notes.append(f"營收YoY: {funds['revenue_yoy']}")
     if funds.get("eps") is not None:
         fund_notes.append(f"EPS: {funds['eps']}")
-    fund_diag = ("、".join(fund_notes) + "。") if fund_notes else "基本面財務指標穩健，持續追蹤季報與機構籌碼動向。"
+    fund_diag = ("、".join(fund_notes) + "。") if fund_notes else "無基本面資料"
+
+    if close_p is None or ema21 is None or sma50 is None:
+        return {
+            "bias": "WAIT",
+            "confidence": 0,
+            "setup_summary": "技術面關鍵數據不足，缺乏足夠K線計算均線體系與趨勢結構。",
+            "invalidation_condition": "待完整行情數據補齊後重新評估結構點位與支撐壓力。",
+            "failure_mode": "因基礎量化數據不全，無法進行量化推論與風險定界。",
+            "fundamental_diagnosis": fund_diag,
+            "human_decision_note": "資料不足暫停交易決策，建議觀望或手動檢查標的資料完整性。",
+            "data_quality": "insufficient",
+            "source": "rule_based",
+        }
 
     if regime == "STAGE_2_STRONG_UPTREND":
         if pct_from_high >= -15.0 and (rs_rating is None or rs_rating >= 65):
@@ -1974,6 +2463,8 @@ def generate_deterministic_ai_lens_decision(payload: Dict[str, Any]) -> Dict[str
         "failure_mode": failure,
         "fundamental_diagnosis": fund_diag,
         "human_decision_note": human_note,
+        "data_quality": "ok",
+        "source": "rule_based",
     }
 
 
@@ -1984,9 +2475,7 @@ async def ai_lens_endpoint(
     refresh: bool = Query(default=False),
 ):
     """Retrieves or generates non-repainting AI Agent Lens quantitative report and decision."""
-    clean_sym = str(symbol).strip().upper() if isinstance(symbol, str) else "NASDAQ:AAPL"
-    if ":" not in clean_sym:
-        clean_sym = f"BINANCE:{clean_sym}" if "USDT" in clean_sym else f"NASDAQ:{clean_sym}"
+    clean_sym = normalize_symbol_id(symbol if isinstance(symbol, str) else "NASDAQ:AAPL")
     if not is_valid_symbol_id(clean_sym):
         return JSONResponse({"error": "Invalid symbol format"}, status_code=400)
     clean_tf = normalize_timeframe(timeframe, default="1D")
@@ -2025,7 +2514,8 @@ async def ai_lens_endpoint(
     )
 
     decision = None
-    model_name = "gemini-2.5-flash"
+    model_name: Optional[str] = None
+    source = "gemini"
     gemini_key = os.environ.get("GEMINI_API_KEY")
 
     if gemini_key:
@@ -2059,17 +2549,21 @@ SMA 50：{quant.get('sma50')} | SMA 200：{quant.get('sma200')}
   "fundamental_diagnosis": "基本面與動能綜合診斷（繁體中文）",
   "human_decision_note": "交易員執行指南（進出場與風控指引，繁體中文）"
 }}"""
-            gen_res = await call_gemini_generate(prompt, temperature=0.2, max_tokens=800)
+            gen_res, actual_model = await _generate_with_model_tracking(prompt, temperature=0.2, max_tokens=800)
             if gen_res:
                 clean_text = gen_res.strip().replace("```json", "").replace("```", "").strip()
                 parsed = json.loads(clean_text)
                 if isinstance(parsed, dict) and "bias" in parsed and "confidence" in parsed:
                     decision = parsed
+                    model_name = actual_model
+                    decision["source"] = "gemini"
         except Exception as gemini_err:
             logger.debug("Gemini AI Lens call failed, falling back to deterministic engine: %s", gemini_err)
 
     if not decision:
         decision = generate_deterministic_ai_lens_decision(lens_payload)
+        model_name = None
+        source = "rule_based"
 
     confirmed_time = (lens_payload.get("confirmed_bar") or {}).get("time") or now_ts
 
@@ -2088,6 +2582,8 @@ SMA 50：{quant.get('sma50')} | SMA 200：{quant.get('sma200')}
         "cached": False,
         "symbol": clean_sym,
         "timeframe": clean_tf,
+        "model": model_name,
+        "source": source,
         "report": {
             "symbol": clean_sym,
             "timeframe": clean_tf,
@@ -2095,12 +2591,119 @@ SMA 50：{quant.get('sma50')} | SMA 200：{quant.get('sma200')}
             "lens": lens_payload,
             "decision": decision,
             "model_used": model_name,
+            "source": source,
             "updated_at": now_ts,
         }
     }
 
 
 SCREENER_PRESETS: Dict[str, Dict[str, Any]] = {
+    "multi_filter": {
+        "id": "multi_filter",
+        "name": "🏆 多框架 Tier 1–3 旗艦",
+        "desc": "Weinstein + Deepvue + Minervini + CAN SLIM 四重框架交集共振，篩選市場最強動能領頭羊",
+        "criteria": {
+            "min_price": 15.0,
+            "min_avg_vol": 500000,
+            "min_eps_yoy": 20.0,
+            "min_rev_yoy": 20.0,
+            "min_roe": 15.0,
+            "min_volume_ratio": 1.2,
+            "min_perf_26w": 10.0,
+            "stage2_only": True,
+            "weekly_stage2_only": False,
+            "power_trend_only": False,
+            "atr_squeeze_only": False,
+            "max_atr_percentile": 30.0,
+            "expansion_breakout_only": False,
+            "mansfield_above_zero": True,
+            "min_rev_growth_yoy": None,
+            "allow_missing_fundamentals": False,
+            "hide_v6_hard": False,
+            "min_rs_rating": 80,
+            "max_pct_from_52w_high": 15.0,
+            "risk_dollar": 500.0,
+            "stop_atr_mult": 2.0,
+        }
+    },
+    "canslim_standard": {
+        "id": "canslim_standard",
+        "name": "💎 CAN SLIM 經典高成長",
+        "desc": "EPS/營收成長 >= 25% + ROE >= 17% + 距高點 15% 內，嚴格避開 7 日內財報地雷",
+        "criteria": {
+            "min_price": 15.0,
+            "min_avg_vol": 400000,
+            "min_eps_yoy": 25.0,
+            "min_rev_yoy": 25.0,
+            "min_roe": 17.0,
+            "min_volume_ratio": 1.0,
+            "min_perf_26w": 0.0,
+            "stage2_only": True,
+            "weekly_stage2_only": False,
+            "power_trend_only": False,
+            "atr_squeeze_only": False,
+            "max_atr_percentile": 30.0,
+            "expansion_breakout_only": False,
+            "mansfield_above_zero": True,
+            "min_rev_growth_yoy": 25.0,
+            "allow_missing_fundamentals": False,
+            "hide_v6_hard": True,
+            "min_rs_rating": 80,
+            "max_pct_from_52w_high": 15.0,
+            "risk_dollar": 500.0,
+            "stop_atr_mult": 2.0,
+        }
+    },
+    "minervini_sepa": {
+        "id": "minervini_sepa",
+        "name": "⚡ Minervini SEPA 趨勢範本",
+        "desc": "Stage 2 均線多頭排列 + 距 52W 高點 15% 內 + 26 週強勢上漲，允許初創生技與未有獲利公司",
+        "criteria": {
+            "min_price": 12.0,
+            "min_avg_vol": 300000,
+            "min_volume_ratio": 1.2,
+            "min_perf_26w": 15.0,
+            "stage2_only": True,
+            "weekly_stage2_only": False,
+            "power_trend_only": False,
+            "atr_squeeze_only": False,
+            "max_atr_percentile": 30.0,
+            "expansion_breakout_only": False,
+            "mansfield_above_zero": True,
+            "min_rev_growth_yoy": None,
+            "allow_missing_fundamentals": True,
+            "hide_v6_hard": False,
+            "min_rs_rating": 85,
+            "max_pct_from_52w_high": 15.0,
+            "risk_dollar": 500.0,
+            "stop_atr_mult": 2.0,
+        }
+    },
+    "weinstein_s2": {
+        "id": "weinstein_s2",
+        "name": "🌊 Weinstein 階段二放量突破",
+        "desc": "站上 50/150/200 日線並放量 1.5 倍以上 + 26 週正報酬，捕捉轉折初升段",
+        "criteria": {
+            "min_price": 10.0,
+            "min_avg_vol": 500000,
+            "min_volume_ratio": 1.5,
+            "min_perf_26w": 5.0,
+            "stage2_only": True,
+            "weekly_stage2_only": False,
+            "power_trend_only": False,
+            "atr_squeeze_only": False,
+            "max_atr_percentile": 30.0,
+            "expansion_breakout_only": False,
+            "mansfield_above_zero": True,
+            "min_rev_growth_yoy": None,
+            "allow_missing_fundamentals": True,
+            "hide_v6_hard": False,
+            "min_rs_rating": 70,
+            "max_pct_from_52w_high": 25.0,
+            "risk_dollar": 500.0,
+            "stop_atr_mult": 2.0,
+        }
+    },
     "stage2_vcp": {
         "id": "stage2_vcp",
         "name": "Minervini Stage 2 VCP 突破",
@@ -2180,7 +2783,7 @@ SCREENER_PRESETS: Dict[str, Dict[str, Any]] = {
             "risk_dollar": 500.0,
             "stop_atr_mult": 2.0,
         }
-    }
+    },
 }
 
 
@@ -2200,10 +2803,35 @@ async def scan_screener_endpoint(payload: Optional[Dict[str, Any]] = Body(defaul
     universe_type = str(clean_payload.get("universe") or "us_momentum").strip().lower()
     raw_criteria = clean_payload.get("criteria") if isinstance(clean_payload.get("criteria"), dict) else {}
 
+    errors: List[str] = []
+
+    # Safe validation of criteria values via _parse_criteria_number
+    c_min_rs = _parse_criteria_number(raw_criteria, "min_rs_rating", 70, int, min_value=0, max_value=99, errors=errors)
+    c_max_atr = _parse_criteria_number(raw_criteria, "max_atr_percentile", 20.0, float, min_value=0.0, max_value=100.0, errors=errors)
+    c_max_52w = _parse_criteria_number(raw_criteria, "max_pct_from_52w_high", 25.0, float, min_value=0.0, max_value=100.0, errors=errors)
+    c_min_vol_r = _parse_criteria_number(raw_criteria, "min_volume_ratio", 1.0, float, min_value=0.0, max_value=100.0, errors=errors)
+    c_stop_mult = _parse_criteria_number(raw_criteria, "stop_atr_mult", 2.0, float, min_value=0.0, max_value=10.0, errors=errors, exclusive_min=True)
+    c_m_len = _parse_criteria_number(raw_criteria, "mansfield_length", 252, int, min_value=10, max_value=500, errors=errors)
+
+    raw_limit_dict = clean_payload if "limit" in clean_payload else raw_criteria
+    c_limit = _parse_criteria_number(raw_limit_dict, "limit", 150, int, min_value=1, max_value=500, errors=errors)
+
+    c_min_price = _parse_criteria_number(raw_criteria, "min_price", 10.0, float, min_value=0.0, max_value=None, errors=errors)
+    c_min_avg_vol = _parse_criteria_number(raw_criteria, "min_avg_vol", 300000, int, min_value=0, max_value=None, errors=errors)
+
+    if errors:
+        return JSONResponse(
+            status_code=422,
+            content={"error": "Invalid screener criteria", "fields": sorted(list(set(errors)))}
+        )
+
     min_rev_growth: Optional[float] = None
-    if raw_criteria.get("min_rev_growth_yoy") is not None:
+    raw_rev_yoy = raw_criteria.get("min_rev_growth_yoy")
+    if raw_rev_yoy is None:
+        raw_rev_yoy = raw_criteria.get("min_rev_yoy")
+    if raw_rev_yoy is not None:
         try:
-            min_rev_growth = float(raw_criteria["min_rev_growth_yoy"])
+            min_rev_growth = float(raw_rev_yoy)
         except (ValueError, TypeError):
             min_rev_growth = None
 
@@ -2214,27 +2842,103 @@ async def scan_screener_endpoint(payload: Optional[Dict[str, Any]] = Body(defaul
         risk_dollar = 500.0
 
     criteria = ScreeningCriteria(
-        min_rs_rating=int(raw_criteria.get("min_rs_rating", 70)),
+        min_rs_rating=c_min_rs,
         mansfield_above_zero=bool(raw_criteria.get("mansfield_above_zero", True)),
         stage2_only=bool(raw_criteria.get("stage2_only", True)),
         weekly_stage2_only=bool(raw_criteria.get("weekly_stage2_only", False)),
         power_trend_only=bool(raw_criteria.get("power_trend_only", False)),
         atr_squeeze_only=bool(raw_criteria.get("atr_squeeze_only", False)),
-        max_atr_percentile=float(raw_criteria.get("max_atr_percentile", 20.0)),
+        max_atr_percentile=c_max_atr,
         expansion_breakout_only=bool(raw_criteria.get("expansion_breakout_only", False)),
-        max_pct_from_52w_high=float(raw_criteria.get("max_pct_from_52w_high", 25.0)),
-        min_volume_ratio=float(raw_criteria.get("min_volume_ratio", 1.0)),
+        max_pct_from_52w_high=c_max_52w,
+        min_volume_ratio=c_min_vol_r,
         min_rev_growth_yoy=min_rev_growth,
         risk_dollar=risk_dollar,
-        stop_atr_mult=float(raw_criteria.get("stop_atr_mult", 2.0)),
-        mansfield_length=int(raw_criteria.get("mansfield_length", 252))
+        stop_atr_mult=c_stop_mult,
+        mansfield_length=c_m_len
     )
 
     storage = get_storage()
 
+    # Ingest benchmark SPY bars for date alignment & market regime
+    bench_bars = await fetch_universal_history("AMEX:SPY", timeframe="1D")
+    if not bench_bars:
+        bench_bars = storage.get_bars("AMEX:SPY", "1D", limit=300)
+
+    bench_stage = evaluate_canslim_stage(bench_bars) if bench_bars else {}
+    bench_close = bench_stage.get("close") or 0.0
+    bench_regime = bench_stage.get("trend_regime") or "NEUTRAL"
+
     # Determine scanning candidate pool
     universe_items: List[Dict[str, Any]] = []
-    if universe_type == "watchlist":
+    if universe_type == "all_us":
+        crit_dict = {
+            "min_price": c_min_price,
+            "min_avg_vol": c_min_avg_vol,
+            "min_eps_yoy": float(raw_criteria["min_eps_yoy"]) if raw_criteria.get("min_eps_yoy") is not None else None,
+            "min_rev_yoy": float(raw_criteria["min_rev_yoy"]) if raw_criteria.get("min_rev_yoy") is not None else None,
+            "min_roe": float(raw_criteria["min_roe"]) if raw_criteria.get("min_roe") is not None else None,
+            "min_volume_ratio": c_min_vol_r,
+            "min_perf_26w": float(raw_criteria.get("min_perf_26w", 0.0)),
+            "stage2_only": bool(raw_criteria.get("stage2_only", True)),
+            "allow_missing_fundamentals": bool(raw_criteria.get("allow_missing_fundamentals", False)),
+            "min_rs_rating": c_min_rs,
+            "max_pct_from_52w_high": c_max_52w,
+            "power_trend_only": bool(raw_criteria.get("power_trend_only", False)),
+        }
+        hide_v6 = bool(raw_criteria.get("hide_v6_hard", False))
+        scan_limit = c_limit
+        start_t = time.perf_counter()
+        scan_res = await scan_all_us_stocks(
+            criteria=crit_dict,
+            risk_dollar=risk_dollar,
+            limit=scan_limit,
+            hide_v6_hard=hide_v6,
+        )
+        matched_items, total_count = scan_res
+        scan_warning = getattr(scan_res, "warning", None)
+        elapsed_ms = int((time.perf_counter() - start_t) * 1000)
+
+        today_str = current_session_date().isoformat()
+        try:
+            storage.record_screener_snapshot(today_str, matched_items)
+            symbols_to_check = [it["symbol"] for it in matched_items]
+            streaks = storage.get_screener_streaks(symbols_to_check, current_date=today_str)
+            for it in matched_items:
+                s_info = streaks.get(it["symbol"], {})
+                it["streak_days"] = s_info.get("streak_days", 0)
+                it["filter_delta"] = s_info.get("filter_delta", "NEW")
+        except Exception as exc:
+            logger.warning("Failed to record screener snapshot or get streaks: %s", exc)
+
+        matched_items.sort(
+            key=lambda x: (
+                int(x.get("filter_count") or 0),
+                float(x.get("rs_rating") or 0.0),
+                float(x.get("change_pct") or 0.0),
+            ),
+            reverse=True,
+        )
+
+        resp_payload = {
+            "status": "ok",
+            "universe": universe_type,
+            "elapsed_ms": elapsed_ms,
+            "total_scanned": total_count,
+            "matched_count": len(matched_items),
+            "benchmark_status": {
+                "symbol": "SPY",
+                "close": bench_close,
+                "regime": bench_regime,
+                "mansfield_status": "BULLISH_ABOVE_ZERO" if bench_regime.startswith("STAGE_2") else "NEUTRAL",
+            },
+            "criteria": crit_dict,
+            "items": matched_items,
+        }
+        if scan_warning:
+            resp_payload["warning"] = "全美股遠端掃描連線逾時或異常，請稍後重試（可先切換核心動能庫或自選清單）"
+        return resp_payload
+    elif universe_type == "watchlist":
         db_wl = storage.get_watchlist()
         universe_items = db_wl if db_wl else list(WATCHLIST)
     elif universe_type == "custom":
@@ -2254,15 +2958,6 @@ async def scan_screener_endpoint(payload: Optional[Dict[str, Any]] = Body(defaul
             })
     else:  # "us_momentum" default
         universe_items = list(US_MOMENTUM_UNIVERSE)
-
-    # Ingest benchmark SPY bars for date alignment & market regime
-    bench_bars = await fetch_universal_history("AMEX:SPY", timeframe="1D")
-    if not bench_bars:
-        bench_bars = storage.get_bars("AMEX:SPY", "1D", limit=300)
-
-    bench_stage = evaluate_canslim_stage(bench_bars) if bench_bars else {}
-    bench_close = bench_stage.get("close") or 0.0
-    bench_regime = bench_stage.get("trend_regime") or "NEUTRAL"
 
     if universe_type == "custom" and not universe_items:
         return {
@@ -2290,6 +2985,31 @@ async def scan_screener_endpoint(payload: Optional[Dict[str, Any]] = Body(defaul
         max_concurrency=8
     )
     elapsed_ms = int((time.perf_counter() - start_t) * 1000)
+
+    today_str = current_session_date().isoformat()
+    try:
+        for it in matched_items:
+            if "frameworks" not in it:
+                eval_res = evaluate_multi_frameworks(it)
+                it.update(eval_res)
+        storage.record_screener_snapshot(today_str, matched_items)
+        symbols_to_check = [it["symbol"] for it in matched_items]
+        streaks = storage.get_screener_streaks(symbols_to_check, current_date=today_str)
+        for it in matched_items:
+            s_info = streaks.get(it["symbol"], {})
+            it["streak_days"] = s_info.get("streak_days", 0)
+            it["filter_delta"] = s_info.get("filter_delta", "NEW")
+    except Exception as exc:
+        logger.debug("Streak/framework enrichment notice: %s", exc)
+
+    matched_items.sort(
+        key=lambda x: (
+            int(x.get("filter_count") or 0),
+            float(x.get("rs_rating") or 0.0),
+            float(x.get("change_pct") or 0.0),
+        ),
+        reverse=True,
+    )
 
     return {
         "status": "ok",
@@ -2373,6 +3093,67 @@ async def screener_ai_summary_endpoint(payload: Optional[Dict[str, Any]] = Body(
     }
 
 
+_HEATMAP_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_HEATMAP_TTL: float = 60.0
+
+
+@app.get("/api/heatmap")
+async def get_theme_heatmap_endpoint(universe: str = "themes", refresh: bool = False):
+    """Generates thematic sector heatmap with relative performance & volume metrics."""
+    universe_type = str(universe).strip().lower()
+    if universe_type not in ("themes", "watchlist"):
+        universe_type = "themes"
+
+    now = time.time()
+    if not refresh and universe_type in _HEATMAP_CACHE:
+        cached_time, cached_data = _HEATMAP_CACHE[universe_type]
+        if now - cached_time < _HEATMAP_TTL:
+            return cached_data
+
+    storage = get_storage()
+
+    universe_items: List[Dict[str, Any]] = []
+    if universe_type == "watchlist":
+        db_wl = storage.get_watchlist() if storage else []
+        universe_items = db_wl if db_wl else list(WATCHLIST)
+    else:
+        universe_items = list(US_MOMENTUM_UNIVERSE)
+
+    bench_bars = await fetch_universal_history("AMEX:SPY", timeframe="1D")
+    if not bench_bars and storage:
+        bench_bars = storage.get_bars("AMEX:SPY", "1D", limit=300)
+
+    bench_stage = evaluate_canslim_stage(bench_bars) if bench_bars else {}
+    bench_change_pct = float(bench_stage.get("change_pct") or 0.0)
+
+    evaluated_items = await fetch_heatmap_universe(
+        universe=universe_items,
+        storage_obj=storage,
+        benchmark_bars=bench_bars,
+        fetch_func=fetch_universal_history,
+        max_concurrency=8
+    )
+
+    theme_groups = build_theme_heatmap(
+        items_with_metrics=evaluated_items,
+        benchmark_change_pct=bench_change_pct
+    )
+
+    result = {
+        "status": "ok",
+        "universe": universe_type,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "benchmark": {
+            "symbol": "SPY",
+            "change_pct": round(bench_change_pct, 2)
+        },
+        "themes": theme_groups
+    }
+
+    _HEATMAP_CACHE[universe_type] = (now, result)
+    return result
+
+
 @app.post("/api/chat")
 async def chat_endpoint(payload: Optional[Dict[str, Any]] = Body(default=None)):
     """Interactive Gemini Market Copilot Chat with rich live context injection."""
@@ -2383,14 +3164,7 @@ async def chat_endpoint(payload: Optional[Dict[str, Any]] = Body(default=None)):
     if not user_msg:
         return JSONResponse({"error": "Message is required"}, status_code=400)
 
-    raw_symbol = str(payload.get("symbol") or "NASDAQ:NVDA").strip().upper()
-    if ":" not in raw_symbol:
-        if "USDT" in raw_symbol:
-            clean_sym = f"BINANCE:{raw_symbol}"
-        else:
-            clean_sym = f"NASDAQ:{raw_symbol}"
-    else:
-        clean_sym = raw_symbol
+    clean_sym = normalize_symbol_id(str(payload.get("symbol") or "NASDAQ:NVDA"))
 
     if not is_valid_symbol_id(clean_sym):
         clean_sym = "NASDAQ:NVDA"
@@ -2433,9 +3207,11 @@ async def chat_endpoint(payload: Optional[Dict[str, Any]] = Body(default=None)):
 
     full_prompt = f"{system_prompt}\n\n【交易員提問】：\n{user_msg}"
 
-    reply = await call_gemini_generate(full_prompt, temperature=0.5, max_tokens=1000)
+    reply, used_model = await _generate_with_model_tracking(full_prompt, temperature=0.5, max_tokens=1000)
+    source = "gemini" if reply else "rule_based"
 
     if not reply:
+        used_model = None
         # Robust dynamic technical & fundamental fallback
         swing_high = high_price
         swing_low = low_price
@@ -2472,7 +3248,8 @@ async def chat_endpoint(payload: Optional[Dict[str, Any]] = Body(default=None)):
         "symbol": clean_sym,
         "timeframe": clean_tf,
         "timestamp": int(time.time()),
-        "model": "gemini-2.5-flash"
+        "model": used_model,
+        "source": source
     }
 
 
@@ -2555,11 +3332,7 @@ async def recovery_endpoint(
 ):
     """Unified terminal state and historical bar recovery endpoint."""
     storage = get_storage()
-    raw_sym = str(symbol).strip().upper() if isinstance(symbol, str) else "BINANCE:BTCUSDT"
-    if ":" not in raw_sym:
-        clean_sym = f"BINANCE:{raw_sym}" if "USDT" in raw_sym else f"NASDAQ:{raw_sym}"
-    else:
-        clean_sym = raw_sym
+    clean_sym = normalize_symbol_id(symbol if isinstance(symbol, str) else "BINANCE:BTCUSDT")
     if not is_valid_symbol_id(clean_sym):
         return JSONResponse({"error": "Invalid symbol format"}, status_code=400)
     clean_tf = normalize_timeframe(timeframe, default="1D")
@@ -2591,10 +3364,13 @@ async def save_preferences_endpoint(payload: Dict[str, Any] = Body(default={})):
 
 @app.get("/api/drawings")
 async def get_drawings_endpoint(symbol: str = Query(..., description="Target stock ticker symbol")):
-    """Returns stored drawings for a given symbol."""
+    """Returns stored drawings for a given symbol (with legacy bare-ticker read fallback)."""
     storage = get_storage()
-    clean_sym = symbol.strip().upper() if symbol else ""
+    clean_sym = normalize_symbol_id(symbol)
     drawings = storage.get_drawings(clean_sym)
+    if not drawings and ":" in clean_sym:
+        bare_sym = clean_sym.split(":", 1)[1]
+        drawings = storage.get_drawings(bare_sym)
     return {"status": "ok", "symbol": clean_sym, "drawings": drawings}
 
 
@@ -2606,9 +3382,12 @@ async def save_drawing_endpoint(payload: Dict[str, Any] = Body(...)):
     if not payload.get("id") or not payload.get("symbol"):
         raise HTTPException(status_code=422, detail="Missing required fields 'id' or 'symbol'")
 
+    normalized_payload = dict(payload)
+    normalized_payload["symbol"] = normalize_symbol_id(str(payload["symbol"]))
+
     storage = get_storage()
     try:
-        saved_record = storage.save_drawing(payload)
+        saved_record = storage.save_drawing(normalized_payload)
         return {"status": "ok", "drawing": saved_record}
     except ValueError as val_err:
         raise HTTPException(status_code=409, detail=str(val_err))
@@ -2626,23 +3405,26 @@ async def delete_drawing_endpoint(drawing_id: str):
 
 @app.delete("/api/drawings")
 async def clear_drawings_endpoint(symbol: str = Query(..., description="Symbol whose drawings will be cleared")):
-    """Clears all drawings for a symbol."""
+    """Clears all drawings for a symbol (including legacy bare-ticker rows)."""
     storage = get_storage()
-    clean_sym = symbol.strip().upper() if symbol else ""
+    clean_sym = normalize_symbol_id(symbol)
     count = storage.clear_drawings(clean_sym)
+    if ":" in clean_sym:
+        count += storage.clear_drawings(clean_sym.split(":", 1)[1])
     return {"status": "ok", "symbol": clean_sym, "cleared_count": count}
 
 
 @app.websocket("/ws/live")
 async def websocket_live_endpoint(websocket: WebSocket):
     """Real-time multiplexed quote, bar, and status stream with bounded queues."""
-    if is_desktop_mode():
-        origin = websocket.headers.get("origin")
-        if not is_allowed_origin(origin):
-            logger.warning("Rejected WebSocket connection from unauthorized origin: %s", origin)
-            await websocket.close(code=1008, reason="Unauthorized origin")
-            return
+    headers = getattr(websocket, "headers", None)
+    origin = headers.get("origin") if headers else None
+    if origin and not is_allowed_origin(origin):
+        logger.warning("Rejected WebSocket connection from unauthorized origin: %s", origin)
+        await websocket.close(code=1008, reason="Unauthorized origin")
+        return
 
+    if is_desktop_mode():
         if not _dev_no_auth:
             token = websocket.query_params.get("token") or websocket.headers.get("x-session-token") or websocket.headers.get("x-terminal-token")
             if not token:
@@ -2675,13 +3457,30 @@ async def websocket_live_endpoint(websocket: WebSocket):
             except Exception as e:
                 logger.debug("Client reader error: %s", e)
 
+        async def heartbeat_sender():
+            try:
+                while True:
+                    await asyncio.sleep(WS_HEARTBEAT_INTERVAL)
+                    q = manager.client_queues.get(websocket)
+                    if q is not None:
+                        try:
+                            q.put_nowait({"type": "heartbeat", "t": time.time()})
+                        except asyncio.QueueFull:
+                            pass
+            except (asyncio.CancelledError, WebSocketDisconnect):
+                logger.debug("Heartbeat sender disconnected cleanly")
+            except Exception as e:
+                logger.debug("Heartbeat sender error: %s", e)
+
         writer_coro = manager.client_writer(websocket)
         writer_task = asyncio.create_task(writer_coro) # tracked
         reader_coro = client_reader()
         reader_task = asyncio.create_task(reader_coro) # tracked
+        heartbeat_coro = heartbeat_sender()
+        heartbeat_task = asyncio.create_task(heartbeat_coro) # tracked
 
         done, pending = await asyncio.wait(
-            [writer_task, reader_task],
+            [writer_task, reader_task, heartbeat_task],
             return_when=asyncio.FIRST_COMPLETED
         )
         for t in done:
@@ -2705,18 +3504,27 @@ async def websocket_live_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 
+class NoCacheStaticFiles(StaticFiles):
+    """回傳的靜態檔加上 Cache-Control: no-cache（仍可用 ETag 重新驗證），避免 WebView 使用舊版前端。"""
+
+    async def get_response(self, path: str, scope: Any):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 # Mount static assets directory
 if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.mount("/static", NoCacheStaticFiles(directory=str(STATIC_DIR)), name="static")
 
     @app.get("/")
     async def serve_index():
         index_file = STATIC_DIR / "index.html"
         if index_file.exists():
-            return FileResponse(index_file)
+            return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
         return JSONResponse({"error": "index.html not found"}, status_code=404)
 
-    app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="root_static")
+    app.mount("/", NoCacheStaticFiles(directory=str(STATIC_DIR), html=True), name="root_static")
 
 
 def start_parent_watchdog(server: Any) -> None:
@@ -2774,7 +3582,7 @@ def run_server(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="TradingView Real-Time Terminal Backend Server")
+    parser = argparse.ArgumentParser(description="Momentum Swing Terminal Backend Server")
     parser.add_argument(
         "--desktop-mode",
         action="store_true",

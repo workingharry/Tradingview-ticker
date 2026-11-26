@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller specification file for TradingView Real-Time Terminal Backend Server.
+"""PyInstaller specification file for Momentum Swing Terminal Backend Server.
 
 Packages server.py and its dependencies (engine, FastAPI, Uvicorn, websockets, httpx, certifi)
 into a standalone macOS binary bundle using --onedir mode for low startup latency and
@@ -56,7 +56,10 @@ hiddenimports = [
     "engine.storage",
     "engine.providers",
     "engine.screener",
+    "engine.market_scanner",
+    "engine.market_time",
     "engine.pine_engine",
+    "zoneinfo",
     "sqlite3",
     "certifi",
     "httpx",

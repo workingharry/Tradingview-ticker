@@ -1,8 +1,8 @@
 [package]
-name = "tradingview-terminal"
-version = "1.0.0"
-description = "TradingView Real-Time Terminal macOS Desktop Application"
-authors = ["TradingView Terminal Team"]
+name = "momentum-swing-terminal"
+version = "1.1.0"
+description = "Momentum Swing Terminal macOS Desktop Application"
+authors = ["Momentum Swing Terminal Team"]
 edition = "2021"
 
 [lib]

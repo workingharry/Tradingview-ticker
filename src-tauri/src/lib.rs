@@ -5,10 +5,69 @@ use std::sync::{Arc, Mutex};
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
-use tauri::{AppHandle, Manager, State, Url};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 
 const TRAY_ID: &str = "main-tray";
+const TRAY_TITLE_NORMAL: &str = "MST 📈";
+const TRAY_TITLE_ECO: &str = "MST 🔋";
+
+const LEGACY_APP_IDENTIFIER: &str = "com.tradingview.terminal";
+const CURRENT_APP_IDENTIFIER: &str = "com.harryng.momentum-terminal";
+
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copies a legacy identifier directory to the new location on first launch, keeping legacy intact.
+pub fn migrate_legacy_dir_if_missing(legacy: &std::path::Path, target: &std::path::Path) -> bool {
+    if !legacy.exists() || target.exists() {
+        return false;
+    }
+    if let Err(err) = copy_dir_recursive(legacy, target) {
+        log::warn!(
+            "Failed to migrate legacy data from {:?} to {:?}: {}",
+            legacy,
+            target,
+            err
+        );
+        return false;
+    }
+    log::info!(
+        "Migrated legacy app data from {:?} to {:?} (legacy preserved)",
+        legacy,
+        target
+    );
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn migrate_legacy_mac_dirs() {
+    if let Ok(home) = std::env::var("HOME") {
+        let home_path = PathBuf::from(home);
+        let library = home_path.join("Library");
+        for sub in ["Application Support", "WebKit"] {
+            let legacy = library.join(sub).join(LEGACY_APP_IDENTIFIER);
+            let target = library.join(sub).join(CURRENT_APP_IDENTIFIER);
+            migrate_legacy_dir_if_missing(&legacy, &target);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn migrate_legacy_mac_dirs() {}
 
 pub struct DesktopSession {
     pub port: u16,
@@ -24,11 +83,28 @@ pub struct AppState {
 
 pub type SidecarState = AppState;
 
+fn terminate_child_gracefully(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id().to_string();
+        let _ = Command::new("kill").args(["-TERM", &pid]).status();
+        for _ in 0..15 {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(_) => break,
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 impl Drop for AppState {
     fn drop(&mut self) {
         if let Ok(mut guard) = self.sidecar_child.lock() {
             if let Some(mut child) = guard.take() {
-                let _ = child.kill();
+                terminate_child_gracefully(&mut child);
             }
         }
     }
@@ -38,8 +114,8 @@ pub fn terminate_sidecar<R: tauri::Runtime>(app: &AppHandle<R>) {
     if let Some(state) = app.try_state::<AppState>() {
         if let Ok(mut guard) = state.sidecar_child.lock() {
             if let Some(mut child) = guard.take() {
-                log::info!("Terminating Python sidecar process...");
-                let _ = child.kill();
+                log::info!("Terminating Python sidecar process gracefully...");
+                terminate_child_gracefully(&mut child);
             }
         }
     }
@@ -209,7 +285,8 @@ fn launch_sidecar(state: &AppState) -> Result<(u16, String), String> {
         for line_result in reader.lines() {
             match line_result {
                 Ok(line) => {
-                    if line.contains("TOKEN=") {
+                    let upper = line.to_uppercase();
+                    if upper.contains("TOKEN=") {
                         log::info!("[Sidecar stdout] SERVER_READY (token redacted)");
                     } else {
                         log::info!("[Sidecar stdout] {}", line);
@@ -296,9 +373,8 @@ fn toggle_battery_saver(state: State<'_, AppState>) -> Result<bool, String> {
 
     let tray_guard = state.tray.lock().unwrap();
     if let Some(ref tray) = *tray_guard {
-        if is_active {
-            let _ = tray.set_title(Some("TV 🔋".to_string()));
-        }
+        let title = if is_active { TRAY_TITLE_ECO } else { TRAY_TITLE_NORMAL };
+        let _ = tray.set_title(Some(title.to_string()));
     }
     Ok(is_active)
 }
@@ -339,6 +415,7 @@ fn set_always_on_top(window: tauri::WebviewWindow, enabled: bool) -> Result<bool
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    migrate_legacy_mac_dirs();
     let app_state = AppState::new();
 
     tauri::Builder::default()
@@ -350,14 +427,14 @@ pub fn run() {
             let state = app.state::<AppState>();
 
             // 1. Launch the supervised Python sidecar process
-            let (port, token) = match launch_sidecar(&state) {
+            let (port, _token) = match launch_sidecar(&state) {
                 Ok(res) => res,
                 Err(err) => {
                     log::error!("Failed to launch sidecar: {}", err);
                     eprintln!("CRITICAL ERROR: Failed to launch sidecar: {}", err);
                     let _ = app.notification()
                         .builder()
-                        .title("TradingView Terminal Error")
+                        .title("Momentum Swing Terminal Error")
                         .body(format!("Failed to start backend engine: {}", err))
                         .show();
                     return Err(Box::new(std::io::Error::new(
@@ -387,8 +464,8 @@ pub fn run() {
 
             let tray = TrayIconBuilder::with_id(TRAY_ID)
                 .menu(&tray_menu)
-                .title("TV 📈")
-                .tooltip("TradingView Real-Time Terminal")
+                .title(TRAY_TITLE_NORMAL)
+                .tooltip("Momentum Swing Terminal")
                 .on_menu_event(move |app_handle, event| match event.id.as_ref() {
                     "open" => {
                         if let Some(window) = app_handle.get_webview_window("main") {
@@ -406,7 +483,7 @@ pub fn run() {
                         let state = app_handle.state::<AppState>();
                         let guard = state.tray.lock().unwrap();
                         if let Some(ref t) = *guard {
-                            let title = if active { "TV 🔋" } else { "TV 📈" };
+                            let title = if active { TRAY_TITLE_ECO } else { TRAY_TITLE_NORMAL };
                             let _ = t.set_title(Some(title.to_string()));
                         }
                     }
@@ -420,14 +497,9 @@ pub fn run() {
 
             *state.tray.lock().unwrap() = Some(tray);
 
-            // 3. Configure the main webview window to target loopback endpoint with token
-            if let Some(window) = app.get_webview_window("main") {
-                let target_url = format!("http://127.0.0.1:{}/?token={}&port={}", port, token, port);
-                log::info!("Navigating main webview to: http://127.0.0.1:{}/", port);
-                if let Ok(parsed_url) = target_url.parse::<Url>() {
-                    let _ = window.navigate(parsed_url);
-                }
-            }
+            // 3. Let Tauri serve the bundled frontend/dist (or Vite devUrl in dev);
+            // frontend/src/api/client.ts retrieves dynamic port & token via get_session_info IPC.
+            log::info!("Main webview ready; backend API listening on http://127.0.0.1:{}", port);
 
             Ok(())
         })
@@ -501,5 +573,38 @@ mod tests {
         assert!(found.is_some(), "resolve_sidecar_executable should locate the sidecar in dist or src-tauri/bin");
         let path = found.unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn test_migrate_legacy_dir_copies_once_and_preserves_original() {
+        let base = std::env::temp_dir().join(format!(
+            "mst_legacy_mig_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let legacy = base.join("com.tradingview.terminal");
+        let target = base.join("com.harryng.momentum-terminal");
+        std::fs::create_dir_all(legacy.join("WebsiteData")).unwrap();
+        std::fs::write(legacy.join("WebsiteData").join("local.db"), b"legacy-data").unwrap();
+
+        assert!(migrate_legacy_dir_if_missing(&legacy, &target));
+        assert_eq!(
+            std::fs::read(target.join("WebsiteData").join("local.db")).unwrap(),
+            b"legacy-data"
+        );
+        // Legacy preserved untouched
+        assert!(legacy.join("WebsiteData").join("local.db").exists());
+
+        // Never overwrites existing target
+        std::fs::write(target.join("WebsiteData").join("local.db"), b"new-data").unwrap();
+        assert!(!migrate_legacy_dir_if_missing(&legacy, &target));
+        assert_eq!(
+            std::fs::read(target.join("WebsiteData").join("local.db")).unwrap(),
+            b"new-data"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

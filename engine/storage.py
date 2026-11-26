@@ -8,17 +8,55 @@ import sys
 import os
 import math
 import json
+import shutil
 import time
 import sqlite3
 import threading
 import logging
+from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Sequence, Union
 
 logger = logging.getLogger("tradingview.storage")
 
-DEFAULT_STORAGE_DIR = Path.home() / "Library" / "Application Support" / "com.tradingview.terminal"
+LEGACY_STORAGE_DIR = Path.home() / "Library" / "Application Support" / "com.tradingview.terminal"
+DEFAULT_STORAGE_DIR = Path.home() / "Library" / "Application Support" / "com.harryng.momentum-terminal"
 DEFAULT_STORAGE_PATH = DEFAULT_STORAGE_DIR / "terminal.sqlite"
+
+
+def migrate_legacy_storage(
+    legacy_dir: Optional[Path] = None,
+    new_dir: Optional[Path] = None,
+) -> bool:
+    """Copies legacy SQLite database files to the new identifier directory on first launch.
+
+    Preserves all legacy files untouched. Returns True if migration performed a copy.
+    """
+    src_dir = Path(legacy_dir) if legacy_dir is not None else LEGACY_STORAGE_DIR
+    dst_dir = Path(new_dir) if new_dir is not None else DEFAULT_STORAGE_DIR
+
+    src_db = src_dir / "terminal.sqlite"
+    dst_db = dst_dir / "terminal.sqlite"
+
+    if not src_db.is_file() or dst_db.exists():
+        return False
+
+    try:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        for sidecar_suffix in ("-wal", "-shm"):
+            sidecar_src = src_dir / f"terminal.sqlite{sidecar_suffix}"
+            sidecar_dst = dst_dir / f"terminal.sqlite{sidecar_suffix}"
+            if sidecar_src.is_file() and not sidecar_dst.exists():
+                shutil.copy2(sidecar_src, sidecar_dst)
+
+        tmp_dst = dst_dir / "terminal.sqlite.migrating"
+        shutil.copy2(src_db, tmp_dst)
+        os.replace(tmp_dst, dst_db)
+        logger.info("Migrated legacy SQLite storage from %s to %s (legacy preserved)", src_db, dst_db)
+        return True
+    except OSError as exc:
+        logger.warning("Failed to migrate legacy storage from %s to %s: %s", src_db, dst_db, exc)
+        return False
 
 
 def get_default_db_path() -> Path:
@@ -29,6 +67,7 @@ def get_default_db_path() -> Path:
     if "pytest" in sys.modules or "unittest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST"):
         import tempfile
         return (Path(tempfile.gettempdir()) / "tradingview_test_terminal.sqlite").resolve()
+    migrate_legacy_storage()
     return DEFAULT_STORAGE_PATH.resolve()
 
 
@@ -199,6 +238,25 @@ class Storage:
             drawing_cols = {str(row[1]).lower() for row in cursor.fetchall()}
             if "revision" not in drawing_cols:
                 self._conn.execute("ALTER TABLE drawings ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;")
+            self._conn.commit()
+
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS screener_snapshots (
+                    scan_date TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    filter_count INTEGER NOT NULL,
+                    frameworks TEXT NOT NULL,
+                    tier TEXT NOT NULL,
+                    close REAL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (scan_date, symbol)
+                );
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_screener_snapshots_sym_date ON screener_snapshots(symbol, scan_date DESC);"
+            )
             self._conn.commit()
 
     @property
@@ -858,6 +916,115 @@ class Storage:
             )
             self._conn.commit()
             return cursor.rowcount
+
+    def record_screener_snapshot(self, scan_date: str, items: Sequence[Dict[str, Any]]) -> int:
+        """Records daily screener snapshot items for streak tracking."""
+        if self._closed:
+            raise RuntimeError("Cannot write to closed storage")
+        if not items:
+            return 0
+        now_iso = datetime.now(timezone.utc).isoformat()
+        records = []
+        for item in items:
+            sym = str(item.get("symbol") or "").strip().upper()
+            if not sym:
+                continue
+            fc = int(item.get("filter_count") or 0)
+            fw = item.get("frameworks") or []
+            if isinstance(fw, (list, tuple, set)):
+                fw_str = json.dumps(list(fw))
+            else:
+                fw_str = str(fw)
+            tier = str(item.get("tier") or "Watch")
+            close = float(item.get("close") or 0.0)
+            records.append((scan_date, sym, fc, fw_str, tier, close, now_iso))
+
+        with self._lock:
+            self._conn.executemany(
+                """
+                INSERT OR REPLACE INTO screener_snapshots (
+                    scan_date, symbol, filter_count, frameworks, tier, close, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?);
+                """,
+                records,
+            )
+            self._conn.commit()
+        return len(records)
+
+    def get_screener_streaks(
+        self,
+        symbols: Sequence[str],
+        current_date: Optional[str] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Computes consecutive streak days and filter count delta for given symbols."""
+        if self._closed:
+            raise RuntimeError("Cannot read from closed storage")
+        if not symbols:
+            return {}
+
+        sym_list = [str(s).strip().upper() for s in symbols if str(s).strip()]
+        if not sym_list:
+            return {}
+
+        from engine.market_time import current_session_date
+        c_date = current_date or current_session_date().isoformat()
+
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT DISTINCT scan_date FROM screener_snapshots WHERE scan_date <= ? ORDER BY scan_date DESC;",
+                (c_date,),
+            )
+            distinct_dates = [r[0] for r in cursor.fetchall()]
+
+            if not distinct_dates:
+                return {sym: {"streak_days": 0, "filter_delta": "NEW"} for sym in sym_list}
+
+            placeholders = ",".join("?" for _ in sym_list)
+            query = f"""
+                SELECT symbol, scan_date, filter_count, tier
+                FROM screener_snapshots
+                WHERE symbol IN ({placeholders}) AND scan_date <= ?
+                ORDER BY scan_date DESC;
+            """
+            cursor.execute(query, (*sym_list, c_date))
+            rows = cursor.fetchall()
+
+        sym_records: Dict[str, Dict[str, int]] = {}
+        for sym, s_date, fc, _ in rows:
+            if sym not in sym_records:
+                sym_records[sym] = {}
+            sym_records[sym][s_date] = int(fc)
+
+        results: Dict[str, Dict[str, Any]] = {}
+        target_date = distinct_dates[0]
+        prev_date = distinct_dates[1] if len(distinct_dates) > 1 else None
+
+        for sym in sym_list:
+            history = sym_records.get(sym, {})
+            if target_date in history:
+                curr_fc = history[target_date]
+                if prev_date is not None and prev_date in history:
+                    prev_fc = history[prev_date]
+                    diff = curr_fc - prev_fc
+                    delta_str = f"+{diff}" if diff > 0 else (str(diff) if diff < 0 else "0")
+                else:
+                    delta_str = "NEW"
+
+                if curr_fc < 2:
+                    streak = 0
+                else:
+                    streak = 1
+                    for past_d in distinct_dates[1:]:
+                        if past_d in history and history[past_d] >= 2:
+                            streak += 1
+                        else:
+                            break
+                results[sym] = {"streak_days": streak, "filter_delta": delta_str}
+            else:
+                results[sym] = {"streak_days": 0, "filter_delta": "NEW"}
+
+        return results
 
     def close(self) -> None:
         """Closes the underlying SQLite connection idempotently with WAL flush."""

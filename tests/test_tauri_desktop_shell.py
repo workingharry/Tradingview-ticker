@@ -48,8 +48,8 @@ class TestTauriDesktopShellConfiguration(unittest.TestCase):
         with open(conf_path, "r", encoding="utf-8") as f:
             conf = json.load(f)
 
-        self.assertEqual(conf.get("identifier"), "com.tradingview.terminal")
-        self.assertEqual(conf.get("productName"), "TradingView Terminal")
+        self.assertEqual(conf.get("identifier"), "com.harryng.momentum-terminal")
+        self.assertEqual(conf.get("productName"), "Momentum Swing Terminal")
 
         app_config = conf.get("app", {})
         windows = app_config.get("windows", [])
@@ -135,17 +135,17 @@ class TestTauriDesktopShellConfiguration(unittest.TestCase):
             env=dict(os.environ, PATH=f"{Path.home()}/.cargo/bin:{os.environ.get('PATH', '')}"),
         )
         self.assertEqual(res.returncode, 0, f"Cargo test failed: {res.stderr}")
-        self.assertIn("3 passed", res.stdout)
+        self.assertIn("4 passed", res.stdout)
 
     def test_release_binary_and_dmg_artifacts_exist_and_bounded(self):
         """Validates that compiled release binary and DMG installer satisfy strict size contracts (< 30 MB / < 50 MB)."""
-        release_bin = SRC_TAURI_DIR / "target" / "release" / "tradingview-terminal"
-        self.assertTrue(release_bin.exists(), "Release binary must exist at src-tauri/target/release/tradingview-terminal")
+        release_bin = SRC_TAURI_DIR / "target" / "release" / "momentum-swing-terminal"
+        self.assertTrue(release_bin.exists(), "Release binary must exist at src-tauri/target/release/momentum-swing-terminal")
         bin_size_mb = release_bin.stat().st_size / (1024 * 1024)
         self.assertLess(bin_size_mb, 30.0, f"Release binary size exceeds 30 MB: {bin_size_mb:.2f} MB")
         self.assertGreater(bin_size_mb, 5.0, f"Release binary size suspiciously small: {bin_size_mb:.2f} MB")
 
-        dmg_path = SRC_TAURI_DIR / "target" / "release" / "bundle" / "dmg" / "TradingView Terminal_1.0.0_aarch64.dmg"
+        dmg_path = SRC_TAURI_DIR / "target" / "release" / "bundle" / "dmg" / "Momentum Swing Terminal_1.1.0_aarch64.dmg"
         if not dmg_path.exists():
             self.skipTest("DMG installer artifact generated during release bundling (bundle_dmg.sh)")
         dmg_size_mb = dmg_path.stat().st_size / (1024 * 1024)
@@ -240,7 +240,7 @@ class TestTauriDesktopShellConfiguration(unittest.TestCase):
         self.assertIn("127.0.0.1:54321/ws/live?token=sec_token_abc", data["lastSocketUrl"])
         self.assertTrue(data["wasFirstSocketClosed"], "First socket must be closed on new session handshake")
         self.assertIn("127.0.0.1:54322/ws/live?token=sec_token_def", data["secondSocketUrl"])
-        self.assertEqual(data["statusText"], "CONNECTED")
+        self.assertIn(data["statusText"], ("CONNECTED", "已連線"))
 
 
 if __name__ == "__main__":

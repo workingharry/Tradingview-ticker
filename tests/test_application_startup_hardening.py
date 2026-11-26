@@ -141,7 +141,7 @@ class TestApplicationStartupHardening(unittest.TestCase):
             self.skipTest("target/debug/server not present; build first")
         res = subprocess.run([str(launcher), "--help"], capture_output=True, text=True, timeout=10)
         self.assertEqual(res.returncode, 0)
-        self.assertIn("TradingView Real-Time Terminal Backend Server", res.stdout)
+        self.assertIn("Momentum Swing Terminal Backend Server", res.stdout)
 
     def test_dotenv_isolation_and_invalid_ca_rejection(self):
         """Validates that home .env files cannot pollute ephemeral desktop mode flags or set invalid CA paths."""

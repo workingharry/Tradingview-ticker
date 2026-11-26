@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build script for packaging TradingView Real-Time Terminal Python backend sidecar.
+"""Build script for packaging Momentum Swing Terminal Python backend sidecar.
 
 Packages server.py and its dependencies (engine, FastAPI, Uvicorn, websockets, httpx, certifi)
 into a standalone macOS binary bundle using PyInstaller with --onedir mode, ensuring low
@@ -56,7 +56,10 @@ REQUIRED_HIDDEN_IMPORTS = [
     "engine.storage",
     "engine.providers",
     "engine.screener",
+    "engine.market_scanner",
+    "engine.market_time",
     "engine.pine_engine",
+    "zoneinfo",
     "sqlite3",
     "certifi",
     "httpx",
@@ -638,7 +641,7 @@ fi
 def package_dmg(
     app_path: Path,
     output_dmg: Path,
-    volname: str = "TradingView Terminal",
+    volname: str = "Momentum Swing Terminal",
     icon_path: Optional[Path] = None,
 ) -> bool:
     """Packages a signed macOS .app bundle into a DMG disk image with an /Applications symlink."""
@@ -681,7 +684,7 @@ def package_dmg(
 
 def main() -> int:
     """CLI entry point for sidecar packaging script."""
-    parser = argparse.ArgumentParser(description="Package TradingView Terminal Backend Sidecar")
+    parser = argparse.ArgumentParser(description="Package Momentum Swing Terminal Backend Sidecar")
     parser.add_argument("--dist-dir", type=Path, default=None, help="Directory for build output (default: dist/)")
     parser.add_argument("--bundle-name", type=str, default=None, help="Output bundle folder name")
     parser.add_argument("--target-triple", type=str, default=None, help="Explicit target triple (e.g. aarch64-apple-darwin)")

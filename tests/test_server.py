@@ -129,7 +129,7 @@ class TestServerEndpoints(unittest.TestCase):
         with TestClient(app) as client:
             resp = client.get("/")
             self.assertEqual(resp.status_code, 200)
-            self.assertIn("TradingView Real-Time Terminal", resp.text)
+            self.assertIn("Momentum Swing Terminal", resp.text)
             self.assertIn("chartContainer", resp.text)
 
     def test_static_asset_serving(self):
@@ -518,46 +518,127 @@ class TestTenDefectsRegression(unittest.TestCase):
     def test_fetch_historical_bars_timeframe_normalization_and_casing(self):
         """Ponytail finding 2: Verifies that lowercase or mixed-case timeframes (e.g. 1d, 1M) are canonicalized in cache lookup and persistence."""
         import time
+        from datetime import date, datetime, time as dt_time
         from unittest import mock
         from server import fetch_historical_bars, get_storage
+        from engine.market_time import NY_TZ
         storage = get_storage()
-        now_ts = int(time.time())
+        # 第 1 段 S1-02: freshness is now decided by US session rules, not wall-clock age.
+        # Pin the clock to a fixed closed session so this test no longer passes only on weekends.
+        session_date = date(2026, 11, 20)  # Friday
+        close_ts = int(datetime.combine(session_date, dt_time(16, 0), tzinfo=NY_TZ).timestamp())
+        eval_ts = close_ts + 3600  # Fri 17:00 ET, market closed
         fake_bars = [
-            {"time": now_ts - ((250 - i) * 86400), "open": 200.0, "high": 205.0, "low": 199.0, "close": 204.0, "volume": 50000.0}
+            {"time": close_ts - ((249 - i) * 86400), "open": 200.0, "high": 205.0, "low": 199.0, "close": 204.0, "volume": 50000.0}
             for i in range(250)
         ]
         test_sym = f"NASDAQ:TESTNORM_{int(time.time() * 1000)}"
         # Saved under canonical "1D"
         storage.save_bars(test_sym, "1D", fake_bars)
+        # This process fetched the series after the close -> the cache is fresh.
+        server._last_remote_fetch[(test_sym, "1D")] = float(close_ts + 600)
 
-        with mock.patch("server.fetch_yahoo_history") as mock_yahoo:
-            mock_yahoo.side_effect = RuntimeError("Network call should not happen when cached under canonical timeframe")
-            # Query with lowercase "1d"
-            bars = asyncio.run(fetch_historical_bars(test_sym, timeframe="1d", limit=250))
-            self.assertEqual(len(bars), 250)
-            self.assertEqual(bars[-1]["close"], 204.0)
-            mock_yahoo.assert_not_called()
+        try:
+            with mock.patch("server.fetch_yahoo_history") as mock_yahoo, \
+                 mock.patch("server.is_regular_session_open", return_value=False), \
+                 mock.patch("server.last_completed_session_date", return_value=session_date), \
+                 mock.patch("server.time.time", return_value=eval_ts):
+                mock_yahoo.side_effect = RuntimeError("Network call should not happen when cached under canonical timeframe")
+                # Query with lowercase "1d"
+                bars = asyncio.run(fetch_historical_bars(test_sym, timeframe="1d", limit=250))
+                self.assertEqual(len(bars), 250)
+                self.assertEqual(bars[-1]["close"], 204.0)
+                mock_yahoo.assert_not_called()
+        finally:
+            server._last_remote_fetch.pop((test_sym, "1D"), None)
 
     def test_connection_cache_first_history_serves_fresh_sqlite_bars(self):
         """TDD Seam 2: Verifies that when SQLite has fresh cached bars, fetch_historical_bars serves them without remote network fetch."""
         import time
+        from datetime import date, datetime, time as dt_time
         from unittest import mock
         from server import fetch_historical_bars, get_storage
+        from engine.market_time import NY_TZ
         storage = get_storage()
-        now_ts = int(time.time())
+        # 第 1 段 S1-02: pin the clock to a fixed closed session (see the test above).
+        session_date = date(2026, 11, 20)  # Friday
+        close_ts = int(datetime.combine(session_date, dt_time(16, 0), tzinfo=NY_TZ).timestamp())
+        eval_ts = close_ts + 3600  # Fri 17:00 ET, market closed
         fake_bars = [
-            {"time": now_ts - ((250 - i) * 86400), "open": 100.0, "high": 105.0, "low": 99.0, "close": 105.5, "volume": 100000.0}
+            {"time": close_ts - ((249 - i) * 86400), "open": 100.0, "high": 105.0, "low": 99.0, "close": 105.5, "volume": 100000.0}
             for i in range(250)
         ]
         test_sym = f"NASDAQ:TESTFRESH_{int(time.time() * 1000)}"
         storage.save_bars(test_sym, "1D", fake_bars)
+        server._last_remote_fetch[(test_sym, "1D")] = float(close_ts + 600)
 
-        with mock.patch("server.fetch_yahoo_history") as mock_yahoo:
-            mock_yahoo.side_effect = RuntimeError("Network call should not be made when cache is fresh")
-            bars = asyncio.run(fetch_historical_bars(test_sym, timeframe="1D", limit=250))
-            self.assertEqual(len(bars), 250)
-            self.assertEqual(bars[-1]["close"], 105.5)
-            mock_yahoo.assert_not_called()
+        try:
+            with mock.patch("server.fetch_yahoo_history") as mock_yahoo, \
+                 mock.patch("server.is_regular_session_open", return_value=False), \
+                 mock.patch("server.last_completed_session_date", return_value=session_date), \
+                 mock.patch("server.time.time", return_value=eval_ts):
+                mock_yahoo.side_effect = RuntimeError("Network call should not be made when cache is fresh")
+                bars = asyncio.run(fetch_historical_bars(test_sym, timeframe="1D", limit=250))
+                self.assertEqual(len(bars), 250)
+                self.assertEqual(bars[-1]["close"], 105.5)
+                mock_yahoo.assert_not_called()
+        finally:
+            server._last_remote_fetch.pop((test_sym, "1D"), None)
+
+    def test_normalize_symbol_id_consistency(self):
+        """Verifies canonical EXCHANGE:TICKER normalization across equities, ETFs, and crypto."""
+        self.assertEqual(server.normalize_symbol_id("nvda"), "NASDAQ:NVDA")
+        self.assertEqual(server.normalize_symbol_id("SPY"), "AMEX:SPY")
+        self.assertEqual(server.normalize_symbol_id("PLTR"), "NYSE:PLTR")
+        self.assertEqual(server.normalize_symbol_id("btcusdt"), "BINANCE:BTCUSDT")
+        self.assertEqual(server.normalize_symbol_id("NYSE:KO"), "NYSE:KO")
+        self.assertEqual(server.normalize_symbol_id(""), "")
+
+    def test_get_history_normalizes_bare_symbol_and_honors_limit(self):
+        """Verifies /api/history normalizes bare tickers and slices output to the requested limit."""
+        with patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=list(MOCK_BINANCE_BARS)), \
+             patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
+             patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock):
+            with TestClient(app) as client:
+                resp = client.get("/api/history?symbol=BTCUSDT&timeframe=1m&limit=4")
+                self.assertEqual(resp.status_code, 200)
+                data = resp.json()
+                self.assertEqual(data["symbol"], "BINANCE:BTCUSDT")
+                self.assertLessEqual(len(data["bars"]), 4)
+
+    def test_ws_bar_broadcast_includes_monotonic_seq_only_for_bars(self):
+        """Verifies bar broadcasts include monotonically increasing per-symbol seq while quotes do not."""
+        mgr = ConnectionManager(max_queue_size=10)
+        self.assertEqual(mgr.next_bar_seq("NASDAQ:NVDA"), 1)
+        self.assertEqual(mgr.next_bar_seq("NASDAQ:NVDA"), 2)
+        self.assertEqual(mgr.next_bar_seq("AMEX:SPY"), 1)
+
+        with patch("server.fetch_binance_history", new_callable=AsyncMock, return_value=list(MOCK_BINANCE_BARS)), \
+             patch("engine.client.TradingViewAsyncClient.start", new_callable=AsyncMock), \
+             patch("engine.client.TradingViewAsyncClient.stop", new_callable=AsyncMock):
+            with TestClient(app) as client:
+                with client.websocket_connect("/ws/live") as websocket:
+                    initial = websocket.receive_json()
+                    self.assertEqual(initial["type"], "status")
+
+                    bar1 = CandlestickBar(time=1731234000, open=100.0, high=101.0, low=99.0, close=100.5, volume=10.0)
+                    bar2 = CandlestickBar(time=1731234060, open=100.5, high=102.0, low=100.0, close=101.5, volume=12.0)
+                    server.on_bar_update_handler("NASDAQ:NVDA", bar1)
+                    server.on_bar_update_handler("NASDAQ:NVDA", bar2)
+
+                    msg1 = websocket.receive_json()
+                    msg2 = websocket.receive_json()
+                    self.assertEqual(msg1["type"], "bar")
+                    self.assertEqual(msg2["type"], "bar")
+                    self.assertIsInstance(msg1.get("seq"), int)
+                    self.assertEqual(msg2.get("seq"), msg1["seq"] + 1)
+
+                    server.on_quote_update_handler("NASDAQ:NVDA", {"price": 102.0, "volume": 500.0, "time": 1731234065})
+                    q_msg = websocket.receive_json()
+                    if q_msg.get("type") == "bar":
+                        q_msg = websocket.receive_json()
+                    self.assertEqual(q_msg["type"], "quote")
+                    self.assertNotIn("seq", q_msg)
 
 
 if __name__ == "__main__":

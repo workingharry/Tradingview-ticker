@@ -311,7 +311,7 @@ class TestBuildSidecarScript(unittest.TestCase):
                 # Verify invoking launcher with --help succeeds
                 res = subprocess.run([str(launcher), "--help"], capture_output=True, text=True, timeout=25)
                 self.assertEqual(res.returncode, 0)
-                self.assertIn("TradingView Real-Time Terminal Backend Server", res.stdout)
+                self.assertIn("Momentum Swing Terminal Backend Server", res.stdout)
         finally:
             import shutil
             shutil.rmtree(test_tauri_dir, ignore_errors=True)
@@ -383,7 +383,7 @@ class TestBuildSidecarScript(unittest.TestCase):
             # Invoke launcher from inside Contents/MacOS
             res = subprocess.run([str(app_server), "--help"], capture_output=True, text=True, timeout=25)
             self.assertEqual(res.returncode, 0)
-            self.assertIn("TradingView Real-Time Terminal Backend Server", res.stdout)
+            self.assertIn("Momentum Swing Terminal Backend Server", res.stdout)
         finally:
             import shutil
             shutil.rmtree(test_dir, ignore_errors=True)
@@ -462,7 +462,7 @@ class TestPackagedSidecarBinaryIntegration(unittest.TestCase):
             timeout=25,
         )
         self.assertEqual(result.returncode, 0, f"Binary exited with code {result.returncode}: {result.stderr}")
-        self.assertIn("TradingView Real-Time Terminal Backend Server", result.stdout)
+        self.assertIn("Momentum Swing Terminal Backend Server", result.stdout)
         self.assertIn("--desktop-mode", result.stdout)
         self.assertIn("--port", result.stdout)
         self.assertIn("--token", result.stdout)
