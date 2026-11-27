@@ -1311,6 +1311,7 @@ if (typeof globalThis !== "undefined") {
   var currentDrawTool = "cursor";
   var drawings = [];
   var drawingInProgress = null;
+  var activeDragDraw = null;
   var isDraggingHandle = null;
 
   var _lastCoordClose = null;
@@ -1360,6 +1361,7 @@ if (typeof globalThis !== "undefined") {
   function resetDrawToolToCursor() {
     currentDrawTool = "cursor";
     drawingInProgress = null;
+    activeDragDraw = null;
     var allDrawBtns = document.querySelectorAll ? document.querySelectorAll(".draw-tool-btn[data-tool]:not(.draw-tool-toggle)") : [];
     for (var dti = 0; dti < allDrawBtns.length; dti++) {
       allDrawBtns[dti].classList.toggle("active", allDrawBtns[dti].getAttribute("data-tool") === "cursor");
@@ -9636,6 +9638,7 @@ function initEventListeners() {
     } else if (e.key === "Escape") {
       if (drawingInProgress) {
         drawingInProgress = null;
+        activeDragDraw = null;
         if (typeof renderDrawingCanvas === "function") renderDrawingCanvas();
         return;
       }
@@ -9742,6 +9745,7 @@ function initEventListeners() {
         for (var j = 0; j < drawToolBtns.length; j++) drawToolBtns[j].classList.remove("active");
         btn.classList.add("active");
         currentDrawTool = btn.getAttribute("data-tool") || "cursor";
+        activeDragDraw = null;
         if (drawingCanvas) {
           drawingCanvas.classList.toggle("drawing-active", currentDrawTool !== "cursor");
           if (currentDrawTool !== "cursor") {
@@ -10215,8 +10219,7 @@ function initEventListeners() {
   }
 
   if (drawingCanvas) {
-    drawingCanvas.addEventListener("mousedown", function(e) {
-      if (!chart || !candlestickSeries) return;
+    function resolveDrawingPointer(e) {
       var rect = drawingCanvas.getBoundingClientRect();
       var x = e.clientX - rect.left;
       var y = e.clientY - rect.top;
@@ -10237,6 +10240,46 @@ function initEventListeners() {
           time = sBar.time;
         }
       }
+      return { x: x, y: y, price: price, time: time };
+    }
+
+    function completeTwoPointDrawing(pt) {
+      if (!drawingInProgress || drawingInProgress.step !== 1) return false;
+      if (drawingInProgress.type === "ruler") {
+        drawings.push({
+          type: "ruler",
+          time1: drawingInProgress.time1,
+          price1: drawingInProgress.price1,
+          time2: pt.time,
+          price2: pt.price,
+          x1: drawingInProgress.x1,
+          y1: drawingInProgress.y1,
+          x2: pt.x,
+          y2: pt.y
+        });
+      } else if (drawingInProgress.type === "trendline") {
+        if (!isValidChartTime(pt.time)) return false;
+        drawings.push({
+          type: "trendline",
+          time1: drawingInProgress.time1,
+          price1: drawingInProgress.price1,
+          time2: pt.time,
+          price2: pt.price
+        });
+      } else {
+        return false;
+      }
+      drawingInProgress = null;
+      activeDragDraw = null;
+      saveDrawingsForActiveSymbol();
+      renderDrawingCanvas();
+      return true;
+    }
+
+    drawingCanvas.addEventListener("mousedown", function(e) {
+      if (!chart || !candlestickSeries) return;
+      var pt = resolveDrawingPointer(e);
+      var x = pt.x, y = pt.y, price = pt.price, time = pt.time;
 
       if (currentDrawTool === "cursor") {
         for (var k = drawings.length - 1; k >= 0; k--) {
@@ -10302,21 +10345,12 @@ function initEventListeners() {
       } else if (currentDrawTool === "ruler") {
         if (!drawingInProgress) {
           drawingInProgress = { type: "ruler", step: 1, time1: time, price1: price, x1: x, y1: y, currentX: x, currentY: y };
+          if (e.button === undefined || e.button === 0) {
+            activeDragDraw = { tool: "ruler", startX: x, startY: y };
+          }
         } else if (drawingInProgress.step === 1) {
-          drawings.push({
-            type: "ruler",
-            time1: drawingInProgress.time1,
-            price1: drawingInProgress.price1,
-            time2: time,
-            price2: price,
-            x1: drawingInProgress.x1,
-            y1: drawingInProgress.y1,
-            x2: x,
-            y2: y
-          });
-          drawingInProgress = null;
-          saveDrawingsForActiveSymbol();
-          renderDrawingCanvas();
+          activeDragDraw = null;
+          completeTwoPointDrawing(pt);
         }
       } else if (currentDrawTool === "hline") {
         if (price) {
@@ -10328,18 +10362,12 @@ function initEventListeners() {
         if (!drawingInProgress) {
           if (!isValidChartTime(time)) return;
           drawingInProgress = { type: "trendline", step: 1, time1: time, price1: price, currentX: x, currentY: y };
+          if (e.button === undefined || e.button === 0) {
+            activeDragDraw = { tool: "trendline", startX: x, startY: y };
+          }
         } else if (drawingInProgress.step === 1) {
-          if (!isValidChartTime(time)) return;
-          drawings.push({
-            type: "trendline",
-            time1: drawingInProgress.time1,
-            price1: drawingInProgress.price1,
-            time2: time,
-            price2: price
-          });
-          drawingInProgress = null;
-          saveDrawingsForActiveSymbol();
-          renderDrawingCanvas();
+          activeDragDraw = null;
+          completeTwoPointDrawing(pt);
         }
       } else if (currentDrawTool === "avwap") {
         if (currentRawBars && currentRawBars.length > 0 && window.Indicators && window.Indicators.calcAnchoredVWAP) {
@@ -10441,10 +10469,21 @@ function initEventListeners() {
       }
     });
 
-    window.addEventListener("mouseup", function() {
+    window.addEventListener("mouseup", function(e) {
       if (isDraggingHandle) {
         isDraggingHandle = null;
         saveDrawingsForActiveSymbol();
+      }
+      if (activeDragDraw && drawingInProgress && drawingInProgress.step === 1 && (currentDrawTool === "trendline" || currentDrawTool === "ruler") && chart && candlestickSeries) {
+        var dragSnapshot = activeDragDraw;
+        activeDragDraw = null;
+        if (!e || typeof e.clientX !== "number" || typeof e.clientY !== "number") return;
+        var pt = resolveDrawingPointer(e);
+        if (Math.hypot(pt.x - dragSnapshot.startX, pt.y - dragSnapshot.startY) >= 6) {
+          completeTwoPointDrawing(pt);
+        }
+      } else {
+        activeDragDraw = null;
       }
     });
   }

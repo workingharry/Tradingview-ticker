@@ -832,6 +832,96 @@ class TestMegaPhase6DrawingsAndLines(unittest.TestCase):
         self.assertIsNotNone(res["x1Hourly"])
         self.assertEqual(res["x1BackDaily"], res["x1Before"])
 
+    def test_drag_to_draw_and_short_click_fallback_without_breaking_cursor(self):
+        """Fix 5: >= 6px drag completes trendline/ruler on mouseup; < 6px preserves two-click flow; cursor drag untouched."""
+        js_code = """
+        initEventListeners();
+
+        chart = {
+            timeScale: function() {
+                return {
+                    coordinateToTime: function(x) { return 1700000000 + Math.round(x) * 60; },
+                    timeToCoordinate: function(t) { return (t - 1700000000) / 60; },
+                    coordinateToLogical: function(x) { return Math.round(x / 10); }
+                };
+            }
+        };
+        candlestickSeries = {
+            coordinateToPrice: function(y) { return 200 - y * 0.25; },
+            priceToCoordinate: function(p) { return (200 - p) / 0.25; }
+        };
+        renderDrawingCanvas = function() {};
+        activeSymbol = 'NASDAQ:AXON';
+        drawings = [];
+
+        var canvasEl = document.getElementById('drawingCanvas');
+
+        // 1) Drag >= 6px with trendline completes on mouseup
+        currentDrawTool = 'trendline';
+        canvasEl.dispatchEvent('mousedown', { clientX: 120, clientY: 200, button: 0, ctrlKey: false, metaKey: false });
+        canvasEl.dispatchEvent('mousemove', { clientX: 240, clientY: 140 });
+        _dispatchWindowEvent('mouseup', { clientX: 240, clientY: 140, button: 0, ctrlKey: false, metaKey: false });
+        var afterDragTrendline = {
+            count: drawings.length,
+            type: drawings[0] ? drawings[0].type : null,
+            inProgress: drawingInProgress
+        };
+
+        // 2) Drag >= 6px with ruler completes on mouseup
+        currentDrawTool = 'ruler';
+        canvasEl.dispatchEvent('mousedown', { clientX: 150, clientY: 220, button: 0, ctrlKey: false, metaKey: false });
+        canvasEl.dispatchEvent('mousemove', { clientX: 260, clientY: 180 });
+        _dispatchWindowEvent('mouseup', { clientX: 260, clientY: 180, button: 0, ctrlKey: false, metaKey: false });
+        var afterDragRuler = {
+            count: drawings.length,
+            type: drawings[1] ? drawings[1].type : null,
+            inProgress: drawingInProgress
+        };
+
+        // 3) Short click (< 6px) preserves two-click flow for trendline
+        currentDrawTool = 'trendline';
+        canvasEl.dispatchEvent('mousedown', { clientX: 300, clientY: 200, button: 0, ctrlKey: false, metaKey: false });
+        _dispatchWindowEvent('mouseup', { clientX: 303, clientY: 202, button: 0, ctrlKey: false, metaKey: false });
+        var midTwoClick = {
+            count: drawings.length,
+            step: drawingInProgress ? drawingInProgress.step : null
+        };
+        canvasEl.dispatchEvent('mousedown', { clientX: 420, clientY: 150, button: 0, ctrlKey: false, metaKey: false });
+        _dispatchWindowEvent('mouseup', { clientX: 420, clientY: 150, button: 0, ctrlKey: false, metaKey: false });
+        var afterTwoClick = {
+            count: drawings.length,
+            inProgress: drawingInProgress
+        };
+
+        // 4) Cursor mode drag does not create trendlines or interfere with R:R dragging
+        currentDrawTool = 'cursor';
+        var countBeforeCursor = drawings.length;
+        canvasEl.dispatchEvent('mousedown', { clientX: 100, clientY: 100, button: 0, ctrlKey: false, metaKey: false });
+        _dispatchWindowEvent('mouseup', { clientX: 250, clientY: 250, button: 0, ctrlKey: false, metaKey: false });
+        var countAfterCursor = drawings.length;
+
+        return {
+            afterDragTrendline: afterDragTrendline,
+            afterDragRuler: afterDragRuler,
+            midTwoClick: midTwoClick,
+            afterTwoClick: afterTwoClick,
+            countBeforeCursor: countBeforeCursor,
+            countAfterCursor: countAfterCursor
+        };
+        """
+        res = self._execute_node_eval(js_code)
+        self.assertEqual(res["afterDragTrendline"]["count"], 1)
+        self.assertEqual(res["afterDragTrendline"]["type"], "trendline")
+        self.assertIsNone(res["afterDragTrendline"]["inProgress"])
+        self.assertEqual(res["afterDragRuler"]["count"], 2)
+        self.assertEqual(res["afterDragRuler"]["type"], "ruler")
+        self.assertIsNone(res["afterDragRuler"]["inProgress"])
+        self.assertEqual(res["midTwoClick"]["count"], 2)
+        self.assertEqual(res["midTwoClick"]["step"], 1)
+        self.assertEqual(res["afterTwoClick"]["count"], 3)
+        self.assertIsNone(res["afterTwoClick"]["inProgress"])
+        self.assertEqual(res["countAfterCursor"], res["countBeforeCursor"])
+
 
 if __name__ == "__main__":
     unittest.main()
