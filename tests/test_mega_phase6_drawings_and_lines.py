@@ -39,9 +39,19 @@ class TestMegaPhase6DrawingsAndLines(unittest.TestCase):
                     className: '',
                     style: {{}},
                     classList: {{
-                        add: function(c) {{ el.className += ' ' + c; }},
-                        remove: function(c) {{ el.className = el.className.replace(c, '').trim(); }},
-                        contains: function(c) {{ return (el.className || '').indexOf(c) !== -1; }},
+                        add: function() {{
+                            var parts = (el.className || '').split(/\\s+/).filter(Boolean);
+                            for (var ai = 0; ai < arguments.length; ai++) {{
+                                if (parts.indexOf(arguments[ai]) === -1) parts.push(arguments[ai]);
+                            }}
+                            el.className = parts.join(' ');
+                        }},
+                        remove: function() {{
+                            var rem = Array.prototype.slice.call(arguments);
+                            var parts = (el.className || '').split(/\\s+/).filter(Boolean);
+                            el.className = parts.filter(function(p) {{ return rem.indexOf(p) === -1; }}).join(' ');
+                        }},
+                        contains: function(c) {{ return (el.className || '').split(/\\s+/).indexOf(c) !== -1; }},
                         toggle: function(c, force) {{
                             if (force === undefined) force = !el.classList.contains(c);
                             if (force) el.classList.add(c); else el.classList.remove(c);
@@ -504,6 +514,55 @@ class TestMegaPhase6DrawingsAndLines(unittest.TestCase):
         self.assertTrue(res["entryMovedUp"])
         self.assertTrue(res["dragClearedAfterMouseup"])
         self.assertEqual(res["rrCountAfterCursorClose"], 0)
+
+    def test_switch_tool_clears_hover_cursor_classes(self):
+        """Fix 1: switching from cursor to a non-cursor drawing tool clears stale hover cursor classes."""
+        js_code = """
+        var origQsa = document.querySelectorAll;
+        var cursorBtn = document.createElement('button');
+        cursorBtn.setAttribute('data-tool', 'cursor');
+        cursorBtn.classList.add('draw-tool-btn', 'active');
+        var trendBtn = document.createElement('button');
+        trendBtn.setAttribute('data-tool', 'trendline');
+        trendBtn.classList.add('draw-tool-btn');
+        document.querySelectorAll = function(sel) {
+            if (sel && sel.indexOf('.draw-tool-btn') !== -1) return [cursorBtn, trendBtn];
+            return origQsa ? origQsa(sel) : [];
+        };
+
+        initEventListeners();
+
+        var canvasEl = document.getElementById('drawingCanvas');
+        canvasEl.classList.add('interactive', 'cursor-pointer', 'cursor-move', 'cursor-ns-resize');
+
+        // Clicking trendline button must remove all cursor-* hover classes immediately
+        trendBtn.onclick();
+        var afterBtnClick = {
+            tool: currentDrawTool,
+            hasDrawingActive: canvasEl.classList.contains('drawing-active'),
+            hasPointer: canvasEl.classList.contains('cursor-pointer'),
+            hasMove: canvasEl.classList.contains('cursor-move'),
+            hasNsResize: canvasEl.classList.contains('cursor-ns-resize')
+        };
+
+        // Re-adding stale hover class and triggering chartContainer mousemove must also clear it
+        canvasEl.classList.add('cursor-pointer');
+        document.getElementById('chartContainer').dispatchEvent('mousemove', { clientX: 100, clientY: 100 });
+        var afterMousemove = {
+            hasPointer: canvasEl.classList.contains('cursor-pointer'),
+            hasInteractive: canvasEl.classList.contains('interactive')
+        };
+
+        return { afterBtnClick: afterBtnClick, afterMousemove: afterMousemove };
+        """
+        res = self._execute_node_eval(js_code)
+        self.assertEqual(res["afterBtnClick"]["tool"], "trendline")
+        self.assertTrue(res["afterBtnClick"]["hasDrawingActive"])
+        self.assertFalse(res["afterBtnClick"]["hasPointer"])
+        self.assertFalse(res["afterBtnClick"]["hasMove"])
+        self.assertFalse(res["afterBtnClick"]["hasNsResize"])
+        self.assertFalse(res["afterMousemove"]["hasPointer"])
+        self.assertTrue(res["afterMousemove"]["hasInteractive"])
 
 
 if __name__ == "__main__":

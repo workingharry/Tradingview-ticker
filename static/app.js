@@ -9673,6 +9673,9 @@ function initEventListeners() {
         currentDrawTool = btn.getAttribute("data-tool") || "cursor";
         if (drawingCanvas) {
           drawingCanvas.classList.toggle("drawing-active", currentDrawTool !== "cursor");
+          if (currentDrawTool !== "cursor") {
+            drawingCanvas.classList.remove("cursor-pointer", "cursor-move", "cursor-ns-resize");
+          }
         }
       };
     })(drawToolBtns[dtIdx]);
@@ -10378,6 +10381,7 @@ function initEventListeners() {
         if (!drawingCanvas.classList.contains("interactive")) {
           drawingCanvas.classList.add("interactive");
         }
+        drawingCanvas.classList.remove("cursor-pointer", "cursor-move", "cursor-ns-resize");
         return;
       }
       if (drawings.length === 0 && !isDraggingHandle) {
