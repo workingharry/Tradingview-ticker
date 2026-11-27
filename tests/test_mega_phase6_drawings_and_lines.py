@@ -608,6 +608,99 @@ class TestMegaPhase6DrawingsAndLines(unittest.TestCase):
         self.assertFalse(res["afterSecondEsc"]["hasDrawingActive"])
         self.assertEqual(res["afterSecondEsc"]["modalDisplay"], "none")
 
+    def test_rr_box_clamps_right_to_canvas_bounds_without_mutating_stored_fields(self):
+        """Fix 3: R:R boxRight clamps within canvas width and hit-testing respects clamped bounds without altering stored prices/time."""
+        js_code = """
+        initEventListeners();
+
+        var canvasEl = document.getElementById('drawingCanvas');
+        canvasEl.width = 1000;
+        canvasEl.height = 600;
+        canvasEl.clientWidth = 1000;
+        canvasEl.clientHeight = 600;
+        var rects = [];
+        var mockCtx = {
+            clearRect: function() {},
+            save: function() {},
+            restore: function() {},
+            beginPath: function() {},
+            moveTo: function() {},
+            lineTo: function() {},
+            stroke: function() {},
+            fill: function() {},
+            arc: function() {},
+            setLineDash: function() {},
+            fillRect: function() {},
+            strokeRect: function(x, y, w, h) { rects.push({ x: x, y: y, w: w, h: h }); },
+            fillText: function() {},
+            lineJoin: 'round',
+            lineCap: 'round',
+            fillStyle: '',
+            strokeStyle: '',
+            lineWidth: 1,
+            font: '',
+            textAlign: 'left',
+            textBaseline: 'alphabetic'
+        };
+        canvasEl.getContext = function() { return mockCtx; };
+
+        chart = {
+            timeScale: function() {
+                return {
+                    timeToCoordinate: function(t) { return t === 1700012000 ? 900 : 100; }
+                };
+            }
+        };
+        candlestickSeries = {
+            coordinateToPrice: function(y) { return 200 - y * 0.25; },
+            priceToCoordinate: function(p) { return (200 - p) / 0.25; }
+        };
+
+        var rrBox = {
+            type: 'risk-reward',
+            time: 1700012000,
+            entryPrice: 150,
+            targetPrice: 175,
+            stopPrice: 125
+        };
+        drawings = [rrBox];
+        renderDrawingCanvas();
+
+        // Hover / hit-test outside canvas (> boxRight) must not hit body
+        currentDrawTool = 'cursor';
+        canvasEl.dispatchEvent('mousedown', { clientX: 1020, clientY: 150, ctrlKey: false, metaKey: false });
+        var dragOutside = isDraggingHandle;
+        isDraggingHandle = null;
+
+        // Hit-test inside clamped box must hit body
+        canvasEl.dispatchEvent('mousedown', { clientX: 950, clientY: 150, ctrlKey: false, metaKey: false });
+        var dragInside = isDraggingHandle ? isDraggingHandle.handle : null;
+        isDraggingHandle = null;
+
+        return {
+            boxLeft: rrBox.boxLeft,
+            boxRight: rrBox.boxRight,
+            canvasWidth: canvasEl.width,
+            rectWidths: rects.map(function(r) { return r.w; }),
+            storedEntry: rrBox.entryPrice,
+            storedTarget: rrBox.targetPrice,
+            storedStop: rrBox.stopPrice,
+            storedTime: rrBox.time,
+            dragOutside: dragOutside,
+            dragInside: dragInside
+        };
+        """
+        res = self._execute_node_eval(js_code)
+        self.assertEqual(res["boxLeft"], 900)
+        self.assertLessEqual(res["boxRight"], res["canvasWidth"])
+        self.assertTrue(all(r_w <= res["canvasWidth"] - 900 for r_w in res["rectWidths"]))
+        self.assertEqual(res["storedEntry"], 150)
+        self.assertEqual(res["storedTarget"], 175)
+        self.assertEqual(res["storedStop"], 125)
+        self.assertEqual(res["storedTime"], 1700012000)
+        self.assertIsNone(res["dragOutside"])
+        self.assertEqual(res["dragInside"], "body")
+
 
 if __name__ == "__main__":
     unittest.main()

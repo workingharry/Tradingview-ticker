@@ -9958,34 +9958,35 @@ function initEventListeners() {
           if (xCenter === null || isNaN(xCenter)) xCenter = drawingCanvas.width * 0.5;
           var boxWidth = Math.min(260, drawingCanvas.width * 0.45);
           var left = Math.max(10, xCenter);
-          var right = left + boxWidth;
+          var right = Math.min(Math.max(left, drawingCanvas.width - 4), left + boxWidth);
+          var drawWidth = Math.max(0, right - left);
 
           var yEntry = candlestickSeries.priceToCoordinate(d.entryPrice);
           var yTarget = candlestickSeries.priceToCoordinate(d.targetPrice);
           var yStop = candlestickSeries.priceToCoordinate(d.stopPrice);
 
-          if (yEntry !== null && yTarget !== null && yStop !== null) {
+          if (drawWidth > 0 && yEntry !== null && yTarget !== null && yStop !== null) {
             var targetTop = Math.min(yTarget, yEntry);
             var targetHeight = Math.max(2, Math.abs(yTarget - yEntry));
             ctx.fillStyle = "rgba(34, 197, 94, 0.08)";
-            ctx.fillRect(left, targetTop, boxWidth, targetHeight);
+            ctx.fillRect(left, targetTop, drawWidth, targetHeight);
             ctx.strokeStyle = "#22c55e";
             ctx.lineWidth = 1.5;
-            ctx.strokeRect(left, targetTop, boxWidth, targetHeight);
+            ctx.strokeRect(left, targetTop, drawWidth, targetHeight);
 
             var stopTop = Math.min(yStop, yEntry);
             var stopHeight = Math.max(2, Math.abs(yStop - yEntry));
             ctx.fillStyle = "rgba(239, 68, 68, 0.08)";
-            ctx.fillRect(left, stopTop, boxWidth, stopHeight);
+            ctx.fillRect(left, stopTop, drawWidth, stopHeight);
             ctx.strokeStyle = "#ef4444";
             ctx.lineWidth = 1.5;
-            ctx.strokeRect(left, stopTop, boxWidth, stopHeight);
+            ctx.strokeRect(left, stopTop, drawWidth, stopHeight);
 
             ctx.strokeStyle = "#3b82f6";
             ctx.lineWidth = 2;
             ctx.beginPath();
             ctx.moveTo(left - 10, yEntry);
-            ctx.lineTo(right + 10, yEntry);
+            ctx.lineTo(Math.min(drawingCanvas.width, right + 10), yEntry);
             ctx.stroke();
 
             d.targetHandleY = yTarget;
@@ -10010,9 +10011,9 @@ function initEventListeners() {
             ctx.fillText("✕", d.closeBtnX - 4, d.closeBtnY + 3.5);
 
             ctx.fillStyle = "#22c55e";
-            ctx.fillRect(left + boxWidth * 0.5 - 10, yTarget - 4, 20, 8);
+            ctx.fillRect(left + drawWidth * 0.5 - 10, yTarget - 4, 20, 8);
             ctx.fillStyle = "#ef4444";
-            ctx.fillRect(left + boxWidth * 0.5 - 10, yStop - 4, 20, 8);
+            ctx.fillRect(left + drawWidth * 0.5 - 10, yStop - 4, 20, 8);
 
             var currentRiskDollar = getRiskDollar();
             var rrView = computeRiskRewardView({
