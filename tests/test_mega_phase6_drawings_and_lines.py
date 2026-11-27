@@ -564,6 +564,50 @@ class TestMegaPhase6DrawingsAndLines(unittest.TestCase):
         self.assertFalse(res["afterMousemove"]["hasPointer"])
         self.assertTrue(res["afterMousemove"]["hasInteractive"])
 
+    def test_esc_cancels_in_progress_drawing_before_resetting_tool(self):
+        """Fix 2: first Esc cancels drawingInProgress while keeping tool; second Esc resets to cursor."""
+        js_code = """
+        initEventListeners();
+
+        var canvasEl = document.getElementById('drawingCanvas');
+        currentDrawTool = 'trendline';
+        canvasEl.classList.add('drawing-active');
+        drawingInProgress = { type: 'trendline', step: 1, time1: 1700000000, price1: 150, currentX: 120, currentY: 200 };
+        var renderCalls = 0;
+        renderDrawingCanvas = function() { renderCalls++; };
+
+        // First Escape: cancels drawingInProgress, preserves trendline tool and drawing-active
+        _dispatchKeydown({ key: 'Escape', metaKey: false, ctrlKey: false, altKey: false });
+        var afterFirstEsc = {
+            drawingInProgress: drawingInProgress,
+            tool: currentDrawTool,
+            hasDrawingActive: canvasEl.classList.contains('drawing-active'),
+            renderCalls: renderCalls
+        };
+
+        // Second Escape (when drawingInProgress is null): closes modals and resets tool to cursor
+        document.getElementById('indicatorModal').style.display = 'flex';
+        _dispatchKeydown({ key: 'Escape', metaKey: false, ctrlKey: false, altKey: false });
+        var afterSecondEsc = {
+            drawingInProgress: drawingInProgress,
+            tool: currentDrawTool,
+            hasDrawingActive: canvasEl.classList.contains('drawing-active'),
+            modalDisplay: document.getElementById('indicatorModal').style.display
+        };
+
+        return { afterFirstEsc: afterFirstEsc, afterSecondEsc: afterSecondEsc };
+        """
+        res = self._execute_node_eval(js_code)
+        self.assertIsNone(res["afterFirstEsc"]["drawingInProgress"])
+        self.assertEqual(res["afterFirstEsc"]["tool"], "trendline")
+        self.assertTrue(res["afterFirstEsc"]["hasDrawingActive"])
+        self.assertGreaterEqual(res["afterFirstEsc"]["renderCalls"], 1)
+
+        self.assertIsNone(res["afterSecondEsc"]["drawingInProgress"])
+        self.assertEqual(res["afterSecondEsc"]["tool"], "cursor")
+        self.assertFalse(res["afterSecondEsc"]["hasDrawingActive"])
+        self.assertEqual(res["afterSecondEsc"]["modalDisplay"], "none")
+
 
 if __name__ == "__main__":
     unittest.main()

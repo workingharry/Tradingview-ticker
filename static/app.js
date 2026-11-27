@@ -9569,11 +9569,17 @@ function initEventListeners() {
     if ((e.metaKey || e.ctrlKey) && k === "k") {
       e.preventDefault(); openSearch();
     } else if (e.key === "Escape") {
+      if (drawingInProgress) {
+        drawingInProgress = null;
+        if (typeof renderDrawingCanvas === "function") renderDrawingCanvas();
+        return;
+      }
       closeSearch();
       if (indicatorModal) indicatorModal.style.display = "none";
       if (fundamentalsModal) fundamentalsModal.style.display = "none";
       if (aiLensModal) aiLensModal.style.display = "none";
-      closeScreenerModal(); closeChatModal();
+      closeScreenerModal();
+      if (typeof closeChatModal === "function") closeChatModal();
       closeHeatmapModalHandler();
       closeRrEditModal();
       resetDrawToolToCursor();
