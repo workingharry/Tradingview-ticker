@@ -24,5 +24,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Error Observability**: Narrowed overly broad `except Exception` handlers and added explicit diagnostic logging across backend modules.
 - **Shared State & Static Asset Resolution**: Fixed in-place `WATCHLIST`/`SYMBOLS` updates after router modularization and fixed frozen/split path resolution in `resolve_static_dir()` (`api/bootstrap.py`).
 - **CI Determinism & Python 3.12 Compatibility**: Mocked unmocked external network calls in offline suites, gated external skill test (`test_gemini_api_copilot.py`) cleanly with `pytest.importorskip("gemini_query")`, and resolved Python 3.12 `asyncio.Queue` / sleep spin hazards.
+- **Drawing Engine Coexistence, Whitespace & Ergonomics (`static/app.js`)**:
+  - Only hit-test Risk/Reward (`R:R`) box controls when in `cursor` mode so non-cursor tools can draw inside R:R boxes without deleting or dragging them.
+  - Clear stale `.cursor-pointer` / `.cursor-move` / `.cursor-ns-resize` hover classes immediately when switching to non-cursor drawing tools so `crosshair` remains active.
+  - Two-stage `Escape` key handling: first `Esc` cancels any in-progress drawing (`drawingInProgress`) while preserving the active drawing tool; second `Esc` closes modals and resets to `cursor` (with `closeChatModal` guard).
+  - Clamp rendered `R:R` box `boxRight` and hit-test bounds within the drawing canvas width without mutating stored prices or timestamps.
+  - Support drawing and rendering in the right whitespace area via cycle-projected absolute timestamps (`lastTime + extraBars * tfSec`) and mid-range bar interpolation across timeframe switches (`1D` / `1W` / `1h`) and new incoming bars.
+  - Support drag-to-draw (`>= 6px`) for `trendline` and `ruler` while preserving two-click drawing (`< 6px`) and cursor panning / R:R box dragging.
+- **Toolbar Button Wrapping & Clipping (`static/style.css`)**: Added `nowrap` / `flex-shrink: 0` on toolbar buttons, ellipsis truncation on the omnibox button, and horizontal scroll overflow for `.chart-controls`.
 
 [1.1.0-beta.1]: https://github.com/workingharry/Tradingview-ticker/compare/9e991cd...HEAD

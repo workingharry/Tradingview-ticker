@@ -12,8 +12,9 @@
 2. **無痛舊版資料搬移**：首次啟動時自動從舊識別碼 `com.tradingview.terminal` 複製 SQLite 資料庫與 WebKit 瀏覽器儲存至新識別碼目錄，並**完整保留舊資料不動**。
 3. **完全離線圖表引擎**：將 Lightweight Charts 4.2.0 改為本機內嵌（`static/vendor/`），移除外部 `unpkg.com` CDN 依賴，無網路環境也能啟動圖表。
 4. **安全性與 CSP 收斂**：移除 CSP 中的 `'unsafe-eval'` 與 `https://unpkg.com`，保留所有既有功能的嚴格白名單連線與 Session Token 桌面端驗證。
-5. **自動化 CI 與工程品質強化**：建立 GitHub Actions 雙平台 CI（macOS Pytest + Ubuntu Typecheck/Vitest），將大量原始碼字串測試升級為真實行為測試。
+5. **自動化 CI 與工程品質強化**：建立 GitHub Actions 雙平台 CI（macOS Pytest + Ubuntu Typecheck/Vitest），將大量原始碼字串測試升級為真實行為測試，並新增 Chrome (CDP) 與 Safari (WebKit) 實機繪圖 E2E 回歸測試（`e2e` marker，CI 預設略過）。
 6. **後端模組化重構**：將原本超過 3,600 行的 `server.py` 拆分為獨立 `api/` 路由器與依賴模組（`bootstrap`、`config`、`deps`、`history`、`symbols`、`ai`、`screener`、`state`、`ws`），維持 100% API 相容。
+7. **繪圖引擎與工具列體驗修正**：修正 R:R 框內畫線共存保護（非 `cursor` 模式點 `✕` 不會誤刪框）、切換工具即時清除懸停游標樣式、兩段式 `Esc`（先取消進行中線段、再退回 `cursor`）、R:R 框右邊界夾緊、右側留白區絕對時間畫線與跨週期插值渲染、`trendline` / `ruler` 按住拖曳畫線（≥ 6px 直接完成），以及工具列按鈕防折行與裁切修正。
 
 ---
 
