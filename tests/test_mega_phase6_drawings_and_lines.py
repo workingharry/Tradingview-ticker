@@ -701,6 +701,137 @@ class TestMegaPhase6DrawingsAndLines(unittest.TestCase):
         self.assertIsNone(res["dragOutside"])
         self.assertEqual(res["dragInside"], "body")
 
+    def test_whitespace_drawing_time_projection_interpolation_and_stability(self):
+        """Fix 4: right whitespace clicks save projected epoch time, render without jump on new bar, interpolate mid-range gaps, and survive 1D->1W->1h->1D."""
+        js_code = """
+        initEventListeners();
+
+        // Build 10 daily bars ending Friday 2026-06-12T14:30:00Z (1781274600)
+        var tfDay = 86400;
+        var baseT = 1781274600 - 9 * tfDay;
+        var dailyBars = [];
+        for (var i = 0; i < 10; i++) {
+            dailyBars.push({ time: baseT + i * tfDay, open: 100 + i, high: 102 + i, low: 99 + i, close: 101 + i });
+        }
+
+        function makeMockChart(bars) {
+            var barByTime = {};
+            bars.forEach(function(b, idx) { barByTime[b.time] = idx; });
+            return {
+                timeScale: function() {
+                    return {
+                        coordinateToTime: function(x) {
+                            var idx = Math.round((x - 100) / 20);
+                            if (idx >= 0 && idx < bars.length) return bars[idx].time;
+                            return null;
+                        },
+                        coordinateToLogical: function(x) {
+                            return (x - 100) / 20;
+                        },
+                        timeToCoordinate: function(t) {
+                            if (barByTime[t] !== undefined) return 100 + barByTime[t] * 20;
+                            return null;
+                        },
+                        logicalToCoordinate: function(l) {
+                            return 100 + l * 20;
+                        }
+                    };
+                }
+            };
+        }
+
+        activeTimeframe = '1D';
+        activeSymbol = 'NASDAQ:AXON';
+        currentRawBars = dailyBars.slice();
+        candleSeries = { data: function() { return currentRawBars; }, coordinateToPrice: function(y) { return 200 - y * 0.25; }, priceToCoordinate: function(p) { return (200 - p) / 0.25; } };
+        candlestickSeries = candleSeries;
+        chart = makeMockChart(currentRawBars);
+
+        var canvasEl = document.getElementById('drawingCanvas');
+        currentDrawTool = 'trendline';
+        // Click 1 at logical 11 (2 bars right of idx 9 -> x = 100 + 11*20 = 320)
+        // Click 2 at logical 14 (5 bars right of idx 9 -> x = 100 + 14*20 = 380)
+        canvasEl.dispatchEvent('mousedown', { clientX: 320, clientY: 160, ctrlKey: false, metaKey: false });
+        canvasEl.dispatchEvent('mousedown', { clientX: 380, clientY: 120, ctrlKey: false, metaKey: false });
+
+        var tl = drawings.find(function(d) { return d.type === 'trendline'; });
+        var expectedT1 = dailyBars[9].time + 2 * tfDay;
+        var expectedT2 = dailyBars[9].time + 5 * tfDay;
+
+        var tsBefore = chart.timeScale();
+        var x1Before = safeTimeToCoordinate(tsBefore, tl.time1, getMainTimeAxis(), 86400);
+        var x2Before = safeTimeToCoordinate(tsBefore, tl.time2, getMainTimeAxis(), 86400);
+
+        // (a) Append new daily bar at T_last + 1 day -> position of whitespace drawing MUST NOT jump
+        dailyBars.push({ time: dailyBars[9].time + tfDay, open: 111, high: 112, low: 110, close: 111 });
+        currentRawBars = dailyBars.slice();
+        chart = makeMockChart(currentRawBars);
+        var x1After1Bar = safeTimeToCoordinate(chart.timeScale(), tl.time1, getMainTimeAxis(), 86400);
+        var x2After1Bar = safeTimeToCoordinate(chart.timeScale(), tl.time2, getMainTimeAxis(), 86400);
+
+        // (a2) Weekend gap: jump forward by +3 days past original Friday (Monday bar arrives -> expectedT1 falls strictly between Friday idx 9 and Monday idx 10)
+        var gapBars = dailyBars.slice(0, 10);
+        gapBars.push({ time: dailyBars[9].time + 3 * tfDay, open: 112, high: 113, low: 111, close: 112 });
+        currentRawBars = gapBars;
+        chart = makeMockChart(currentRawBars);
+        var x1WeekendInterp = safeTimeToCoordinate(chart.timeScale(), tl.time1, getMainTimeAxis(), 86400);
+
+        // (b) Switch 1D -> 1W -> 1h -> 1D: coordinates remain finite and non-null
+        activeTimeframe = '1W';
+        var weeklyBars = [
+            { time: dailyBars[2].time, open: 100, high: 105, low: 99, close: 104 },
+            { time: dailyBars[9].time, open: 104, high: 112, low: 103, close: 110 }
+        ];
+        currentRawBars = weeklyBars;
+        chart = makeMockChart(currentRawBars);
+        var x1Weekly = safeTimeToCoordinate(chart.timeScale(), tl.time1, getMainTimeAxis(), 604800);
+        var x2Weekly = safeTimeToCoordinate(chart.timeScale(), tl.time2, getMainTimeAxis(), 604800);
+
+        activeTimeframe = '1h';
+        var hourlyBars = [];
+        for (var hi = 0; hi < 8; hi++) {
+            hourlyBars.push({ time: dailyBars[9].time + hi * 3600, open: 110, high: 111, low: 109, close: 110 });
+        }
+        currentRawBars = hourlyBars;
+        chart = makeMockChart(currentRawBars);
+        var x1Hourly = safeTimeToCoordinate(chart.timeScale(), tl.time1, getMainTimeAxis(), 3600);
+
+        activeTimeframe = '1D';
+        currentRawBars = dailyBars.slice(0, 10);
+        chart = makeMockChart(currentRawBars);
+        var x1BackDaily = safeTimeToCoordinate(chart.timeScale(), tl.time1, getMainTimeAxis(), 86400);
+
+        return {
+            tl: tl,
+            expectedT1: expectedT1,
+            expectedT2: expectedT2,
+            x1Before: x1Before,
+            x2Before: x2Before,
+            x1After1Bar: x1After1Bar,
+            x2After1Bar: x2After1Bar,
+            x1WeekendInterp: x1WeekendInterp,
+            x1Weekly: x1Weekly,
+            x2Weekly: x2Weekly,
+            x1Hourly: x1Hourly,
+            x1BackDaily: x1BackDaily
+        };
+        """
+        res = self._execute_node_eval(js_code)
+        self.assertEqual(res["tl"]["time1"], res["expectedT1"])
+        self.assertEqual(res["tl"]["time2"], res["expectedT2"])
+        self.assertEqual(res["x1Before"], 320)
+        self.assertEqual(res["x2Before"], 380)
+        self.assertEqual(res["x1After1Bar"], res["x1Before"])
+        self.assertEqual(res["x2After1Bar"], res["x2Before"])
+        self.assertIsNotNone(res["x1WeekendInterp"])
+        self.assertGreater(res["x1WeekendInterp"], 280)
+        self.assertLess(res["x1WeekendInterp"], 300)
+        self.assertIsNotNone(res["x1Weekly"])
+        self.assertIsNotNone(res["x2Weekly"])
+        self.assertGreater(res["x2Weekly"], res["x1Weekly"])
+        self.assertIsNotNone(res["x1Hourly"])
+        self.assertEqual(res["x1BackDaily"], res["x1Before"])
+
 
 if __name__ == "__main__":
     unittest.main()

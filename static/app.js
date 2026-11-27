@@ -7045,21 +7045,81 @@ function isValidChartTime(t) {
 if (typeof window !== "undefined") window.isValidChartTime = isValidChartTime;
 if (typeof globalThis !== "undefined") globalThis.isValidChartTime = isValidChartTime;
 
-/** 安全的時間轉座標轉換，避免 Lightweight Charts convertTime 拋出 TypeError */
-function safeTimeToCoordinate(ts, t) {
+function getActiveTimeframeSeconds() {
+  return (typeof TF_SECONDS !== "undefined" && typeof activeTimeframe === "string" && TF_SECONDS[activeTimeframe])
+    ? TF_SECONDS[activeTimeframe]
+    : 86400;
+}
+
+function toDrawingEpochSec(t) {
+  if (t && typeof t === "object" && typeof t.year === "number" && typeof t.month === "number" && typeof t.day === "number") {
+    return Math.floor(Date.UTC(t.year, t.month - 1, t.day) / 1000);
+  }
+  var n = typeof normalizeBarTime === "function" ? normalizeBarTime(t) : 0;
+  return (typeof n === "number" && isFinite(n) && n > 0) ? n : 0;
+}
+
+/** 安全的時間轉座標轉換（含右側留白延伸與 K 棒區間線性內插） */
+function safeTimeToCoordinate(ts, t, axisTimes, tfSec) {
   if (!isValidChartTime(t) || !ts || typeof ts.timeToCoordinate !== "function") return null;
   try {
     var coord = ts.timeToCoordinate(t);
-    return (coord !== null && typeof coord === "number" && !isNaN(coord)) ? coord : null;
-  } catch (e) {
+    if (coord !== null && typeof coord === "number" && isFinite(coord)) return coord;
+  } catch (e) {}
+
+  var times = Array.isArray(axisTimes) ? axisTimes : (typeof getMainTimeAxis === "function" ? getMainTimeAxis() : null);
+  if (!Array.isArray(times) || times.length === 0 || typeof ts.logicalToCoordinate !== "function") return null;
+
+  var tNum = toDrawingEpochSec(t);
+  var lastIdx = times.length - 1;
+  var firstTime = toDrawingEpochSec(times[0]);
+  var lastTime = toDrawingEpochSec(times[lastIdx]);
+  if (tNum <= 0 || firstTime <= 0 || lastTime <= 0) return null;
+
+  var step = (typeof tfSec === "number" && isFinite(tfSec) && tfSec > 0) ? tfSec : getActiveTimeframeSeconds();
+  var logical;
+  if (tNum > lastTime) {
+    logical = lastIdx + (tNum - lastTime) / step;
+  } else if (tNum < firstTime) {
+    logical = -(firstTime - tNum) / step;
+  } else {
+    var lo = 0;
+    var hi = lastIdx;
+    while (hi - lo > 1) {
+      var mid = (lo + hi) >> 1;
+      var mTime = toDrawingEpochSec(times[mid]);
+      if (mTime === tNum) {
+        lo = mid;
+        hi = mid;
+        break;
+      } else if (mTime < tNum) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+    var tLo = toDrawingEpochSec(times[lo]);
+    var tHi = toDrawingEpochSec(times[hi]);
+    if (lo === hi || tHi <= tLo || tNum <= tLo) {
+      logical = lo;
+    } else if (tNum >= tHi) {
+      logical = hi;
+    } else {
+      logical = lo + (tNum - tLo) / (tHi - tLo);
+    }
+  }
+  try {
+    var fallbackCoord = ts.logicalToCoordinate(logical);
+    return (fallbackCoord !== null && typeof fallbackCoord === "number" && isFinite(fallbackCoord)) ? fallbackCoord : null;
+  } catch (e2) {
     return null;
   }
 }
 if (typeof window !== "undefined") window.safeTimeToCoordinate = safeTimeToCoordinate;
 if (typeof globalThis !== "undefined") globalThis.safeTimeToCoordinate = safeTimeToCoordinate;
 
-/** 從座標吸附最近之有效時間（包含右側邊距邏輯索引還原） */
-function snapTimeFromCoordinate(ts, x, axisTimes) {
+/** 從座標吸附最近之有效時間（傳入 tfSec 時，右側留白區依週期秒數推算絕對時間） */
+function snapTimeFromCoordinate(ts, x, axisTimes, tfSec) {
   if (ts && typeof ts.coordinateToTime === "function") {
     try {
       var t = ts.coordinateToTime(x);
@@ -7071,9 +7131,14 @@ function snapTimeFromCoordinate(ts, x, axisTimes) {
     try {
       var logical = ts.coordinateToLogical(x);
       if (typeof logical === "number" && isFinite(logical)) {
+        var lastIdx = axisTimes.length - 1;
         var idx = Math.round(logical);
+        if (typeof tfSec === "number" && isFinite(tfSec) && tfSec > 0 && idx > lastIdx) {
+          var lastEpoch = toDrawingEpochSec(axisTimes[lastIdx]);
+          if (lastEpoch > 0) return lastEpoch + (idx - lastIdx) * tfSec;
+        }
         if (idx < 0) idx = 0;
-        if (idx > axisTimes.length - 1) idx = axisTimes.length - 1;
+        if (idx > lastIdx) idx = lastIdx;
         var resolved = axisTimes[idx];
         if (isValidChartTime(resolved)) return resolved;
       }
@@ -9782,6 +9847,8 @@ function initEventListeners() {
 
     var timeScale = chart.timeScale ? chart.timeScale() : null;
     if (!timeScale) return;
+    var drawAxisTimes = getMainTimeAxis();
+    var drawTfSec = getActiveTimeframeSeconds();
 
     // Render Anchored VWAP (AVWAP) Overlay
     if (indicatorConfig && indicatorConfig.avwap && currentAvwapData && currentAvwapData.avwap && currentAvwapData.avwap.length > 0 && avwapConfig.displayMode === "overlay") {
@@ -9935,9 +10002,9 @@ function initEventListeners() {
             ctx.fillText(canonicalFormatPrice(d.price), drawingCanvas.width - 60, y - 4);
           }
         } else if (d.type === "trendline") {
-          var x1 = safeTimeToCoordinate(timeScale, d.time1);
+          var x1 = safeTimeToCoordinate(timeScale, d.time1, drawAxisTimes, drawTfSec);
           var y1 = candlestickSeries.priceToCoordinate(d.price1);
-          var x2 = safeTimeToCoordinate(timeScale, d.time2);
+          var x2 = safeTimeToCoordinate(timeScale, d.time2, drawAxisTimes, drawTfSec);
           var y2 = candlestickSeries.priceToCoordinate(d.price2);
           if (x1 !== null && y1 !== null && x2 !== null && y2 !== null) {
             ctx.strokeStyle = "#eab308";
@@ -9954,7 +10021,7 @@ function initEventListeners() {
             ctx.fill();
           }
         } else if (d.type === "risk-reward") {
-          var xCenter = d.time ? safeTimeToCoordinate(timeScale, d.time) : drawingCanvas.width * 0.5;
+          var xCenter = d.time ? safeTimeToCoordinate(timeScale, d.time, drawAxisTimes, drawTfSec) : drawingCanvas.width * 0.5;
           if (xCenter === null || isNaN(xCenter)) xCenter = drawingCanvas.width * 0.5;
           var boxWidth = Math.min(260, drawingCanvas.width * 0.45);
           var left = Math.max(10, xCenter);
@@ -10081,9 +10148,9 @@ function initEventListeners() {
             ctx.textAlign = "left";
           }
         } else if (d.type === "ruler") {
-          var rx1 = d.time1 ? safeTimeToCoordinate(timeScale, d.time1) : d.x1;
+          var rx1 = d.time1 ? safeTimeToCoordinate(timeScale, d.time1, drawAxisTimes, drawTfSec) : d.x1;
           var ry1 = candlestickSeries ? candlestickSeries.priceToCoordinate(d.price1) : d.y1;
-          var rx2 = d.time2 ? safeTimeToCoordinate(timeScale, d.time2) : d.x2;
+          var rx2 = d.time2 ? safeTimeToCoordinate(timeScale, d.time2, drawAxisTimes, drawTfSec) : d.x2;
           var ry2 = candlestickSeries ? candlestickSeries.priceToCoordinate(d.price2) : d.y2;
           if (rx1 !== null && ry1 !== null && rx2 !== null && ry2 !== null) {
             var rLeft = Math.min(rx1, rx2);
@@ -10110,7 +10177,7 @@ function initEventListeners() {
     }
 
     if (drawingInProgress && drawingInProgress.type === "trendline" && drawingInProgress.step === 1) {
-      var tx1 = safeTimeToCoordinate(timeScale, drawingInProgress.time1);
+      var tx1 = safeTimeToCoordinate(timeScale, drawingInProgress.time1, drawAxisTimes, drawTfSec);
       var ty1 = candlestickSeries.priceToCoordinate(drawingInProgress.price1);
       if (tx1 !== null && ty1 !== null) {
         ctx.strokeStyle = "rgba(234, 179, 8, 0.7)";
@@ -10155,7 +10222,7 @@ function initEventListeners() {
       var y = e.clientY - rect.top;
       var timeScale = chart.timeScale();
       var price = candlestickSeries.coordinateToPrice(y);
-      var time = snapTimeFromCoordinate(timeScale, x, getMainTimeAxis());
+      var time = snapTimeFromCoordinate(timeScale, x, getMainTimeAxis(), getActiveTimeframeSeconds());
       if ((magnetMode || e.ctrlKey || e.metaKey) && currentRawBars && currentRawBars.length > 0 && timeScale.coordinateToLogical) {
         var lIdx = Math.round(timeScale.coordinateToLogical(x));
         if (isFinite(lIdx) && lIdx >= 0 && lIdx < currentRawBars.length) {
@@ -10320,17 +10387,19 @@ function initEventListeners() {
             isDraggingHandle.drawing.targetPrice = isDraggingHandle.origTarget + bDiff;
             isDraggingHandle.drawing.stopPrice = isDraggingHandle.origStop + bDiff;
             var timeScale = (chart && typeof chart.timeScale === "function") ? chart.timeScale() : null;
+            var dragAxisTimes = typeof getMainTimeAxis === "function" ? getMainTimeAxis() : [];
+            var dragTfSec = getActiveTimeframeSeconds();
             if (timeScale && typeof timeScale.coordinateToTime === "function" && typeof timeScale.timeToCoordinate === "function") {
-              var origAnchorX = timeScale.timeToCoordinate(isDraggingHandle.origTime);
+              var origAnchorX = safeTimeToCoordinate(timeScale, isDraggingHandle.origTime, dragAxisTimes, dragTfSec);
               if (origAnchorX !== null && !isNaN(origAnchorX)) {
                 var newAnchorX = origAnchorX + (x - (isDraggingHandle.startX || x));
-                var newT = timeScale.coordinateToTime(newAnchorX);
+                var newT = snapTimeFromCoordinate(timeScale, newAnchorX, dragAxisTimes, dragTfSec);
                 if (newT !== null && newT !== undefined) {
                   isDraggingHandle.drawing.time = newT;
                 }
               }
             } else if (timeScale && typeof timeScale.coordinateToTime === "function") {
-              var newT = timeScale.coordinateToTime(x);
+              var newT = snapTimeFromCoordinate(timeScale, x, dragAxisTimes, dragTfSec);
               if (newT !== null && newT !== undefined) {
                 isDraggingHandle.drawing.time = newT;
               }
